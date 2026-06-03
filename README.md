@@ -15,6 +15,7 @@ LowEnd Circuit는 저역 보강과 간단한 공간음향 처리를 제공하는
 
 - DAW/플러그인 호스트용 `VST3`, macOS `AU`, 일반 데스크톱용 `Standalone` 앱을 빌드할 수 있습니다.
 - macOS에서는 `LowEnd Native Audio` 앱으로 컴퓨터 전체 소리 또는 특정 앱 소리에 처리를 적용할 수 있습니다.
+- Windows에서는 `Standalone.exe`와 `VST3` 플러그인을 제공합니다. Windows 전체 시스템 오디오 적용 앱은 아직 별도 개발이 필요합니다.
 - `LowEnd`는 저역 보강 강도, `Body`는 서브 저역의 두께, `Output`은 최종 출력 보정입니다.
 - `Spatial Stage`에서는 파란 청취자 포인트를 드래그하거나 `나 X`, `나 Z`, `Width` 값을 직접 입력해 공간감을 조정합니다.
 - `원위치` 버튼은 청취자 위치를 중앙 기준점으로 되돌립니다. `Width`와 `Space` 값은 유지됩니다.
@@ -56,6 +57,13 @@ build/LowEndCircuit_artefacts/Release/Standalone/LowEnd Circuit.app
 ```
 
 That standalone target is the GUI program version. It opens as a normal desktop window with large controls, preset buttons, and device routing through JUCE's standalone audio settings.
+
+On Windows, GitHub Releases provide:
+
+- `LowEnd-Circuit-Standalone-Windows-v0.1.0.zip`: normal desktop executable.
+- `LowEnd-Circuit-VST3-Windows-v0.1.0.zip`: VST3 plugin for DAWs and plugin hosts.
+
+Windows builds do not include the macOS-only native system-audio processor.
 
 See `docs/general-computer-use.md` for using the standalone app with ordinary computer audio from browsers, music players, games, and video apps.
 
