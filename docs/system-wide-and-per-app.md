@@ -38,8 +38,17 @@ The GUI version also includes a `Spatial Stage` panel:
 
 - Drag the blue listener point in the 3D view to move the listening position in real time.
 - Type exact `나 X`, `나 Z`, and `Width` meter values when you want repeatable settings.
+- Press `원위치` to reset only the listener position to `나 X 0.00`, `나 Z 0.00`.
 - `Width` is the virtual distance between the left and right front speakers. It moves the speaker nodes visually and changes the DSP distance/delay calculation.
 - `Space` blends the spatial processor with the original stereo signal. Higher values make distance, inter-ear delay, level difference, and crossfeed more obvious.
+
+한국어 설명:
+
+- `나 X`: 청취자의 좌우 위치입니다. 음수는 왼쪽, 양수는 오른쪽입니다.
+- `나 Z`: 청취자의 앞뒤 위치입니다. 양수는 스피커 쪽, 음수는 뒤쪽입니다.
+- `Width`: 좌우 가상 스피커 사이 거리입니다. 화면의 노란 스피커 간격과 실제 DSP 거리/딜레이 계산이 같이 바뀝니다.
+- `Space`: 원본 스테레오와 공간 처리 신호를 섞는 양입니다. 높일수록 거리감, 귀 사이 딜레이, 좌우 레벨 차이, 크로스피드가 더 강해집니다.
+- `원위치`: `Width`와 `Space`는 유지하고 청취자 위치만 중앙으로 되돌립니다.
 
 The spatial processor treats the left and right channels as front speakers, then calculates listener-ear distance differences, inter-ear delays, level differences, and crossfeed. It is meant for headphone/IEM listening and is not a room simulation reverb.
 

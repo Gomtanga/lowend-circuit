@@ -551,6 +551,13 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         title.frame = NSRect(x: 16, y: 594, width: 170, height: 26)
         view.addSubview(title)
 
+        let resetButton = NSButton(title: "원위치", target: self, action: #selector(resetSpatialPosition))
+        resetButton.bezelStyle = .rounded
+        resetButton.font = .systemFont(ofSize: 12, weight: .semibold)
+        resetButton.frame = NSRect(x: 220, y: 592, width: 78, height: 26)
+        resetButton.toolTip = "나 위치를 중앙 기준점으로 되돌립니다. Width와 Space 값은 유지됩니다."
+        view.addSubview(resetButton)
+
         spatialEnabledButton = NSButton(checkboxWithTitle: "공간음향", target: self, action: #selector(spatialControlChanged))
         spatialEnabledButton.frame = NSRect(x: 310, y: 592, width: 96, height: 26)
         spatialEnabledButton.state = .on
@@ -671,6 +678,14 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         updated.listenerX = settings.listenerX
         updated.listenerZ = settings.listenerZ
         updateSpatialControls(from: updated, notifyProcessor: true)
+    }
+
+    @objc private func resetSpatialPosition() {
+        var updated = spatialSettingsFromControls()
+        updated.listenerX = 0
+        updated.listenerZ = 0
+        updateSpatialControls(from: updated, notifyProcessor: true)
+        statusLabel.stringValue = "공간음향 위치를 원위치로 되돌렸습니다."
     }
 
     @objc private func modelChanged() {

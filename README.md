@@ -7,6 +7,19 @@ LowEnd Circuit is an open-source bass enhancement project with two parts:
 
 The project models general low-frequency compensation and virtual analog bass circuitry. It is not affiliated with, endorsed by, or based on the proprietary circuit of any hardware manufacturer.
 
+## 한국어 요약
+
+LowEnd Circuit는 저역 보강과 간단한 공간음향 처리를 제공하는 오픈소스 오디오 프로젝트입니다.
+
+- DAW/플러그인 호스트용 `VST3`, macOS `AU`, 일반 데스크톱용 `Standalone` 앱을 빌드할 수 있습니다.
+- macOS에서는 `LowEnd Native Audio` 앱으로 컴퓨터 전체 소리 또는 특정 앱 소리에 처리를 적용할 수 있습니다.
+- `LowEnd`는 저역 보강 강도, `Body`는 서브 저역의 두께, `Output`은 최종 출력 보정입니다.
+- `Spatial Stage`에서는 파란 청취자 포인트를 드래그하거나 `나 X`, `나 Z`, `Width` 값을 직접 입력해 공간감을 조정합니다.
+- `원위치` 버튼은 청취자 위치를 중앙 기준점으로 되돌립니다. `Width`와 `Space` 값은 유지됩니다.
+- `Width`는 좌우 가상 스피커 사이 거리이고, `Space`는 원본 스테레오와 공간 처리 신호를 섞는 양입니다.
+
+처음 사용할 때는 `IEM` 또는 `Gentle` 프리셋에서 시작하고, 공간음향은 `Space 25-45%`, `Width 1.4-1.8m` 근처를 권장합니다. 위상이 거칠거나 소리가 부자연스러우면 `Space`를 먼저 낮추세요.
+
 ## Legal And Licensing
 
 LowEnd Circuit is an independent open-source project. Product names, trademarks, and audio-circuit designs owned by third parties are not used as branding for this project.
@@ -59,7 +72,7 @@ It also has two models:
 - `Circuit`: virtual analog RC/op-amp style bass circuit model.
 - `Clean DSP`: the earlier filter-based bass enhancer.
 
-The native app also includes a `Spatial Stage` panel. Drag the blue `Me` point in the 3D view or type exact meter values for `Me X`, `Me Z`, and `Width`. The setting updates while system audio is running.
+The native app also includes a `Spatial Stage` panel. Drag the blue listener point in the 3D view or type exact meter values for `나 X`, `나 Z`, and `Width`. The `원위치` button returns the listener point to the center while keeping `Width` and `Space`. The setting updates while system audio is running.
 
 ## Starting point for tuning
 
