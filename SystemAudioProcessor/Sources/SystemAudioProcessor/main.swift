@@ -4,6 +4,15 @@ import AVFoundation
 import CoreAudio
 import Darwin
 import Foundation
+import SceneKit
+
+private struct SpatialSettings {
+    var enabled: Bool = true
+    var listenerX: Float = 0.0
+    var listenerZ: Float = 0.0
+    var speakerWidth: Float = 1.65
+    var amount: Float = 35.0
+}
 
 private struct Settings {
     var mode: Mode = .all
@@ -11,6 +20,7 @@ private struct Settings {
     var body: Float = 30.0
     var outputDb: Float = -1.5
     var dspModel: DSPModel = .circuit
+    var spatial: SpatialSettings = SpatialSettings()
 
     enum Mode {
         case all
@@ -54,6 +64,10 @@ private func check(_ status: OSStatus, _ label: String) throws {
     guard status == noErr else { throw AppError.osStatus(label, status) }
 }
 
+private func clamp(_ value: Float, _ lower: Float, _ upper: Float) -> Float {
+    min(max(value, lower), upper)
+}
+
 private func parseArguments() throws -> Settings {
     var settings = Settings()
     var bundleIDs: [String] = []
@@ -88,6 +102,31 @@ private func parseArguments() throws -> Settings {
                 throw AppError.message("--model needs clean or circuit")
             }
             settings.dspModel = model
+        case "--spatial":
+            guard let value = iterator.next() else {
+                throw AppError.message("--spatial needs on or off")
+            }
+            settings.spatial.enabled = ["on", "true", "1", "yes"].contains(value.lowercased())
+        case "--listener-x":
+            guard let value = iterator.next(), let number = Float(value) else {
+                throw AppError.message("--listener-x needs a number")
+            }
+            settings.spatial.listenerX = number
+        case "--listener-z":
+            guard let value = iterator.next(), let number = Float(value) else {
+                throw AppError.message("--listener-z needs a number")
+            }
+            settings.spatial.listenerZ = number
+        case "--stage-width":
+            guard let value = iterator.next(), let number = Float(value) else {
+                throw AppError.message("--stage-width needs a number")
+            }
+            settings.spatial.speakerWidth = number
+        case "--space":
+            guard let value = iterator.next(), let number = Float(value) else {
+                throw AppError.message("--space needs a number")
+            }
+            settings.spatial.amount = number
         case "--list-apps":
             settings.mode = .listApps
         case "--help", "-h":
@@ -106,7 +145,153 @@ private func parseArguments() throws -> Settings {
 
 @available(macOS 14.4, *)
 @MainActor
-private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
+private final class SpatialStageView: SCNView {
+    var onChange: ((SpatialSettings) -> Void)?
+
+    private let listenerNode = SCNNode()
+    private let leftSpeakerNode = SCNNode()
+    private let rightSpeakerNode = SCNNode()
+    private var settings = SpatialSettings()
+    private let xRange: Float = 3.0
+    private let zRange: Float = 2.8
+
+    override init(frame frameRect: NSRect, options: [String: Any]? = nil) {
+        super.init(frame: frameRect, options: options)
+        setupScene()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupScene()
+    }
+
+    func setSettings(_ newSettings: SpatialSettings) {
+        settings = newSettings
+        updateNodes()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        updateListener(from: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        updateListener(from: event)
+    }
+
+    private func setupScene() {
+        let scene = SCNScene()
+        self.scene = scene
+        backgroundColor = NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1)
+        allowsCameraControl = false
+        rendersContinuously = false
+
+        let cameraNode = SCNNode()
+        let camera = SCNCamera()
+        camera.usesOrthographicProjection = true
+        camera.orthographicScale = 6.2
+        cameraNode.camera = camera
+        cameraNode.position = SCNVector3(0, 6.2, 0)
+        cameraNode.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
+        scene.rootNode.addChildNode(cameraNode)
+        pointOfView = cameraNode
+
+        let floor = SCNNode(geometry: SCNPlane(width: 6.0, height: 5.6))
+        floor.geometry?.firstMaterial?.diffuse.contents = NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.15, alpha: 1)
+        floor.eulerAngles.x = -CGFloat.pi / 2
+        floor.position = SCNVector3(0, -0.025, 0)
+        scene.rootNode.addChildNode(floor)
+
+        addGrid(to: scene)
+        addFrontMarker(to: scene)
+
+        let speakerMaterial = SCNMaterial()
+        speakerMaterial.diffuse.contents = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 1)
+        let speakerGeometry = SCNBox(width: 0.28, height: 0.22, length: 0.44, chamferRadius: 0.04)
+        speakerGeometry.materials = [speakerMaterial]
+        leftSpeakerNode.geometry = speakerGeometry.copy() as? SCNGeometry
+        rightSpeakerNode.geometry = speakerGeometry.copy() as? SCNGeometry
+        scene.rootNode.addChildNode(leftSpeakerNode)
+        scene.rootNode.addChildNode(rightSpeakerNode)
+
+        let listenerMaterial = SCNMaterial()
+        listenerMaterial.diffuse.contents = NSColor(calibratedRed: 0.34, green: 0.80, blue: 0.92, alpha: 1)
+        listenerNode.geometry = SCNSphere(radius: 0.14)
+        listenerNode.geometry?.materials = [listenerMaterial]
+        scene.rootNode.addChildNode(listenerNode)
+
+        addLabel("나", at: SCNVector3(0.18, 0.02, -0.30), color: NSColor(calibratedRed: 0.34, green: 0.80, blue: 0.92, alpha: 1), parent: listenerNode)
+        updateNodes()
+    }
+
+    private func addGrid(to scene: SCNScene) {
+        let material = SCNMaterial()
+        material.diffuse.contents = NSColor(calibratedRed: 0.24, green: 0.28, blue: 0.34, alpha: 0.72)
+
+        for x in stride(from: -3.0, through: 3.0, by: 0.75) {
+            let line = SCNNode(geometry: SCNBox(width: 0.012, height: 0.012, length: 5.6, chamferRadius: 0))
+            line.geometry?.materials = [material]
+            line.position = SCNVector3(Float(x), 0, 0)
+            scene.rootNode.addChildNode(line)
+        }
+
+        for z in stride(from: -2.8, through: 2.8, by: 0.7) {
+            let line = SCNNode(geometry: SCNBox(width: 6.0, height: 0.012, length: 0.012, chamferRadius: 0))
+            line.geometry?.materials = [material]
+            line.position = SCNVector3(0, 0, Float(z))
+            scene.rootNode.addChildNode(line)
+        }
+    }
+
+    private func addFrontMarker(to scene: SCNScene) {
+        let material = SCNMaterial()
+        material.diffuse.contents = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 0.85)
+        let marker = SCNNode(geometry: SCNBox(width: 5.5, height: 0.026, length: 0.035, chamferRadius: 0))
+        marker.geometry?.materials = [material]
+        marker.position = SCNVector3(0, 0.01, 2.1)
+        scene.rootNode.addChildNode(marker)
+        addLabel("Front speakers", at: SCNVector3(-1.38, 0.02, 2.26), color: .white, parent: scene.rootNode)
+    }
+
+    private func addLabel(_ text: String, at position: SCNVector3, color: NSColor, parent: SCNNode) {
+        let geometry = SCNText(string: text, extrusionDepth: 0.004)
+        geometry.font = .systemFont(ofSize: 0.16, weight: .semibold)
+        geometry.flatness = 0.4
+        geometry.firstMaterial?.diffuse.contents = color
+
+        let node = SCNNode(geometry: geometry)
+        node.position = position
+        node.eulerAngles.x = -CGFloat.pi / 2
+        node.scale = SCNVector3(1, 1, 1)
+        parent.addChildNode(node)
+    }
+
+    private func updateNodes() {
+        let halfWidth = clamp(settings.speakerWidth, 0.6, 3.0) / 2
+        leftSpeakerNode.position = SCNVector3(-halfWidth, 0.11, 1.8)
+        rightSpeakerNode.position = SCNVector3(halfWidth, 0.11, 1.8)
+        listenerNode.position = SCNVector3(
+            clamp(settings.listenerX, -xRange, xRange),
+            0.14,
+            clamp(settings.listenerZ, -zRange, zRange)
+        )
+    }
+
+    private func updateListener(from event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.width > 1, bounds.height > 1 else { return }
+
+        let normalizedX = Float(point.x / bounds.width)
+        let normalizedZ = Float(point.y / bounds.height)
+        settings.listenerX = clamp((normalizedX - 0.5) * xRange * 2, -xRange, xRange)
+        settings.listenerZ = clamp((normalizedZ - 0.5) * zRange * 2, -zRange, zRange)
+        updateNodes()
+        onChange?(settings)
+    }
+}
+
+@available(macOS 14.4, *)
+@MainActor
+private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     private var window: NSWindow!
     private var statusLabel: NSTextField!
     private var bundleField: NSTextField!
@@ -118,6 +303,13 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
     private var bodyValueLabel: NSTextField!
     private var outputValueLabel: NSTextField!
     private var modelPopup: NSPopUpButton!
+    private var spatialEnabledButton: NSButton!
+    private var spatialStageView: SpatialStageView!
+    private var listenerXField: NSTextField!
+    private var listenerZField: NSTextField!
+    private var speakerWidthField: NSTextField!
+    private var spatialAmountSlider: NSSlider!
+    private var spatialAmountValueLabel: NSTextField!
     private var processor: SystemAudioProcessor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -130,7 +322,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildWindow() {
         print("Opening LowEnd Native Audio control window.")
-        let rect = NSRect(x: 0, y: 0, width: 740, height: 760)
+        let rect = NSRect(x: 0, y: 0, width: 1080, height: 760)
         window = NSWindow(
             contentRect: rect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -153,6 +345,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
         let subtitle = makeLabel("시스템 전체 또는 특정 앱 오디오에 저역 보강 처리를 적용합니다.", size: 14, weight: .regular)
         subtitle.frame = NSRect(x: 30, y: 674, width: 680, height: 22)
         content.addSubview(subtitle)
+
+        let spatial = makeSpatialSection()
+        spatial.frame = NSRect(x: 740, y: 28, width: 310, height: 636)
+        content.addSubview(spatial)
 
         statusLabel = makeLabel("대기 중", size: 14, weight: .semibold)
         statusLabel.textColor = .white
@@ -311,6 +507,65 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
         return view
     }
 
+    private func makeSpatialSection() -> NSView {
+        let view = NSView(frame: .zero)
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor(calibratedRed: 0.12, green: 0.14, blue: 0.17, alpha: 1).cgColor
+        view.layer?.cornerRadius = 8
+
+        let title = makeLabel("Spatial Stage", size: 18, weight: .bold)
+        title.textColor = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 1)
+        title.frame = NSRect(x: 16, y: 594, width: 170, height: 26)
+        view.addSubview(title)
+
+        spatialEnabledButton = NSButton(checkboxWithTitle: "공간음향", target: self, action: #selector(spatialControlChanged))
+        spatialEnabledButton.frame = NSRect(x: 198, y: 592, width: 96, height: 26)
+        spatialEnabledButton.state = .on
+        spatialEnabledButton.toolTip = "3D 위치 기반 거리, 지연, 크로스피드 처리를 켜거나 끕니다."
+        view.addSubview(spatialEnabledButton)
+
+        let description = makeLabel("파란 점을 드래그하거나 아래 숫자를 입력하세요.", size: 12, weight: .regular)
+        description.frame = NSRect(x: 16, y: 566, width: 278, height: 20)
+        view.addSubview(description)
+
+        spatialStageView = SpatialStageView(frame: NSRect(x: 16, y: 270, width: 278, height: 282))
+        spatialStageView.wantsLayer = true
+        spatialStageView.layer?.cornerRadius = 6
+        spatialStageView.onChange = { [weak self] settings in
+            self?.spatialStageChanged(settings)
+        }
+        view.addSubview(spatialStageView)
+
+        listenerXField = makeNumberField(value: 0.0)
+        listenerZField = makeNumberField(value: 0.0)
+        speakerWidthField = makeNumberField(value: 1.65)
+        addNumberRow(to: view, y: 226, title: "나 X", field: listenerXField, suffix: "m", tooltip: "좌우 위치입니다. 음수는 왼쪽, 양수는 오른쪽입니다.")
+        addNumberRow(to: view, y: 188, title: "나 Z", field: listenerZField, suffix: "m", tooltip: "앞뒤 위치입니다. 양수는 스피커 쪽, 음수는 뒤쪽입니다.")
+        addNumberRow(to: view, y: 150, title: "Width", field: speakerWidthField, suffix: "m", tooltip: "가상 좌우 스피커 사이의 거리입니다.")
+
+        let amountLabel = makeLabel("Space", size: 13, weight: .semibold)
+        amountLabel.frame = NSRect(x: 16, y: 104, width: 62, height: 24)
+        view.addSubview(amountLabel)
+
+        spatialAmountSlider = NSSlider(value: 35, minValue: 0, maxValue: 100, target: self, action: #selector(spatialControlChanged))
+        spatialAmountSlider.isContinuous = true
+        spatialAmountSlider.frame = NSRect(x: 82, y: 104, width: 146, height: 24)
+        spatialAmountSlider.toolTip = "원본 스테레오와 공간 처리 신호의 혼합량입니다."
+        view.addSubview(spatialAmountSlider)
+
+        spatialAmountValueLabel = makeLabel("", size: 13, weight: .semibold)
+        spatialAmountValueLabel.frame = NSRect(x: 238, y: 104, width: 56, height: 24)
+        view.addSubview(spatialAmountValueLabel)
+
+        let hint = makeLabel("권장 시작점: Width 1.4-1.8m, Space 25-45%. IEM에서 노이즈나 위상이 거칠면 Space를 낮추세요.", size: 11.5, weight: .regular)
+        hint.frame = NSRect(x: 16, y: 24, width: 278, height: 62)
+        hint.maximumNumberOfLines = 3
+        view.addSubview(hint)
+
+        updateSpatialControls(from: spatialSettingsFromControls(), notifyProcessor: false)
+        return view
+    }
+
     private func makeSlider(value: Double, min: Double, max: Double) -> NSSlider {
         let slider = NSSlider(value: value, minValue: min, maxValue: max, target: self, action: #selector(sliderChanged))
         slider.isContinuous = true
@@ -327,12 +582,59 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
         view.addSubview(valueLabel)
     }
 
+    private func makeNumberField(value: Double) -> NSTextField {
+        let field = NSTextField(frame: .zero)
+        field.stringValue = String(format: "%.2f", value)
+        field.alignment = .right
+        field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        field.target = self
+        field.action = #selector(spatialFieldChanged)
+        field.delegate = self
+        return field
+    }
+
+    private func addNumberRow(to view: NSView,
+                              y: CGFloat,
+                              title: String,
+                              field: NSTextField,
+                              suffix: String,
+                              tooltip: String) {
+        let label = makeLabel(title, size: 13, weight: .semibold)
+        label.frame = NSRect(x: 16, y: y, width: 62, height: 24)
+        field.frame = NSRect(x: 82, y: y - 2, width: 146, height: 28)
+        field.toolTip = tooltip
+        let unit = makeLabel(suffix, size: 12, weight: .regular)
+        unit.frame = NSRect(x: 238, y: y, width: 44, height: 24)
+        view.addSubview(label)
+        view.addSubview(field)
+        view.addSubview(unit)
+    }
+
     @objc private func sliderChanged() {
         updateSliderLabels()
         processor?.updateDSP(intensity: Float(intensitySlider.doubleValue),
                              body: Float(bodySlider.doubleValue),
                              outputDb: Float(outputSlider.doubleValue),
                              dspModel: selectedDSPModel())
+    }
+
+    @objc private func spatialControlChanged() {
+        updateSpatialControls(from: spatialSettingsFromControls(), notifyProcessor: true)
+    }
+
+    @objc private func spatialFieldChanged() {
+        spatialControlChanged()
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        spatialControlChanged()
+    }
+
+    private func spatialStageChanged(_ settings: SpatialSettings) {
+        var updated = spatialSettingsFromControls()
+        updated.listenerX = settings.listenerX
+        updated.listenerZ = settings.listenerZ
+        updateSpatialControls(from: updated, notifyProcessor: true)
     }
 
     @objc private func modelChanged() {
@@ -344,6 +646,30 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
         intensityValueLabel.stringValue = "\(Int(intensitySlider.doubleValue.rounded()))%"
         bodyValueLabel.stringValue = "\(Int(bodySlider.doubleValue.rounded()))%"
         outputValueLabel.stringValue = String(format: "%.1f dB", outputSlider.doubleValue)
+    }
+
+    private func spatialSettingsFromControls() -> SpatialSettings {
+        SpatialSettings(
+            enabled: spatialEnabledButton?.state == .on,
+            listenerX: clamp(Float(listenerXField?.doubleValue ?? 0), -3.0, 3.0),
+            listenerZ: clamp(Float(listenerZField?.doubleValue ?? 0), -2.8, 2.8),
+            speakerWidth: clamp(Float(speakerWidthField?.doubleValue ?? 1.65), 0.6, 3.0),
+            amount: clamp(Float(spatialAmountSlider?.doubleValue ?? 35.0), 0, 100)
+        )
+    }
+
+    private func updateSpatialControls(from settings: SpatialSettings, notifyProcessor: Bool) {
+        spatialEnabledButton.state = settings.enabled ? .on : .off
+        listenerXField.stringValue = String(format: "%.2f", settings.listenerX)
+        listenerZField.stringValue = String(format: "%.2f", settings.listenerZ)
+        speakerWidthField.stringValue = String(format: "%.2f", settings.speakerWidth)
+        spatialAmountSlider.doubleValue = Double(settings.amount)
+        spatialAmountValueLabel.stringValue = "\(Int(settings.amount.rounded()))%"
+        spatialStageView.setSettings(settings)
+
+        if notifyProcessor {
+            processor?.updateSpatial(settings)
+        }
     }
 
     @objc private func applyIEMPreset() {
@@ -393,7 +719,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
                  intensity: Float(intensitySlider.doubleValue),
                  body: Float(bodySlider.doubleValue),
                  outputDb: Float(outputSlider.doubleValue),
-                 dspModel: selectedDSPModel())
+                 dspModel: selectedDSPModel(),
+                 spatial: spatialSettingsFromControls())
     }
 
     private func selectedDSPModel() -> Settings.DSPModel {
@@ -463,6 +790,11 @@ private func printUsageAndExit() -> Never {
       --body 0...100
       --output dB
       --model circuit|clean
+      --spatial on|off
+      --listener-x meters
+      --listener-z meters
+      --stage-width meters
+      --space 0...100
     """)
     exit(0)
 }
@@ -695,6 +1027,119 @@ private final class VirtualCircuitBassDSP: BassProcessor {
     }
 }
 
+private final class DelayLine {
+    private var buffer: [Float]
+    private var writeIndex = 0
+
+    init(capacity: Int) {
+        buffer = Array(repeating: 0, count: max(capacity, 32))
+    }
+
+    func process(_ input: Float, delaySamples: Int) -> Float {
+        let delay = min(max(delaySamples, 0), buffer.count - 1)
+        let readIndex = (writeIndex - delay + buffer.count) % buffer.count
+        let output = buffer[readIndex]
+        buffer[writeIndex] = input
+        writeIndex = (writeIndex + 1) % buffer.count
+        return output
+    }
+}
+
+private final class Spatializer {
+    private struct Path {
+        var delaySamples: Int = 0
+        var gain: Float = 1
+    }
+
+    private let sampleRate: Float
+    private let leftToLeft = DelayLine(capacity: 2048)
+    private let leftToRight = DelayLine(capacity: 2048)
+    private let rightToLeft = DelayLine(capacity: 2048)
+    private let rightToRight = DelayLine(capacity: 2048)
+    private var settings: SpatialSettings
+    private var ll = Path()
+    private var lr = Path()
+    private var rl = Path()
+    private var rr = Path()
+
+    init(sampleRate: Float, settings: SpatialSettings) {
+        self.sampleRate = sampleRate
+        self.settings = settings
+        recomputePaths()
+    }
+
+    func update(settings: SpatialSettings) {
+        self.settings = settings
+        recomputePaths()
+    }
+
+    func process(left: Float, right: Float) -> (Float, Float) {
+        let amount = clamp(settings.amount / 100, 0, 1)
+        guard settings.enabled, amount > 0.001 else {
+            return (left, right)
+        }
+
+        let wetLeft =
+            leftToLeft.process(left, delaySamples: ll.delaySamples) * ll.gain +
+            rightToLeft.process(right, delaySamples: rl.delaySamples) * rl.gain
+        let wetRight =
+            rightToRight.process(right, delaySamples: rr.delaySamples) * rr.gain +
+            leftToRight.process(left, delaySamples: lr.delaySamples) * lr.gain
+
+        let trim: Float = 0.82
+        let outLeft = left * (1 - amount) + wetLeft * trim * amount
+        let outRight = right * (1 - amount) + wetRight * trim * amount
+        return (tanh(outLeft * 1.02) / 1.02, tanh(outRight * 1.02) / 1.02)
+    }
+
+    private func recomputePaths() {
+        let width = clamp(settings.speakerWidth, 0.6, 3.0)
+        let listenerX = clamp(settings.listenerX, -3.0, 3.0)
+        let listenerZ = clamp(settings.listenerZ, -2.8, 2.8)
+        let earOffset: Float = 0.09
+        let speakerZ: Float = 1.8
+        let amount = clamp(settings.amount / 100, 0, 1)
+        let crossfeed = 0.16 + amount * 0.30
+
+        let leftSpeaker = (x: -width / 2, z: speakerZ)
+        let rightSpeaker = (x: width / 2, z: speakerZ)
+        let leftEar = (x: listenerX - earOffset, z: listenerZ)
+        let rightEar = (x: listenerX + earOffset, z: listenerZ)
+
+        let llDistance = distance(leftSpeaker, leftEar)
+        let lrDistance = distance(leftSpeaker, rightEar)
+        let rlDistance = distance(rightSpeaker, leftEar)
+        let rrDistance = distance(rightSpeaker, rightEar)
+        let minimumDistance = min(llDistance, lrDistance, rlDistance, rrDistance)
+
+        let llGain = inverseDistanceGain(llDistance)
+        let rrGain = inverseDistanceGain(rrDistance)
+        let lrGain = inverseDistanceGain(lrDistance) * crossfeed
+        let rlGain = inverseDistanceGain(rlDistance) * crossfeed
+        let normalizer = 1 / max((llGain + rrGain) * 0.5, 0.001)
+
+        ll = Path(delaySamples: delaySamples(for: llDistance - minimumDistance), gain: llGain * normalizer)
+        lr = Path(delaySamples: delaySamples(for: lrDistance - minimumDistance), gain: lrGain * normalizer)
+        rl = Path(delaySamples: delaySamples(for: rlDistance - minimumDistance), gain: rlGain * normalizer)
+        rr = Path(delaySamples: delaySamples(for: rrDistance - minimumDistance), gain: rrGain * normalizer)
+    }
+
+    private func distance(_ a: (x: Float, z: Float), _ b: (x: Float, z: Float)) -> Float {
+        let dx = a.x - b.x
+        let dz = a.z - b.z
+        return max(sqrt(dx * dx + dz * dz), 0.12)
+    }
+
+    private func inverseDistanceGain(_ meters: Float) -> Float {
+        1 / max(0.45 + meters * 0.62, 0.2)
+    }
+
+    private func delaySamples(for meters: Float) -> Int {
+        let speedOfSound: Float = 343.0
+        return Int((max(meters, 0) / speedOfSound * sampleRate).rounded())
+    }
+}
+
 @available(macOS 14.4, *)
 private final class SystemAudioProcessor {
     private let settings: Settings
@@ -712,6 +1157,7 @@ private final class SystemAudioProcessor {
         body: settings.body,
         outputDb: settings.outputDb
     )
+    private lazy var spatializer = Spatializer(sampleRate: Float(sampleRate), settings: settings.spatial)
 
     init(settings: Settings) {
         self.settings = settings
@@ -727,6 +1173,12 @@ private final class SystemAudioProcessor {
     func updateDSP(intensity: Float, body: Float, outputDb: Float, dspModel: Settings.DSPModel) {
         dspLock.lock()
         dsp = makeBassProcessor(dspModel: dspModel, intensity: intensity, body: body, outputDb: outputDb)
+        dspLock.unlock()
+    }
+
+    func updateSpatial(_ settings: SpatialSettings) {
+        dspLock.lock()
+        spatializer.update(settings: settings)
         dspLock.unlock()
     }
 
@@ -904,8 +1356,9 @@ private final class SystemAudioProcessor {
            let rightData = buffers[1].mData?.assumingMemoryBound(to: Float.self) {
             for frame in 0..<frameCount {
                 let processed = dsp.process(left: leftData[frame], right: rightData[frame])
-                output[frame * 2] = processed.0
-                output[frame * 2 + 1] = processed.1
+                let spatial = spatializer.process(left: processed.0, right: processed.1)
+                output[frame * 2] = spatial.0
+                output[frame * 2 + 1] = spatial.1
             }
         } else if first.mNumberChannels == 2,
                   let interleaved = first.mData?.assumingMemoryBound(to: Float.self) {
@@ -914,14 +1367,16 @@ private final class SystemAudioProcessor {
             output.reserveCapacity(stereoFrames * 2)
             for frame in 0..<stereoFrames {
                 let processed = dsp.process(left: interleaved[frame * 2], right: interleaved[frame * 2 + 1])
-                output.append(processed.0)
-                output.append(processed.1)
+                let spatial = spatializer.process(left: processed.0, right: processed.1)
+                output.append(spatial.0)
+                output.append(spatial.1)
             }
         } else if let mono = first.mData?.assumingMemoryBound(to: Float.self) {
             for frame in 0..<frameCount {
                 let processed = dsp.process(left: mono[frame], right: mono[frame])
-                output[frame * 2] = processed.0
-                output[frame * 2 + 1] = processed.1
+                let spatial = spatializer.process(left: processed.0, right: processed.1)
+                output[frame * 2] = spatial.0
+                output[frame * 2 + 1] = spatial.1
             }
         }
 

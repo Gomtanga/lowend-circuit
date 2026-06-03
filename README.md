@@ -19,6 +19,7 @@ This repository is licensed under `AGPL-3.0-or-later`. JUCE is fetched at build 
 - `Body`: blends in a controlled low-passed soft-saturated sub component.
 - `Mix`: parallel wet/dry blend.
 - `Output`: final trim before a gentle tanh safety stage.
+- `Spatial Stage`: native macOS app only. Adds a drag-controlled 3D listener position with distance, inter-ear delay, level difference, and crossfeed processing.
 
 This is an original approximation, not an emulation endorsed by or affiliated with any hardware manufacturer.
 
@@ -57,6 +58,8 @@ It also has two models:
 
 - `Circuit`: virtual analog RC/op-amp style bass circuit model.
 - `Clean DSP`: the earlier filter-based bass enhancer.
+
+The native app also includes a `Spatial Stage` panel. Drag the blue `Me` point in the 3D view or type exact meter values for `Me X`, `Me Z`, and `Width`. The setting updates while system audio is running.
 
 ## Starting point for tuning
 

@@ -58,3 +58,12 @@ For everyday listening on macOS, the least fussy path is:
 4. Press `전체 시스템 적용`.
 
 This is how the plugin can be used with browsers, music players, games, and video apps.
+
+The native app also has a `Spatial Stage` panel. Drag the blue `Me` point to move the listener in real time, or enter exact values:
+
+- `나 X`: listener left/right position in meters.
+- `나 Z`: listener front/back position in meters.
+- `Width`: virtual speaker spacing in meters.
+- `Space`: blend amount for the spatial processing.
+
+For IEMs, start around `Width 1.4-1.8m` and `Space 25-45%`. If the image feels phasey or noisy, reduce `Space` first.
