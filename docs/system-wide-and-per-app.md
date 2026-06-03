@@ -1,0 +1,86 @@
+# System-Wide And Per-App Use
+
+## Whole-computer audio, no BlackHole
+
+The project now includes a native macOS system-audio processor. It uses Apple's Core Audio Process Tap API, so it does not need BlackHole, Loopback, Soundflower, or a separate virtual audio cable.
+
+Signal path:
+
+```text
+macOS app/system output -> Core Audio Process Tap -> XBass DSP -> default speakers/headphones/DAC
+```
+
+Build the native processor:
+
+```sh
+scripts/build-native-system-audio-app.sh
+```
+
+Run it on all system audio:
+
+```sh
+scripts/run-native-system-wide-xbass.sh
+```
+
+The first run may ask for macOS permission to record system audio. Allow it in System Settings if prompted.
+
+If enabling system-wide mode makes the computer silent:
+
+1. Stop processing in the app.
+2. Open System Settings.
+3. Go to Privacy & Security.
+4. Allow `XBass Native System Audio` under audio/system-audio recording permissions if macOS shows it there.
+5. Reopen the app and press `전체 시스템 적용` again.
+
+The GUI version includes `XBass`, `Body`, and `Output` sliders. Changes apply while processing is running.
+
+Preset buttons:
+
+- `IEM`: low-noise starting point for sensitive earphones.
+- `Gentle`: light bass support for long listening.
+- `XBass`: balanced default starting point.
+- `Deep`: stronger bass, now tuned with less circuit drive than the first version.
+- `Clear`: near-bypass reference point.
+
+Slider meanings:
+
+- `XBass`: bass boost strength.
+- `Body`: added low-end thickness.
+- `Output`: final level trim. Lower this if the sound feels too loud or compressed.
+
+Model selector:
+
+- `Circuit`: virtual analog model using RC-style bass nodes and a soft op-amp stage. This is the default.
+- `Clean DSP`: the earlier filter-based bass enhancer. Use it when you want a cleaner, more direct low-shelf sound.
+
+For sensitive IEMs, start with `IEM` or `Gentle`. If you hear roughness, lower `Body` first, then lower `XBass`, and keep `Output` around `-3 dB` to `-5 dB`.
+
+## Only one application
+
+List running apps and bundle IDs:
+
+```sh
+scripts/list-native-audio-apps.sh
+```
+
+Run XBass only on one app:
+
+```sh
+scripts/run-native-app-xbass.sh com.spotify.client
+```
+
+You can also use the binary directly:
+
+```sh
+build/XBassInspired_artefacts/Release/NativeSystemAudio/XBass\ Native\ System\ Audio.app/Contents/MacOS/XBass\ Native\ System\ Audio --bundle-id com.spotify.client
+```
+
+## Notes
+
+- The native processor runs until you press `Ctrl-C`.
+- Per-app mode uses bundle IDs. Some apps produce sound from helper processes with different bundle IDs, so you may need to list apps while audio is playing and choose the audible helper.
+- The current native processor is intentionally simple: it captures, applies the XBass DSP, and plays to the current default output device.
+
+## Virtual-device fallback
+
+The older BlackHole scripts are still included as a fallback for systems or workflows that prefer virtual audio devices.

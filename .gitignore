@@ -1,0 +1,27 @@
+.DS_Store
+
+# Build artefacts
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# JUCE/plugin output bundles
+*.app/
+*.component/
+*.vst3/
+*.aaxplugin/
+*.lv2/
+
+# Swift Package Manager build output
+.build/
+.swiftpm/
+
+# Local routing state
+.xbass-last-output
+
+# Logs and scratch files
+*.log
+*.tmp
