@@ -151,6 +151,7 @@ private final class SpatialStageView: SCNView {
     private let listenerNode = SCNNode()
     private let leftSpeakerNode = SCNNode()
     private let rightSpeakerNode = SCNNode()
+    private let cameraNode = SCNNode()
     private var settings = SpatialSettings()
     private let xRange: Float = 3.0
     private let zRange: Float = 2.8
@@ -170,6 +171,11 @@ private final class SpatialStageView: SCNView {
         updateNodes()
     }
 
+    override func layout() {
+        super.layout()
+        updateCameraScale()
+    }
+
     override func mouseDown(with event: NSEvent) {
         updateListener(from: event)
     }
@@ -185,15 +191,14 @@ private final class SpatialStageView: SCNView {
         allowsCameraControl = false
         rendersContinuously = false
 
-        let cameraNode = SCNNode()
         let camera = SCNCamera()
         camera.usesOrthographicProjection = true
-        camera.orthographicScale = 6.2
         cameraNode.camera = camera
         cameraNode.position = SCNVector3(0, 6.2, 0)
-        cameraNode.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
+        cameraNode.look(at: SCNVector3(0, 0, 0), up: SCNVector3(0, 0, 1), localFront: SCNVector3(0, 0, -1))
         scene.rootNode.addChildNode(cameraNode)
         pointOfView = cameraNode
+        updateCameraScale()
 
         let floor = SCNNode(geometry: SCNPlane(width: 6.0, height: 5.6))
         floor.geometry?.firstMaterial?.diffuse.contents = NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.15, alpha: 1)
@@ -221,6 +226,14 @@ private final class SpatialStageView: SCNView {
 
         addLabel("나", at: SCNVector3(0.18, 0.02, -0.30), color: NSColor(calibratedRed: 0.34, green: 0.80, blue: 0.92, alpha: 1), parent: listenerNode)
         updateNodes()
+    }
+
+    private func updateCameraScale() {
+        guard bounds.width > 1, bounds.height > 1 else { return }
+        let aspect = Float(bounds.width / bounds.height)
+        let padding: Float = 0.12
+        let halfHeight = max(zRange + padding, (xRange + padding) / max(aspect, 0.2))
+        cameraNode.camera?.orthographicScale = CGFloat(halfHeight)
     }
 
     private func addGrid(to scene: SCNScene) {
@@ -277,15 +290,28 @@ private final class SpatialStageView: SCNView {
     }
 
     private func updateListener(from event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        guard bounds.width > 1, bounds.height > 1 else { return }
-
-        let normalizedX = Float(point.x / bounds.width)
-        let normalizedZ = Float(point.y / bounds.height)
-        settings.listenerX = clamp((normalizedX - 0.5) * xRange * 2, -xRange, xRange)
-        settings.listenerZ = clamp((normalizedZ - 0.5) * zRange * 2, -zRange, zRange)
+        guard let point = stagePoint(from: event) else { return }
+        settings.listenerX = clamp(Float(point.x), -xRange, xRange)
+        settings.listenerZ = clamp(Float(point.z), -zRange, zRange)
         updateNodes()
         onChange?(settings)
+    }
+
+    private func stagePoint(from event: NSEvent) -> SCNVector3? {
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(point) else { return nil }
+
+        let near = unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 0))
+        let far = unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 1))
+        let dy = far.y - near.y
+        guard abs(dy) > 0.0001 else { return nil }
+
+        let t = -near.y / dy
+        return SCNVector3(
+            near.x + (far.x - near.x) * t,
+            0,
+            near.z + (far.z - near.z) * t
+        )
     }
 }
 
