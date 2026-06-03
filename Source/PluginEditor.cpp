@@ -8,7 +8,7 @@ constexpr auto mixId = "mix";
 constexpr auto outputId = "output";
 }
 
-XBassInspiredAudioProcessorEditor::XBassInspiredAudioProcessorEditor (XBassInspiredAudioProcessor& p)
+LowEndCircuitAudioProcessorEditor::LowEndCircuitAudioProcessorEditor (LowEndCircuitAudioProcessor& p)
     : AudioProcessorEditor (&p), audioProcessor (p)
 {
     setResizable (true, true);
@@ -23,7 +23,7 @@ XBassInspiredAudioProcessorEditor::XBassInspiredAudioProcessorEditor (XBassInspi
     for (auto* slider : { &intensitySlider, &bodySlider, &mixSlider, &outputSlider })
         addAndMakeVisible (*slider);
 
-    intensityLabel.setText ("XBass", juce::dontSendNotification);
+    intensityLabel.setText ("LowEnd", juce::dontSendNotification);
     bodyLabel.setText ("Body", juce::dontSendNotification);
     mixLabel.setText ("Mix", juce::dontSendNotification);
     outputLabel.setText ("Output", juce::dontSendNotification);
@@ -31,18 +31,18 @@ XBassInspiredAudioProcessorEditor::XBassInspiredAudioProcessorEditor (XBassInspi
     for (auto* label : { &intensityLabel, &bodyLabel, &mixLabel, &outputLabel })
         styleLabel (*label);
 
-    statusLabel.setText ("System-wide mode: set macOS output to BlackHole, then set this app input to BlackHole.",
+    statusLabel.setText ("Standalone mode: choose input and output devices from the app audio settings.",
                          juce::dontSendNotification);
     statusLabel.setJustificationType (juce::Justification::centred);
     statusLabel.setColour (juce::Label::textColourId, juce::Colour (0xffb9c1cc));
     statusLabel.setMinimumHorizontalScale (0.72f);
     addAndMakeVisible (statusLabel);
 
-    for (auto* button : { &gentleButton, &xbassButton, &deepButton, &resetButton })
+    for (auto* button : { &gentleButton, &lowendButton, &deepButton, &resetButton })
         styleButton (*button);
 
     gentleButton.onClick = [this] { applyPreset (28.0f, 12.0f, 100.0f, -1.0f); };
-    xbassButton.onClick = [this] { applyPreset (55.0f, 30.0f, 100.0f, -1.5f); };
+    lowendButton.onClick = [this] { applyPreset (55.0f, 30.0f, 100.0f, -1.5f); };
     deepButton.onClick = [this] { applyPreset (78.0f, 48.0f, 92.0f, -3.0f); };
     resetButton.onClick = [this] { applyPreset (0.0f, 0.0f, 100.0f, 0.0f); };
 
@@ -52,7 +52,7 @@ XBassInspiredAudioProcessorEditor::XBassInspiredAudioProcessorEditor (XBassInspi
     outputAttachment = std::make_unique<SliderAttachment> (audioProcessor.apvts, outputId, outputSlider);
 }
 
-void XBassInspiredAudioProcessorEditor::styleKnob (juce::Slider& slider, const juce::String& suffix)
+void LowEndCircuitAudioProcessorEditor::styleKnob (juce::Slider& slider, const juce::String& suffix)
 {
     slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
     slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 82, 24);
@@ -64,7 +64,7 @@ void XBassInspiredAudioProcessorEditor::styleKnob (juce::Slider& slider, const j
     slider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
 }
 
-void XBassInspiredAudioProcessorEditor::styleLabel (juce::Label& label)
+void LowEndCircuitAudioProcessorEditor::styleLabel (juce::Label& label)
 {
     label.setJustificationType (juce::Justification::centred);
     label.setColour (juce::Label::textColourId, juce::Colours::whitesmoke);
@@ -72,7 +72,7 @@ void XBassInspiredAudioProcessorEditor::styleLabel (juce::Label& label)
     addAndMakeVisible (label);
 }
 
-void XBassInspiredAudioProcessorEditor::styleButton (juce::TextButton& button)
+void LowEndCircuitAudioProcessorEditor::styleButton (juce::TextButton& button)
 {
     button.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff2a2f38));
     button.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xff3c4655));
@@ -81,7 +81,7 @@ void XBassInspiredAudioProcessorEditor::styleButton (juce::TextButton& button)
     addAndMakeVisible (button);
 }
 
-void XBassInspiredAudioProcessorEditor::applyPreset (float intensity, float body, float mix, float outputDb)
+void LowEndCircuitAudioProcessorEditor::applyPreset (float intensity, float body, float mix, float outputDb)
 {
     setParameterValue (intensityId, intensity);
     setParameterValue (bodyId, body);
@@ -89,7 +89,7 @@ void XBassInspiredAudioProcessorEditor::applyPreset (float intensity, float body
     setParameterValue (outputId, outputDb);
 }
 
-void XBassInspiredAudioProcessorEditor::setParameterValue (const juce::String& parameterId, float value)
+void LowEndCircuitAudioProcessorEditor::setParameterValue (const juce::String& parameterId, float value)
 {
     if (auto* parameter = audioProcessor.apvts.getParameter (parameterId))
     {
@@ -100,7 +100,7 @@ void XBassInspiredAudioProcessorEditor::setParameterValue (const juce::String& p
     }
 }
 
-void XBassInspiredAudioProcessorEditor::paint (juce::Graphics& g)
+void LowEndCircuitAudioProcessorEditor::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour (0xff15171b));
 
@@ -119,7 +119,7 @@ void XBassInspiredAudioProcessorEditor::paint (juce::Graphics& g)
 
     g.setColour (juce::Colour (0xfff6c04f));
     g.setFont (juce::FontOptions (31.0f, juce::Font::bold));
-    g.drawFittedText ("XBass Inspired", header.reduced (18, 10).removeFromTop (38),
+    g.drawFittedText ("LowEnd Circuit", header.reduced (18, 10).removeFromTop (38),
                       juce::Justification::centredLeft, 1);
 
     g.setColour (juce::Colour (0xffaeb4bd));
@@ -135,7 +135,7 @@ void XBassInspiredAudioProcessorEditor::paint (juce::Graphics& g)
     g.drawFittedText ("READY", statusBadge.toNearestInt(), juce::Justification::centred, 1);
 }
 
-void XBassInspiredAudioProcessorEditor::resized()
+void LowEndCircuitAudioProcessorEditor::resized()
 {
     auto area = getLocalBounds().reduced (30, 22);
     area.removeFromTop (112);
@@ -145,7 +145,7 @@ void XBassInspiredAudioProcessorEditor::resized()
     const auto presetWidth = (presetRow.getWidth() - presetGap * 3) / 4;
     gentleButton.setBounds (presetRow.removeFromLeft (presetWidth));
     presetRow.removeFromLeft (presetGap);
-    xbassButton.setBounds (presetRow.removeFromLeft (presetWidth));
+    lowendButton.setBounds (presetRow.removeFromLeft (presetWidth));
     presetRow.removeFromLeft (presetGap);
     deepButton.setBounds (presetRow.removeFromLeft (presetWidth));
     presetRow.removeFromLeft (presetGap);

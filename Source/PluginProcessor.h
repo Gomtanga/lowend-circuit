@@ -2,11 +2,11 @@
 
 #include <JuceHeader.h>
 
-class XBassInspiredAudioProcessor final : public juce::AudioProcessor
+class LowEndCircuitAudioProcessor final : public juce::AudioProcessor
 {
 public:
-    XBassInspiredAudioProcessor();
-    ~XBassInspiredAudioProcessor() override = default;
+    LowEndCircuitAudioProcessor();
+    ~LowEndCircuitAudioProcessor() override = default;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -50,5 +50,5 @@ private:
 
     double currentSampleRate = 44100.0;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (XBassInspiredAudioProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LowEndCircuitAudioProcessor)
 };

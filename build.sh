@@ -8,9 +8,9 @@ cmake --build build --config Release
 echo
 echo "Build finished."
 echo "Standalone app:"
-echo "  build/XBassInspired_artefacts/Release/Standalone/XBass Inspired.app"
+echo "  build/LowEndCircuit_artefacts/Release/Standalone/LowEnd Circuit.app"
 echo "Native system-audio app:"
-echo "  build/XBassInspired_artefacts/Release/NativeSystemAudio/XBass Native System Audio.app"
+echo "  build/LowEndCircuit_artefacts/Release/NativeSystemAudio/LowEnd Native Audio.app"
 echo
 echo "Plugin formats:"
-echo "  AU and VST3 are generated under build/XBassInspired_artefacts/Release/"
+echo "  AU and VST3 are generated under build/LowEndCircuit_artefacts/Release/"

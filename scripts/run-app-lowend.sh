@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-APP="$(cd "$(dirname "$0")/.." && pwd)/build/XBassInspired_artefacts/Release/NativeSystemAudio/XBass Native System Audio.app/Contents/MacOS/XBass Native System Audio"
+APP="$(cd "$(dirname "$0")/.." && pwd)/build/LowEndCircuit_artefacts/Release/NativeSystemAudio/LowEnd Native Audio.app/Contents/MacOS/LowEnd Native Audio"
 BUNDLE_ID="${1:-}"
 
 if [ ! -x "$APP" ]; then
@@ -11,7 +11,7 @@ if [ ! -x "$APP" ]; then
 fi
 
 if [ -z "$BUNDLE_ID" ]; then
-    echo "Usage: scripts/run-native-app-xbass.sh com.example.AppBundleID"
+    echo "Usage: scripts/run-app-lowend.sh com.example.AppBundleID"
     echo
     echo "Running apps:"
     "$APP" --list-apps

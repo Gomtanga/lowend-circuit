@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-APP="$(cd "$(dirname "$0")/.." && pwd)/build/XBassInspired_artefacts/Release/NativeSystemAudio/XBass Native System Audio.app/Contents/MacOS/XBass Native System Audio"
+APP="$(cd "$(dirname "$0")/.." && pwd)/build/LowEndCircuit_artefacts/Release/NativeSystemAudio/LowEnd Native Audio.app/Contents/MacOS/LowEnd Native Audio"
 
 if [ ! -x "$APP" ]; then
     echo "Native system-audio app was not found. Build it first:"

@@ -129,7 +129,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func buildWindow() {
-        print("Opening XBass Native System Audio control window.")
+        print("Opening LowEnd Native Audio control window.")
         let rect = NSRect(x: 0, y: 0, width: 740, height: 760)
         window = NSWindow(
             contentRect: rect,
@@ -137,7 +137,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "XBass Native System Audio"
+        window.title = "LowEnd Native Audio"
         window.center()
 
         let content = NSView(frame: rect)
@@ -145,12 +145,12 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
         content.layer?.backgroundColor = NSColor(calibratedRed: 0.09, green: 0.10, blue: 0.12, alpha: 1).cgColor
         window.contentView = content
 
-        let title = makeLabel("XBass Native System Audio", size: 28, weight: .bold)
+        let title = makeLabel("LowEnd Native Audio", size: 28, weight: .bold)
         title.textColor = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 1)
         title.frame = NSRect(x: 28, y: 702, width: 560, height: 34)
         content.addSubview(title)
 
-        let subtitle = makeLabel("BlackHole 없이 시스템 전체 또는 특정 앱 오디오에 XBass를 적용합니다.", size: 14, weight: .regular)
+        let subtitle = makeLabel("시스템 전체 또는 특정 앱 오디오에 저역 보강 처리를 적용합니다.", size: 14, weight: .regular)
         subtitle.frame = NSRect(x: 30, y: 674, width: 680, height: 22)
         content.addSubview(subtitle)
 
@@ -186,7 +186,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
         let startAll = makeButton("전체 시스템 적용", action: #selector(startAllAudio))
         startAll.frame = NSRect(x: 30, y: 286, width: 190, height: 42)
         content.addSubview(startAll)
-        startAll.toolTip = "Mac에서 나오는 대부분의 소리에 XBass를 적용합니다."
+        startAll.toolTip = "Mac에서 나오는 대부분의 소리에 LowEnd를 적용합니다."
 
         let stop = makeButton("중지", action: #selector(stopAudio))
         stop.frame = NSRect(x: 238, y: 286, width: 110, height: 42)
@@ -201,7 +201,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
         let startApp = makeButton("특정 앱 적용", action: #selector(startSelectedApp))
         startApp.frame = NSRect(x: 488, y: 230, width: 150, height: 40)
         content.addSubview(startApp)
-        startApp.toolTip = "입력한 bundle id를 가진 앱의 소리에만 XBass를 적용합니다."
+        startApp.toolTip = "입력한 bundle id를 가진 앱의 소리에만 LowEnd를 적용합니다."
 
         let listButton = makeButton("실행 중인 앱 목록 새로고침", action: #selector(refreshApps))
         listButton.frame = NSRect(x: 30, y: 184, width: 220, height: 38)
@@ -245,7 +245,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
         view.layer?.cornerRadius = 8
 
         let lines = [
-            "소리 흐름: Mac 소리 -> XBass 처리 -> 현재 선택된 스피커/헤드폰",
+            "소리 흐름: Mac 소리 -> LowEnd 처리 -> 현재 선택된 스피커/헤드폰",
             "전체 시스템 적용: 브라우저, 음악 앱, 게임 등 대부분의 출력에 적용",
             "특정 앱 적용: 아래 목록에서 bundle id를 확인하고 입력한 뒤 실행"
         ]
@@ -273,7 +273,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
         bodyValueLabel = makeLabel("", size: 13, weight: .semibold)
         outputValueLabel = makeLabel("", size: 13, weight: .semibold)
 
-        addSliderRow(to: view, y: 86, title: "XBass", slider: intensitySlider, valueLabel: intensityValueLabel)
+        addSliderRow(to: view, y: 86, title: "LowEnd", slider: intensitySlider, valueLabel: intensityValueLabel)
         addSliderRow(to: view, y: 48, title: "Body", slider: bodySlider, valueLabel: bodyValueLabel)
         addSliderRow(to: view, y: 10, title: "Output", slider: outputSlider, valueLabel: outputValueLabel)
         intensitySlider.toolTip = "저역 부스트의 강도입니다. 높일수록 베이스가 앞으로 나옵니다."
@@ -288,7 +288,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
         let buttons = [
             makeButton("IEM", action: #selector(applyIEMPreset)),
             makeButton("Gentle", action: #selector(applyGentlePreset)),
-            makeButton("XBass", action: #selector(applyXBassPreset)),
+            makeButton("LowEnd", action: #selector(applyLowEndPreset)),
             makeButton("Deep", action: #selector(applyDeepPreset)),
             makeButton("Clear", action: #selector(applyClearPreset))
         ]
@@ -354,8 +354,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate {
         applyPreset(name: "Gentle", intensity: 26, body: 10, outputDb: -1.2)
     }
 
-    @objc private func applyXBassPreset() {
-        applyPreset(name: "XBass", intensity: 48, body: 22, outputDb: -2.0)
+    @objc private func applyLowEndPreset() {
+        applyPreset(name: "LowEnd", intensity: 48, body: 22, outputDb: -2.0)
     }
 
     @objc private func applyDeepPreset() {
@@ -590,7 +590,7 @@ private protocol BassProcessor: AnyObject {
     func process(left: Float, right: Float) -> (Float, Float)
 }
 
-private final class XBassDSP: BassProcessor {
+private final class LowEndDSP: BassProcessor {
     private var shelfL: Biquad
     private var shelfR: Biquad
     private var subL: Biquad
@@ -721,7 +721,7 @@ private final class SystemAudioProcessor {
         try startOutput()
         try createProcessTapAndAggregateDevice()
         try startCapture()
-        print("XBass system audio processing is running. Press Ctrl-C to stop.")
+        print("LowEnd system audio processing is running. Press Ctrl-C to stop.")
     }
 
     func updateDSP(intensity: Float, body: Float, outputDb: Float, dspModel: Settings.DSPModel) {
@@ -736,7 +736,7 @@ private final class SystemAudioProcessor {
                                    outputDb: Float) -> BassProcessor {
         switch dspModel {
         case .clean:
-            return XBassDSP(sampleRate: Float(sampleRate), intensity: intensity, body: body, outputDb: outputDb)
+            return LowEndDSP(sampleRate: Float(sampleRate), intensity: intensity, body: body, outputDb: outputDb)
         case .circuit:
             return VirtualCircuitBassDSP(sampleRate: Float(sampleRate), intensity: intensity, body: body, outputDb: outputDb)
         }
@@ -809,7 +809,7 @@ private final class SystemAudioProcessor {
             throw AppError.message("Cannot start capture while listing apps.")
         }
 
-        description.name = "XBass Native System Tap"
+        description.name = "LowEnd Native System Tap"
         description.isPrivate = true
         description.isMixdown = true
         description.isMono = false
@@ -853,14 +853,14 @@ private final class SystemAudioProcessor {
         try check(AudioHardwareCreateProcessTap(tapDescription, &tapID), "AudioHardwareCreateProcessTap")
 
         let tapUID = tapDescription.uuid.uuidString
-        let aggregateUID = "com.codexaudiolab.xbassinspired.aggregate.\(UUID().uuidString)"
+        let aggregateUID = "com.codexaudiolab.lowendcircuit.aggregate.\(UUID().uuidString)"
         let tapEntry: [String: Any] = [
             kAudioSubTapUIDKey: tapUID,
             kAudioSubTapDriftCompensationKey: true
         ]
 
         let aggregateDescription: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "XBass Native System Audio",
+            kAudioAggregateDeviceNameKey: "LowEnd Native Audio",
             kAudioAggregateDeviceUIDKey: aggregateUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceTapListKey: [tapEntry],

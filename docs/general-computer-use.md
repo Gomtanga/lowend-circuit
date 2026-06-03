@@ -18,24 +18,24 @@ brew install cmake
 Build:
 
 ```sh
-cd xbass-inspired-plugin
+cd lowend-circuit
 ./build.sh
 ```
 
 Open:
 
 ```sh
-open "build/XBassInspired_artefacts/Release/Standalone/XBass Inspired.app"
+open "build/LowEndCircuit_artefacts/Release/Standalone/LowEnd Circuit.app"
 ```
 
 The standalone version is a GUI program with four main knobs and preset buttons:
 
 - `Gentle`: light bass lift.
-- `XBass`: the default stronger lift.
+- `LowEnd`: the default stronger lift.
 - `Deep`: heavier bass and body.
 - `Reset`: clean pass-through starting point.
 
-The standalone app processes audio through the input and output device you select in its audio settings. For system-wide computer audio, route your Mac's output through a virtual audio device such as BlackHole or Loopback, then choose that virtual device as this app's input.
+The standalone app processes audio through the input and output device you select in its audio settings. On macOS, the native system-audio app is the easier option for whole-computer listening because it uses Core Audio process taps and does not require a third-party virtual audio driver.
 
 ## Windows or Linux standalone app
 
@@ -50,12 +50,11 @@ The standalone executable is generated under the `build` artefacts folder. Exact
 
 ## Easiest non-DAW setup
 
-For everyday listening, the least fussy path is:
+For everyday listening on macOS, the least fussy path is:
 
-1. Build the `Standalone` app.
-2. Install a virtual audio cable.
-3. Set your computer/system output to the virtual cable.
-4. Set the standalone app input to that cable.
-5. Set the standalone app output to your headphones, DAC, or speakers.
+1. Build the project.
+2. Open `LowEnd Native Audio.app`.
+3. Choose a preset and model.
+4. Press `전체 시스템 적용`.
 
 This is how the plugin can be used with browsers, music players, games, and video apps.

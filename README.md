@@ -1,15 +1,26 @@
-# XBass Inspired
+# LowEnd Circuit
 
-A small JUCE/CMake audio plugin that approximates the style of an iFi-like bass enhancement circuit without using iFi branding or claiming circuit accuracy.
+LowEnd Circuit is an open-source bass enhancement project with two parts:
+
+- a JUCE audio plugin/standalone app for DAWs and plugin hosts
+- a native macOS system-audio app that can process whole-computer or selected-application audio
+
+The project models general low-frequency compensation and virtual analog bass circuitry. It is not affiliated with, endorsed by, or based on the proprietary circuit of any hardware manufacturer.
+
+## Legal And Licensing
+
+LowEnd Circuit is an independent open-source project. Product names, trademarks, and audio-circuit designs owned by third parties are not used as branding for this project.
+
+This repository is licensed under `AGPL-3.0-or-later`. JUCE is fetched at build time and is available under its own dual-license terms; review the JUCE licence if you plan to distribute binaries or use the project commercially.
 
 ## What it does
 
-- `XBass`: low-shelf boost from roughly 72-105 Hz, up to about 8.5 dB.
+- `LowEnd`: low-shelf boost from roughly 72-105 Hz, up to about 8.5 dB.
 - `Body`: blends in a controlled low-passed soft-saturated sub component.
 - `Mix`: parallel wet/dry blend.
 - `Output`: final trim before a gentle tanh safety stage.
 
-This is an original approximation, not an emulation endorsed by or affiliated with iFi.
+This is an original approximation, not an emulation endorsed by or affiliated with any hardware manufacturer.
 
 ## Build A Normal Desktop App
 
@@ -25,20 +36,20 @@ The project always builds a `Standalone` desktop app and a `VST3` plugin. On mac
 On macOS, the standalone app is expected here after a release build:
 
 ```sh
-build/XBassInspired_artefacts/Release/Standalone/XBass Inspired.app
+build/LowEndCircuit_artefacts/Release/Standalone/LowEnd Circuit.app
 ```
 
 That standalone target is the GUI program version. It opens as a normal desktop window with large controls, preset buttons, and device routing through JUCE's standalone audio settings.
 
 See `docs/general-computer-use.md` for using the standalone app with ordinary computer audio from browsers, music players, games, and video apps.
 
-For built-in whole-computer audio and per-application audio processing without BlackHole, see `docs/system-wide-and-per-app.md`.
+For built-in whole-computer audio and per-application audio processing without third-party virtual audio drivers, see `docs/system-wide-and-per-app.md`.
 
 The native system-audio app includes simple presets:
 
 - `IEM`
 - `Gentle`
-- `XBass`
+- `LowEnd`
 - `Deep`
 - `Clear`
 
@@ -57,4 +68,4 @@ The current DSP is intentionally simple and stable:
 4. Reduce internal headroom as the boost increases.
 5. Apply output trim and gentle clipping protection.
 
-For a closer match to a specific hardware setting, measure pink-noise or swept-sine captures from the device and adjust the shelf frequency, Q, and gain curve in `Source/PluginProcessor.cpp`.
+For a closer match to a specific hardware setting, measure pink-noise or swept-sine captures from the target device and adjust the shelf frequency, Q, gain curve, and circuit-model constants.

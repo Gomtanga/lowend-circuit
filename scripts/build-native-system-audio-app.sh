@@ -4,7 +4,7 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PACKAGE_DIR="$ROOT/SystemAudioProcessor"
 BUILD_DIR="$ROOT/build/SystemAudioProcessor"
-APP_DIR="$ROOT/build/XBassInspired_artefacts/Release/NativeSystemAudio/XBass Native System Audio.app"
+APP_DIR="$ROOT/build/LowEndCircuit_artefacts/Release/NativeSystemAudio/LowEnd Native Audio.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 RESOURCES_DIR="$APP_DIR/Contents/Resources"
 
@@ -15,7 +15,7 @@ swift build \
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
-cp "$BUILD_DIR/.build/release/SystemAudioProcessor" "$MACOS_DIR/XBass Native System Audio"
+cp "$BUILD_DIR/.build/release/SystemAudioProcessor" "$MACOS_DIR/LowEnd Native Audio"
 
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -26,11 +26,11 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>XBass Native System Audio</string>
+    <string>LowEnd Native Audio</string>
     <key>CFBundleIdentifier</key>
-    <string>com.codexaudiolab.xbassinspired.systemaudio</string>
+    <string>com.codexaudiolab.lowendcircuit.systemaudio</string>
     <key>CFBundleName</key>
-    <string>XBass Native System Audio</string>
+    <string>LowEnd Native Audio</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -40,7 +40,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
     <key>LSMinimumSystemVersion</key>
     <string>14.4</string>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>XBass Native System Audio captures system or selected app audio so it can apply bass enhancement and play the processed signal to your speakers or headphones.</string>
+    <string>LowEnd Native Audio captures system or selected app audio so it can apply bass enhancement and play the processed signal to your speakers or headphones.</string>
 </dict>
 </plist>
 PLIST
@@ -51,10 +51,10 @@ echo "Built:"
 echo "  $APP_DIR"
 echo
 echo "Run all system audio:"
-echo "  \"$MACOS_DIR/XBass Native System Audio\" --all"
+echo "  \"$MACOS_DIR/LowEnd Native Audio\" --all"
 echo
 echo "List running app bundle IDs:"
-echo "  \"$MACOS_DIR/XBass Native System Audio\" --list-apps"
+echo "  \"$MACOS_DIR/LowEnd Native Audio\" --list-apps"
 echo
 echo "Run one app:"
-echo "  \"$MACOS_DIR/XBass Native System Audio\" --bundle-id com.spotify.client"
+echo "  \"$MACOS_DIR/LowEnd Native Audio\" --bundle-id com.spotify.client"

@@ -3,11 +3,11 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 
-class XBassInspiredAudioProcessorEditor final : public juce::AudioProcessorEditor
+class LowEndCircuitAudioProcessorEditor final : public juce::AudioProcessorEditor
 {
 public:
-    explicit XBassInspiredAudioProcessorEditor (XBassInspiredAudioProcessor&);
-    ~XBassInspiredAudioProcessorEditor() override = default;
+    explicit LowEndCircuitAudioProcessorEditor (LowEndCircuitAudioProcessor&);
+    ~LowEndCircuitAudioProcessorEditor() override = default;
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -21,7 +21,7 @@ private:
     void applyPreset (float intensity, float body, float mix, float outputDb);
     void setParameterValue (const juce::String& parameterId, float value);
 
-    XBassInspiredAudioProcessor& audioProcessor;
+    LowEndCircuitAudioProcessor& audioProcessor;
 
     juce::Slider intensitySlider;
     juce::Slider bodySlider;
@@ -35,7 +35,7 @@ private:
     juce::Label statusLabel;
 
     juce::TextButton gentleButton { "Gentle" };
-    juce::TextButton xbassButton { "XBass" };
+    juce::TextButton lowendButton { "LowEnd" };
     juce::TextButton deepButton { "Deep" };
     juce::TextButton resetButton { "Reset" };
 
@@ -44,5 +44,5 @@ private:
     std::unique_ptr<SliderAttachment> mixAttachment;
     std::unique_ptr<SliderAttachment> outputAttachment;
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (XBassInspiredAudioProcessorEditor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LowEndCircuitAudioProcessorEditor)
 };

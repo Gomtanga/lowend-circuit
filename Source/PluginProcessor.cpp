@@ -14,7 +14,7 @@ float dbToLinear (float db)
 }
 }
 
-XBassInspiredAudioProcessor::XBassInspiredAudioProcessor()
+LowEndCircuitAudioProcessor::LowEndCircuitAudioProcessor()
     : AudioProcessor (BusesProperties()
           .withInput ("Input", juce::AudioChannelSet::stereo(), true)
           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
@@ -22,12 +22,12 @@ XBassInspiredAudioProcessor::XBassInspiredAudioProcessor()
 {
 }
 
-juce::AudioProcessorValueTreeState::ParameterLayout XBassInspiredAudioProcessor::createParameterLayout()
+juce::AudioProcessorValueTreeState::ParameterLayout LowEndCircuitAudioProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
-        intensityId, "XBass", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 45.0f));
+        intensityId, "LowEnd", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 45.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         bodyId, "Body", juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 30.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
@@ -38,7 +38,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout XBassInspiredAudioProcessor:
     return { params.begin(), params.end() };
 }
 
-bool XBassInspiredAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+bool LowEndCircuitAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     const auto mainIn = layouts.getMainInputChannelSet();
     const auto mainOut = layouts.getMainOutputChannelSet();
@@ -46,7 +46,7 @@ bool XBassInspiredAudioProcessor::isBusesLayoutSupported (const BusesLayout& lay
                                  || mainIn == juce::AudioChannelSet::stereo());
 }
 
-void XBassInspiredAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+void LowEndCircuitAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
     const juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32> (samplesPerBlock),
@@ -64,7 +64,7 @@ void XBassInspiredAudioProcessor::prepareToPlay (double sampleRate, int samplesP
     updateFilters();
 }
 
-void XBassInspiredAudioProcessor::updateFilters()
+void LowEndCircuitAudioProcessor::updateFilters()
 {
     const auto intensity = apvts.getRawParameterValue (intensityId)->load() / 100.0f;
     const auto shelfDb = juce::jmap (intensity, 0.0f, 1.0f, 0.0f, 8.5f);
@@ -75,7 +75,7 @@ void XBassInspiredAudioProcessor::updateFilters()
     *lowPass.state = *juce::dsp::IIR::Coefficients<float>::makeLowPass (currentSampleRate, 135.0f, 0.68f);
 }
 
-void XBassInspiredAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void LowEndCircuitAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
     const auto numChannels = buffer.getNumChannels();
@@ -121,14 +121,14 @@ void XBassInspiredAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
     }
 }
 
-void XBassInspiredAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+void LowEndCircuitAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     std::unique_ptr<juce::XmlElement> xml (state.createXml());
     copyXmlToBinary (*xml, destData);
 }
 
-void XBassInspiredAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+void LowEndCircuitAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
 
@@ -136,12 +136,12 @@ void XBassInspiredAudioProcessor::setStateInformation (const void* data, int siz
         apvts.replaceState (juce::ValueTree::fromXml (*xmlState));
 }
 
-juce::AudioProcessorEditor* XBassInspiredAudioProcessor::createEditor()
+juce::AudioProcessorEditor* LowEndCircuitAudioProcessor::createEditor()
 {
-    return new XBassInspiredAudioProcessorEditor (*this);
+    return new LowEndCircuitAudioProcessorEditor (*this);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
-    return new XBassInspiredAudioProcessor();
+    return new LowEndCircuitAudioProcessor();
 }
