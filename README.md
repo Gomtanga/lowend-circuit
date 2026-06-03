@@ -11,7 +11,7 @@ The project models general low-frequency compensation and virtual analog bass ci
 
 LowEnd Circuit는 저역 보강과 간단한 공간음향 처리를 제공하는 오픈소스 오디오 프로젝트입니다.
 
-바로 사용하려면 [Releases 페이지](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.1.0)에서 `LowEnd-Native-Audio-macOS-v0.1.0.zip`을 내려받으세요.
+바로 사용하려면 [Releases 페이지](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.1.0)에서 macOS는 `LowEnd-Native-Audio-macOS-v0.1.0.zip`, Windows는 `LowEnd-Circuit-Standalone-Windows-v0.1.0.zip` 또는 `LowEnd-Circuit-VST3-Windows-v0.1.0.zip`을 내려받으세요.
 
 - DAW/플러그인 호스트용 `VST3`, macOS `AU`, 일반 데스크톱용 `Standalone` 앱을 빌드할 수 있습니다.
 - macOS에서는 `LowEnd Native Audio` 앱으로 컴퓨터 전체 소리 또는 특정 앱 소리에 처리를 적용할 수 있습니다.
