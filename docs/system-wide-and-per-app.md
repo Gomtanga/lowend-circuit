@@ -36,9 +36,10 @@ The GUI version includes `LowEnd`, `Body`, and `Output` sliders. Changes apply w
 
 The GUI version also includes a `Spatial Stage` panel:
 
-- Drag the blue `Me` point in the 3D view to move the listening position in real time.
+- Drag the blue listener point in the 3D view to move the listening position in real time.
 - Type exact `나 X`, `나 Z`, and `Width` meter values when you want repeatable settings.
-- Use `Space` to blend the spatial processor with the original stereo signal.
+- `Width` is the virtual distance between the left and right front speakers. It moves the speaker nodes visually and changes the DSP distance/delay calculation.
+- `Space` blends the spatial processor with the original stereo signal. Higher values make distance, inter-ear delay, level difference, and crossfeed more obvious.
 
 The spatial processor treats the left and right channels as front speakers, then calculates listener-ear distance differences, inter-ear delays, level differences, and crossfeed. It is meant for headphone/IEM listening and is not a room simulation reverb.
 

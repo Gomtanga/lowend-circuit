@@ -149,8 +149,10 @@ private final class SpatialStageView: SCNView {
     var onChange: ((SpatialSettings) -> Void)?
 
     private let listenerNode = SCNNode()
+    private let listenerRingNode = SCNNode()
     private let leftSpeakerNode = SCNNode()
     private let rightSpeakerNode = SCNNode()
+    private let speakerWidthNode = SCNNode()
     private let cameraNode = SCNNode()
     private var settings = SpatialSettings()
     private let xRange: Float = 3.0
@@ -218,13 +220,26 @@ private final class SpatialStageView: SCNView {
         scene.rootNode.addChildNode(leftSpeakerNode)
         scene.rootNode.addChildNode(rightSpeakerNode)
 
+        let widthMaterial = SCNMaterial()
+        widthMaterial.diffuse.contents = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 0.95)
+        speakerWidthNode.geometry = SCNBox(width: 1.65, height: 0.025, length: 0.055, chamferRadius: 0)
+        speakerWidthNode.geometry?.materials = [widthMaterial]
+        speakerWidthNode.position = SCNVector3(0, 0.02, 1.47)
+        scene.rootNode.addChildNode(speakerWidthNode)
+
         let listenerMaterial = SCNMaterial()
         listenerMaterial.diffuse.contents = NSColor(calibratedRed: 0.34, green: 0.80, blue: 0.92, alpha: 1)
-        listenerNode.geometry = SCNSphere(radius: 0.14)
+        listenerNode.geometry = SCNSphere(radius: 0.20)
         listenerNode.geometry?.materials = [listenerMaterial]
         scene.rootNode.addChildNode(listenerNode)
 
-        addLabel("나", at: SCNVector3(0.18, 0.02, -0.30), color: NSColor(calibratedRed: 0.34, green: 0.80, blue: 0.92, alpha: 1), parent: listenerNode)
+        let ringMaterial = SCNMaterial()
+        ringMaterial.diffuse.contents = NSColor(calibratedRed: 0.34, green: 0.80, blue: 0.92, alpha: 0.65)
+        listenerRingNode.geometry = SCNTorus(ringRadius: 0.33, pipeRadius: 0.018)
+        listenerRingNode.geometry?.materials = [ringMaterial]
+        listenerRingNode.eulerAngles.x = CGFloat.pi / 2
+        scene.rootNode.addChildNode(listenerRingNode)
+
         updateNodes()
     }
 
@@ -262,31 +277,23 @@ private final class SpatialStageView: SCNView {
         marker.geometry?.materials = [material]
         marker.position = SCNVector3(0, 0.01, 2.1)
         scene.rootNode.addChildNode(marker)
-        addLabel("Front speakers", at: SCNVector3(-1.38, 0.02, 2.26), color: .white, parent: scene.rootNode)
-    }
-
-    private func addLabel(_ text: String, at position: SCNVector3, color: NSColor, parent: SCNNode) {
-        let geometry = SCNText(string: text, extrusionDepth: 0.004)
-        geometry.font = .systemFont(ofSize: 0.16, weight: .semibold)
-        geometry.flatness = 0.4
-        geometry.firstMaterial?.diffuse.contents = color
-
-        let node = SCNNode(geometry: geometry)
-        node.position = position
-        node.eulerAngles.x = -CGFloat.pi / 2
-        node.scale = SCNVector3(1, 1, 1)
-        parent.addChildNode(node)
     }
 
     private func updateNodes() {
-        let halfWidth = clamp(settings.speakerWidth, 0.6, 3.0) / 2
+        let width = clamp(settings.speakerWidth, 0.6, 3.0)
+        let halfWidth = width / 2
         leftSpeakerNode.position = SCNVector3(-halfWidth, 0.11, 1.8)
         rightSpeakerNode.position = SCNVector3(halfWidth, 0.11, 1.8)
-        listenerNode.position = SCNVector3(
+        speakerWidthNode.geometry = SCNBox(width: CGFloat(width), height: 0.025, length: 0.055, chamferRadius: 0)
+        speakerWidthNode.geometry?.firstMaterial?.diffuse.contents = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 0.95)
+
+        let listenerPosition = SCNVector3(
             clamp(settings.listenerX, -xRange, xRange),
             0.14,
             clamp(settings.listenerZ, -zRange, zRange)
         )
+        listenerNode.position = listenerPosition
+        listenerRingNode.position = SCNVector3(listenerPosition.x, 0.03, listenerPosition.z)
     }
 
     private func updateListener(from event: NSEvent) {
@@ -576,16 +583,19 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         spatialAmountSlider = NSSlider(value: 35, minValue: 0, maxValue: 100, target: self, action: #selector(spatialControlChanged))
         spatialAmountSlider.isContinuous = true
         spatialAmountSlider.frame = NSRect(x: 82, y: 66, width: 250, height: 24)
-        spatialAmountSlider.toolTip = "원본 스테레오와 공간 처리 신호의 혼합량입니다."
+        spatialAmountSlider.toolTip = "원본 스테레오와 공간 처리 신호의 혼합량입니다. 높일수록 거리, 귀 사이 딜레이, 크로스피드 영향이 커집니다."
         view.addSubview(spatialAmountSlider)
 
         spatialAmountValueLabel = makeLabel("", size: 13, weight: .semibold)
         spatialAmountValueLabel.frame = NSRect(x: 342, y: 66, width: 56, height: 24)
         view.addSubview(spatialAmountValueLabel)
 
-        let hint = makeLabel("권장 시작점: Width 1.4-1.8m, Space 25-45%. IEM에서 노이즈나 위상이 거칠면 Space를 낮추세요.", size: 11.5, weight: .regular)
-        hint.frame = NSRect(x: 16, y: 14, width: 398, height: 48)
-        hint.maximumNumberOfLines = 3
+        let spaceHelp = makeLabel("Space: 원본과 공간 처리 신호를 섞는 양입니다.", size: 11.5, weight: .regular)
+        spaceHelp.frame = NSRect(x: 16, y: 32, width: 398, height: 18)
+        view.addSubview(spaceHelp)
+
+        let hint = makeLabel("권장 25-45%. IEM에서 위상이 거칠면 먼저 낮추세요.", size: 11.5, weight: .regular)
+        hint.frame = NSRect(x: 16, y: 12, width: 398, height: 18)
         view.addSubview(hint)
 
         updateSpatialControls(from: spatialSettingsFromControls(), notifyProcessor: false)
