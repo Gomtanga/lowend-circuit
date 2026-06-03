@@ -322,7 +322,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
 
     private func buildWindow() {
         print("Opening LowEnd Native Audio control window.")
-        let rect = NSRect(x: 0, y: 0, width: 1080, height: 760)
+        let rect = NSRect(x: 0, y: 0, width: 1200, height: 760)
         window = NSWindow(
             contentRect: rect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -347,7 +347,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         content.addSubview(subtitle)
 
         let spatial = makeSpatialSection()
-        spatial.frame = NSRect(x: 740, y: 28, width: 310, height: 636)
+        spatial.frame = NSRect(x: 740, y: 28, width: 430, height: 636)
         content.addSubview(spatial)
 
         statusLabel = makeLabel("대기 중", size: 14, weight: .semibold)
@@ -519,16 +519,16 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         view.addSubview(title)
 
         spatialEnabledButton = NSButton(checkboxWithTitle: "공간음향", target: self, action: #selector(spatialControlChanged))
-        spatialEnabledButton.frame = NSRect(x: 198, y: 592, width: 96, height: 26)
+        spatialEnabledButton.frame = NSRect(x: 310, y: 592, width: 96, height: 26)
         spatialEnabledButton.state = .on
         spatialEnabledButton.toolTip = "3D 위치 기반 거리, 지연, 크로스피드 처리를 켜거나 끕니다."
         view.addSubview(spatialEnabledButton)
 
         let description = makeLabel("파란 점을 드래그하거나 아래 숫자를 입력하세요.", size: 12, weight: .regular)
-        description.frame = NSRect(x: 16, y: 566, width: 278, height: 20)
+        description.frame = NSRect(x: 16, y: 566, width: 398, height: 20)
         view.addSubview(description)
 
-        spatialStageView = SpatialStageView(frame: NSRect(x: 16, y: 270, width: 278, height: 282))
+        spatialStageView = SpatialStageView(frame: NSRect(x: 16, y: 222, width: 398, height: 340))
         spatialStageView.wantsLayer = true
         spatialStageView.layer?.cornerRadius = 6
         spatialStageView.onChange = { [weak self] settings in
@@ -539,26 +539,26 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         listenerXField = makeNumberField(value: 0.0)
         listenerZField = makeNumberField(value: 0.0)
         speakerWidthField = makeNumberField(value: 1.65)
-        addNumberRow(to: view, y: 226, title: "나 X", field: listenerXField, suffix: "m", tooltip: "좌우 위치입니다. 음수는 왼쪽, 양수는 오른쪽입니다.")
-        addNumberRow(to: view, y: 188, title: "나 Z", field: listenerZField, suffix: "m", tooltip: "앞뒤 위치입니다. 양수는 스피커 쪽, 음수는 뒤쪽입니다.")
-        addNumberRow(to: view, y: 150, title: "Width", field: speakerWidthField, suffix: "m", tooltip: "가상 좌우 스피커 사이의 거리입니다.")
+        addNumberRow(to: view, y: 180, title: "나 X", field: listenerXField, suffix: "m", tooltip: "좌우 위치입니다. 음수는 왼쪽, 양수는 오른쪽입니다.")
+        addNumberRow(to: view, y: 142, title: "나 Z", field: listenerZField, suffix: "m", tooltip: "앞뒤 위치입니다. 양수는 스피커 쪽, 음수는 뒤쪽입니다.")
+        addNumberRow(to: view, y: 104, title: "Width", field: speakerWidthField, suffix: "m", tooltip: "가상 좌우 스피커 사이의 거리입니다.")
 
         let amountLabel = makeLabel("Space", size: 13, weight: .semibold)
-        amountLabel.frame = NSRect(x: 16, y: 104, width: 62, height: 24)
+        amountLabel.frame = NSRect(x: 16, y: 66, width: 62, height: 24)
         view.addSubview(amountLabel)
 
         spatialAmountSlider = NSSlider(value: 35, minValue: 0, maxValue: 100, target: self, action: #selector(spatialControlChanged))
         spatialAmountSlider.isContinuous = true
-        spatialAmountSlider.frame = NSRect(x: 82, y: 104, width: 146, height: 24)
+        spatialAmountSlider.frame = NSRect(x: 82, y: 66, width: 250, height: 24)
         spatialAmountSlider.toolTip = "원본 스테레오와 공간 처리 신호의 혼합량입니다."
         view.addSubview(spatialAmountSlider)
 
         spatialAmountValueLabel = makeLabel("", size: 13, weight: .semibold)
-        spatialAmountValueLabel.frame = NSRect(x: 238, y: 104, width: 56, height: 24)
+        spatialAmountValueLabel.frame = NSRect(x: 342, y: 66, width: 56, height: 24)
         view.addSubview(spatialAmountValueLabel)
 
         let hint = makeLabel("권장 시작점: Width 1.4-1.8m, Space 25-45%. IEM에서 노이즈나 위상이 거칠면 Space를 낮추세요.", size: 11.5, weight: .regular)
-        hint.frame = NSRect(x: 16, y: 24, width: 278, height: 62)
+        hint.frame = NSRect(x: 16, y: 14, width: 398, height: 48)
         hint.maximumNumberOfLines = 3
         view.addSubview(hint)
 
@@ -601,10 +601,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
                               tooltip: String) {
         let label = makeLabel(title, size: 13, weight: .semibold)
         label.frame = NSRect(x: 16, y: y, width: 62, height: 24)
-        field.frame = NSRect(x: 82, y: y - 2, width: 146, height: 28)
+        field.frame = NSRect(x: 82, y: y - 2, width: 250, height: 28)
         field.toolTip = tooltip
         let unit = makeLabel(suffix, size: 12, weight: .regular)
-        unit.frame = NSRect(x: 238, y: y, width: 44, height: 24)
+        unit.frame = NSRect(x: 342, y: y, width: 44, height: 24)
         view.addSubview(label)
         view.addSubview(field)
         view.addSubview(unit)
