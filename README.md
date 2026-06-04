@@ -20,6 +20,8 @@ LowEnd Circuit는 저역 보강과 간단한 공간음향 처리를 제공하는
 - `Spatial Stage`에서는 파란 청취자 포인트를 드래그하거나 `나 X`, `나 Z`, `Width` 값을 직접 입력해 공간감을 조정합니다.
 - `원위치` 버튼은 청취자 위치를 중앙 기준점으로 되돌립니다. `Width`와 `Space` 값은 유지됩니다.
 - `Width`는 좌우 가상 스피커 사이 거리이고, `Space`는 원본 스테레오와 공간 처리 신호를 섞는 양입니다.
+- 상단 포맷 표시는 앱 내부 처리 포맷입니다. 음원의 원본 bit depth나 파일 샘플레이트 표시는 아닙니다.
+- Tidal `Use Exclusive Mode` 같은 독점 출력 모드는 시스템 오디오 처리와 함께 사용할 수 없습니다.
 
 처음 사용할 때는 `IEM` 또는 `Gentle` 프리셋에서 시작하고, 공간음향은 `Space 25-45%`, `Width 1.4-1.8m` 근처를 권장합니다. 위상이 거칠거나 소리가 부자연스러우면 `Space`를 먼저 낮추세요.
 
@@ -31,7 +33,7 @@ This repository is licensed under `AGPL-3.0-or-later`. JUCE is fetched at build 
 
 ## What it does
 
-- `LowEnd`: low-shelf boost from roughly 72-105 Hz, up to about 8.5 dB.
+- `LowEnd`: low-shelf boost from roughly 72-105 Hz, up to about 8.5 dB in the clean model.
 - `Body`: blends in a controlled low-passed soft-saturated sub component.
 - `Mix`: parallel wet/dry blend.
 - `Output`: final trim before a gentle tanh safety stage.
@@ -79,7 +81,7 @@ The native system-audio app includes simple presets:
 
 It also has two models:
 
-- `Circuit`: virtual analog RC/op-amp style bass circuit model.
+- `Circuit`: virtual analog RC/transformer-style bass circuit model with lighter saturation and wet/dry blending.
 - `Clean DSP`: the earlier filter-based bass enhancer.
 
 The native app also includes a `Spatial Stage` panel. Drag the blue listener point in the 3D view or type exact meter values for `나 X`, `나 Z`, and `Width`. The `원위치` button returns the listener point to the center while keeping `Width` and `Space`. The setting updates while system audio is running.

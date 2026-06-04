@@ -34,6 +34,10 @@ If enabling system-wide mode makes the computer silent:
 
 The GUI version includes `LowEnd`, `Body`, and `Output` sliders. Changes apply while processing is running.
 
+The format indicator shows the app's internal processing format, not the original file format from Apple Music, Tidal, or another player. For example, a 16-bit 44.1 kHz track can still show `Processing 96.0 kHz / 32-bit Float` if the current Core Audio tap/engine path is running at 96 kHz.
+
+Tidal `Use Exclusive Mode` and similar exclusive-output modes are not compatible with system-wide processing. Exclusive mode lets the player take over the output device directly, so the Core Audio process tap can be bypassed or starved. Turn exclusive mode off when using LowEnd Native Audio.
+
 The GUI version also includes a `Spatial Stage` panel:
 
 - Drag the blue listener point in the 3D view to move the listening position in real time.
@@ -54,11 +58,11 @@ The spatial processor treats the left and right channels as front speakers, then
 
 Preset buttons:
 
-- `IEM`: low-noise starting point for sensitive earphones.
-- `Gentle`: light bass support for long listening.
-- `LowEnd`: balanced default starting point.
-- `Deep`: stronger bass, now tuned with less circuit drive than the first version.
-- `Clear`: near-bypass reference point.
+- `IEM`: low-noise starting point for sensitive earphones, with light spatial compensation.
+- `Gentle`: light bass support for long listening, with subtle space recovery.
+- `LowEnd`: balanced default starting point with spatial stage compensation.
+- `Deep`: stronger bass, tuned with reduced circuit drive and wider stage support.
+- `Clear`: near-bypass reference point. It also disables the spatial processor.
 
 Slider meanings:
 
@@ -68,7 +72,7 @@ Slider meanings:
 
 Model selector:
 
-- `Circuit`: virtual analog model using RC-style bass nodes and a soft op-amp stage. This is the default.
+- `Circuit`: virtual analog model using RC-style bass nodes, lighter transformer-style saturation, and parallel wet/dry blending. This is the default.
 - `Clean DSP`: the earlier filter-based bass enhancer. Use it when you want a cleaner, more direct low-shelf sound.
 
 For sensitive IEMs, start with `IEM` or `Gentle`. If you hear roughness, lower `Body` first, then lower `LowEnd`, and keep `Output` around `-3 dB` to `-5 dB`.

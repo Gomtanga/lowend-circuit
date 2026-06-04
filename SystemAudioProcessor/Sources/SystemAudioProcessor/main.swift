@@ -43,9 +43,9 @@ private struct AudioFormatStatus {
 
     var indicatorText: String {
         if isSampleRateMatched {
-            return "\(Self.rateText(sampleRate)) / \(sampleFormat) / Bit-Perfect"
+            return "Processing \(Self.rateText(processingSampleRate)) / \(sampleFormat)"
         }
-        return "\(Self.rateText(sampleRate)) DAC / \(Self.rateText(processingSampleRate)) Engine / SRC-safe"
+        return "DAC \(Self.rateText(sampleRate)) / Engine \(Self.rateText(processingSampleRate))"
     }
 
     private static func rateText(_ sampleRate: Double) -> String {
@@ -421,10 +421,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         subtitle.frame = NSRect(x: 30, y: 674, width: 680, height: 22)
         content.addSubview(subtitle)
 
-        formatLabel = makeLabel("출력 포맷 대기 중", size: 13, weight: .semibold)
+        formatLabel = makeLabel("처리 포맷 대기 중", size: 13, weight: .semibold)
         formatLabel.alignment = .right
         formatLabel.frame = NSRect(x: 740, y: 704, width: 430, height: 24)
-        formatLabel.toolTip = "현재 하드웨어 출력 장치의 실제 샘플레이트와 엔진 처리 포맷입니다."
+        formatLabel.toolTip = "앱 내부 처리 포맷입니다. 재생 중인 음원의 원본 bit depth나 파일 샘플레이트를 표시하는 값은 아닙니다."
         content.addSubview(formatLabel)
 
         let spatial = makeSpatialSection()
@@ -524,7 +524,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         let lines = [
             "소리 흐름: Mac 소리 -> LowEnd 처리 -> 현재 선택된 스피커/헤드폰",
             "전체 시스템 적용: 브라우저, 음악 앱, 게임 등 대부분의 출력에 적용",
-            "특정 앱 적용: 아래 목록에서 bundle id를 확인하고 입력한 뒤 실행"
+            "Tidal Exclusive Mode처럼 출력 장치를 독점하는 모드는 우회될 수 있습니다."
         ]
 
         for (index, line) in lines.enumerated() {
@@ -772,29 +772,38 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     @objc private func applyIEMPreset() {
-        applyPreset(name: "IEM", intensity: 36, body: 10, outputDb: -3.0)
+        applyPreset(name: "IEM", intensity: 30, body: 8, outputDb: -2.0, space: 22, spatialEnabled: true)
     }
 
     @objc private func applyGentlePreset() {
-        applyPreset(name: "Gentle", intensity: 26, body: 10, outputDb: -1.2)
+        applyPreset(name: "Gentle", intensity: 22, body: 8, outputDb: -1.0, space: 24, spatialEnabled: true)
     }
 
     @objc private func applyLowEndPreset() {
-        applyPreset(name: "LowEnd", intensity: 48, body: 22, outputDb: -2.0)
+        applyPreset(name: "LowEnd", intensity: 42, body: 18, outputDb: -1.8, space: 34, spatialEnabled: true)
     }
 
     @objc private func applyDeepPreset() {
-        applyPreset(name: "Deep", intensity: 62, body: 28, outputDb: -4.0)
+        applyPreset(name: "Deep", intensity: 54, body: 22, outputDb: -2.8, space: 38, spatialEnabled: true)
     }
 
     @objc private func applyClearPreset() {
-        applyPreset(name: "Clear", intensity: 0, body: 0, outputDb: 0)
+        applyPreset(name: "Clear", intensity: 0, body: 0, outputDb: 0, space: 0, spatialEnabled: false)
     }
 
-    private func applyPreset(name: String, intensity: Double, body: Double, outputDb: Double) {
+    private func applyPreset(name: String,
+                             intensity: Double,
+                             body: Double,
+                             outputDb: Double,
+                             space: Double,
+                             spatialEnabled: Bool) {
         intensitySlider.doubleValue = intensity
         bodySlider.doubleValue = body
         outputSlider.doubleValue = outputDb
+        var spatial = spatialSettingsFromControls()
+        spatial.enabled = spatialEnabled
+        spatial.amount = Float(space)
+        updateSpatialControls(from: spatial, notifyProcessor: true)
         sliderChanged()
         statusLabel.stringValue = "프리셋 적용: \(name)"
     }
@@ -847,7 +856,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             statusLabel.stringValue = "중지됨"
         }
         if formatLabel != nil {
-            formatLabel.stringValue = "출력 포맷 대기 중"
+            formatLabel.stringValue = "처리 포맷 대기 중"
         }
     }
 
@@ -1014,12 +1023,12 @@ private enum DSPPrecompute {
         let shelfDb = normalIntensity * 8.5
         let shelfFreq = 72 + normalIntensity * 33
         let outputGain = pow(10, outputDb / 20)
-        let transformerShelfDb = 1.2 + normalIntensity * 3.8 + normalBody * 1.4
-        let transformerShelfFreq = 82 + normalIntensity * 12 + normalBody * 30
-        let transformerDrive = 1.04 + normalIntensity * 0.56 + normalBody * 0.22
-        let transformerAsymmetry = 0.006 + normalIntensity * 0.018 + normalBody * 0.010
+        let transformerShelfDb = 0.7 + normalIntensity * 2.2 + normalBody * 0.7
+        let transformerShelfFreq = 78 + normalIntensity * 10 + normalBody * 24
+        let transformerDrive = 1.0 + normalIntensity * 0.24 + normalBody * 0.08
+        let transformerAsymmetry = 0.002 + normalIntensity * 0.008 + normalBody * 0.004
         let transformerBiasOffset = makePolynomialSoftClip(transformerAsymmetry)
-        let transformerMakeupGain: Float = 1 / max(transformerDrive, 0.001)
+        let transformerMakeupGain: Float = 1 / max(1 + (transformerDrive - 1) * 0.35, 0.001)
 
         return LCDSPSettings(
             intensity: normalIntensity,
@@ -1028,12 +1037,12 @@ private enum DSPPrecompute {
             headroomGain: pow(10, (-3 * normalIntensity) / 20),
             dspModel: dspModel == .circuit ? 1 : 0,
             shelf: makeLowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb),
-            warmthAmount: 0.014 * normalIntensity + 0.010 * normalBody,
-            virtualFeedbackGain: 0.48 * normalIntensity,
-            bodyInjectionGain: (0.08 + 0.14 * normalIntensity) * normalBody,
-            circuitHeadroomGain: pow(10, (-4.2 * normalIntensity - 2.0 * normalBody) / 20),
-            drive: 1 + 0.20 * normalIntensity + 0.10 * normalBody,
-            wetMix: min(max(0.62 * normalIntensity + 0.18 * normalBody, 0), 0.82),
+            warmthAmount: 0.008 * normalIntensity + 0.004 * normalBody,
+            virtualFeedbackGain: 0.30 * normalIntensity,
+            bodyInjectionGain: (0.035 + 0.075 * normalIntensity) * normalBody,
+            circuitHeadroomGain: pow(10, (-1.8 * normalIntensity - 0.8 * normalBody) / 20),
+            drive: 1 + 0.10 * normalIntensity + 0.04 * normalBody,
+            wetMix: min(max(0.40 * normalIntensity + 0.10 * normalBody, 0), 0.58),
             bassAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 72 + normalIntensity * 36),
             subAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 38 + normalBody * 26),
             transformerPreEmphasis: makeLowShelf(sampleRate: sampleRate, frequency: transformerShelfFreq, q: 0.72, gainDb: transformerShelfDb),
