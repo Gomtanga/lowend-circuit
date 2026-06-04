@@ -184,8 +184,9 @@ void lc_ring_buffer_clear(LCLockFreeRingBuffer *ringBuffer) {
         return;
     }
 
-    const uint64_t writeIndex = atomic_load_explicit(&ringBuffer->writeIndex, memory_order_acquire);
-    atomic_store_explicit(&ringBuffer->readIndex, writeIndex, memory_order_release);
+    memset(ringBuffer->storage, 0, ringBuffer->capacity * sizeof(float));
+    atomic_store_explicit(&ringBuffer->readIndex, 0, memory_order_release);
+    atomic_store_explicit(&ringBuffer->writeIndex, 0, memory_order_release);
 }
 
 LCControlEventQueue *lc_control_event_queue_create(uint32_t requestedCapacityEvents) {

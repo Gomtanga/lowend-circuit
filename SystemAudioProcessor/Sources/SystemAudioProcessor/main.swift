@@ -35,6 +35,30 @@ private struct Settings {
     }
 }
 
+private struct AudioFormatStatus {
+    let sampleRate: Double
+    let sampleFormat: String
+    let isSampleRateMatched: Bool
+
+    var indicatorText: String {
+        let rateText: String
+        if sampleRate >= 1000 {
+            rateText = String(format: "%.1f kHz", sampleRate / 1000)
+        } else {
+            rateText = String(format: "%.0f Hz", sampleRate)
+        }
+        return "\(rateText) / \(sampleFormat) / \(isSampleRateMatched ? "Bit-Perfect" : "SRC")"
+    }
+}
+
+private enum AudioFormatNotifications {
+    static let didChange = Notification.Name("LowEndAudioHardwareFormatDidChange")
+    static let sampleRateKey = "sampleRate"
+    static let sampleFormatKey = "sampleFormat"
+    static let isSampleRateMatchedKey = "isSampleRateMatched"
+    static let indicatorTextKey = "indicatorText"
+}
+
 private enum AppError: Error, CustomStringConvertible {
     case message(String)
     case osStatus(String, OSStatus)
@@ -328,6 +352,7 @@ private final class SpatialStageView: SCNView {
 private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     private var window: NSWindow!
     private var statusLabel: NSTextField!
+    private var formatLabel: NSTextField!
     private var bundleField: NSTextField!
     private var appsView: NSTextView!
     private var intensitySlider: NSSlider!
@@ -347,7 +372,17 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var processor: SystemAudioProcessor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(audioFormatDidChange(_:)),
+            name: AudioFormatNotifications.didChange,
+            object: nil
+        )
         buildWindow()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -379,6 +414,12 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         let subtitle = makeLabel("시스템 전체 또는 특정 앱 오디오에 저역 보강 처리를 적용합니다.", size: 14, weight: .regular)
         subtitle.frame = NSRect(x: 30, y: 674, width: 680, height: 22)
         content.addSubview(subtitle)
+
+        formatLabel = makeLabel("출력 포맷 대기 중", size: 13, weight: .semibold)
+        formatLabel.alignment = .right
+        formatLabel.frame = NSRect(x: 740, y: 704, width: 430, height: 24)
+        formatLabel.toolTip = "현재 하드웨어 출력 장치의 실제 샘플레이트와 엔진 처리 포맷입니다."
+        content.addSubview(formatLabel)
 
         let spatial = makeSpatialSection()
         spatial.frame = NSRect(x: 740, y: 28, width: 430, height: 636)
@@ -799,6 +840,9 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         if statusLabel != nil {
             statusLabel.stringValue = "중지됨"
         }
+        if formatLabel != nil {
+            formatLabel.stringValue = "출력 포맷 대기 중"
+        }
     }
 
     @objc private func refreshApps() {
@@ -810,6 +854,13 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
 
         appsView.string = apps.joined(separator: "\n")
+    }
+
+    @objc private func audioFormatDidChange(_ notification: Notification) {
+        guard let text = notification.userInfo?[AudioFormatNotifications.indicatorTextKey] as? String else {
+            return
+        }
+        formatLabel?.stringValue = text
     }
 }
 
@@ -898,7 +949,7 @@ private final class LockFreeFloatRingBuffer {
 
 private final class LockFreeControlEventQueue {
     private let handle: OpaquePointer
-    private let sampleRate: Float
+    private var sampleRate: Float
 
     init(capacity: Int = 4096, sampleRate: Float) throws {
         guard let handle = lc_control_event_queue_create(UInt32(max(capacity, 16))) else {
@@ -910,6 +961,10 @@ private final class LockFreeControlEventQueue {
 
     deinit {
         lc_control_event_queue_destroy(handle)
+    }
+
+    func updateSampleRate(_ sampleRate: Float) {
+        self.sampleRate = sampleRate
     }
 
     func pushDSP(intensity: Float, body: Float, outputDb: Float, dspModel: Settings.DSPModel) {
@@ -934,6 +989,11 @@ private final class LockFreeControlEventQueue {
 
     func pop(into event: UnsafeMutablePointer<LCControlEvent>) -> Bool {
         lc_control_event_queue_pop(handle, event) != 0
+    }
+
+    func drain() {
+        var event = LCControlEvent()
+        while pop(into: &event) {}
     }
 }
 
@@ -1103,6 +1163,11 @@ private struct Biquad {
         a2 = coefficients.a2
     }
 
+    mutating func resetState() {
+        z1 = 0
+        z2 = 0
+    }
+
     static func lowPass(sampleRate: Float, frequency: Float, q: Float) -> Biquad {
         var biquad = Biquad()
         biquad.update(DSPPrecompute.makeLowPass(sampleRate: sampleRate, frequency: frequency, q: q))
@@ -1151,6 +1216,13 @@ private final class LowEndDSP: BassProcessor {
         shelfR.update(settings.shelf)
     }
 
+    func resetState() {
+        shelfL.resetState()
+        shelfR.resetState()
+        subL.resetState()
+        subR.resetState()
+    }
+
     func process(left: Float, right: Float) -> (Float, Float) {
         var lShelf = shelfL.process(left)
         var rShelf = shelfR.process(right)
@@ -1172,6 +1244,10 @@ private final class RcLowPass {
 
     func update(alpha: Float) {
         self.alpha = alpha
+    }
+
+    func resetState() {
+        z = 0
     }
 
     func process(_ input: Float) -> Float {
@@ -1226,6 +1302,13 @@ private final class VirtualCircuitBassDSP: BassProcessor {
             deEmphasis.update(settings.transformerDeEmphasis)
             bassPole.update(alpha: settings.bassAlpha)
             subPole.update(alpha: settings.subAlpha)
+        }
+
+        func resetState() {
+            preEmphasis.resetState()
+            deEmphasis.resetState()
+            bassPole.resetState()
+            subPole.resetState()
         }
 
         func process(_ input: Float) -> Float {
@@ -1283,6 +1366,11 @@ private final class VirtualCircuitBassDSP: BassProcessor {
         right.update(settings)
     }
 
+    func resetState() {
+        left.resetState()
+        right.resetState()
+    }
+
     func process(left inputLeft: Float, right inputRight: Float) -> (Float, Float) {
         (left.process(inputLeft), right.process(inputRight))
     }
@@ -1303,6 +1391,13 @@ private final class DelayLine {
         buffer[writeIndex] = input
         writeIndex = (writeIndex + 1) % buffer.count
         return output
+    }
+
+    func reset() {
+        for index in buffer.indices {
+            buffer[index] = 0
+        }
+        writeIndex = 0
     }
 }
 
@@ -1336,6 +1431,13 @@ private final class Spatializer {
         rr = Path(delaySamples: Int(settings.rr.delaySamples), gain: settings.rr.gain)
     }
 
+    func resetState() {
+        leftToLeft.reset()
+        leftToRight.reset()
+        rightToLeft.reset()
+        rightToRight.reset()
+    }
+
     func process(left: Float, right: Float) -> (Float, Float) {
         guard enabled, amount > 0.001 else {
             return (left, right)
@@ -1355,27 +1457,214 @@ private final class Spatializer {
     }
 }
 
+private final class HardwareSampleRateTracker {
+    private let queue: DispatchQueue
+    private let onChange: (AudioObjectID, Double) -> Void
+    private var outputDeviceID = AudioObjectID(kAudioObjectUnknown)
+    private var defaultOutputListener: AudioObjectPropertyListenerBlock?
+    private var sampleRateListener: AudioObjectPropertyListenerBlock?
+    private var isStarted = false
+
+    init(queue: DispatchQueue, onChange: @escaping (AudioObjectID, Double) -> Void) {
+        self.queue = queue
+        self.onChange = onChange
+    }
+
+    deinit {
+        stop()
+    }
+
+    func start() throws {
+        guard !isStarted else { return }
+
+        let defaultListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleDefaultOutputChanged()
+        }
+        defaultOutputListener = defaultListener
+
+        var address = Self.defaultOutputDeviceAddress()
+        try check(
+            AudioObjectAddPropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                queue,
+                defaultListener
+            ),
+            "AudioObjectAddPropertyListenerBlock DefaultOutputDevice"
+        )
+
+        isStarted = true
+        do {
+            try refreshOutputDevice(forceNotify: true)
+        } catch {
+            stop()
+            throw error
+        }
+    }
+
+    func stop() {
+        removeSampleRateListener()
+
+        if let defaultOutputListener {
+            var address = Self.defaultOutputDeviceAddress()
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                queue,
+                defaultOutputListener
+            )
+            self.defaultOutputListener = nil
+        }
+
+        isStarted = false
+    }
+
+    private func handleDefaultOutputChanged() {
+        do {
+            try refreshOutputDevice(forceNotify: true)
+        } catch {
+            fputs("Default output change handling failed: \(error)\n", stderr)
+        }
+    }
+
+    private func handleSampleRateChanged() {
+        do {
+            let deviceID = outputDeviceID
+            guard deviceID != kAudioObjectUnknown else { return }
+            onChange(deviceID, try Self.nominalSampleRate(for: deviceID))
+        } catch {
+            fputs("Sample rate change handling failed: \(error)\n", stderr)
+        }
+    }
+
+    private func refreshOutputDevice(forceNotify: Bool) throws {
+        let newDeviceID = try Self.defaultOutputDevice()
+        let deviceChanged = newDeviceID != outputDeviceID
+
+        if deviceChanged {
+            removeSampleRateListener()
+            outputDeviceID = newDeviceID
+            try installSampleRateListener(for: newDeviceID)
+        }
+
+        if forceNotify || deviceChanged {
+            onChange(newDeviceID, try Self.nominalSampleRate(for: newDeviceID))
+        }
+    }
+
+    private func installSampleRateListener(for deviceID: AudioObjectID) throws {
+        guard deviceID != kAudioObjectUnknown else { return }
+
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleSampleRateChanged()
+        }
+        sampleRateListener = listener
+
+        var address = Self.nominalSampleRateAddress()
+        try check(
+            AudioObjectAddPropertyListenerBlock(deviceID, &address, queue, listener),
+            "AudioObjectAddPropertyListenerBlock NominalSampleRate"
+        )
+    }
+
+    private func removeSampleRateListener() {
+        guard outputDeviceID != kAudioObjectUnknown, let sampleRateListener else { return }
+        var address = Self.nominalSampleRateAddress()
+        AudioObjectRemovePropertyListenerBlock(outputDeviceID, &address, queue, sampleRateListener)
+        self.sampleRateListener = nil
+    }
+
+    static func defaultOutputDevice() throws -> AudioObjectID {
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var dataSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        var address = defaultOutputDeviceAddress()
+        try check(
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                0,
+                nil,
+                &dataSize,
+                &deviceID
+            ),
+            "AudioObjectGetPropertyData DefaultOutputDevice"
+        )
+        return deviceID
+    }
+
+    static func nominalSampleRate(for deviceID: AudioObjectID) throws -> Double {
+        guard deviceID != kAudioObjectUnknown else {
+            throw AppError.message("Default output device is unknown.")
+        }
+
+        var sampleRate = Float64(0)
+        var dataSize = UInt32(MemoryLayout<Float64>.size)
+        var address = nominalSampleRateAddress()
+        try check(
+            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &sampleRate),
+            "AudioObjectGetPropertyData NominalSampleRate"
+        )
+        return Double(sampleRate)
+    }
+
+    private static func defaultOutputDeviceAddress() -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+    }
+
+    private static func nominalSampleRateAddress() -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+    }
+}
+
 @available(macOS 14.4, *)
-private final class SystemAudioProcessor {
+private final class SystemAudioProcessor: @unchecked Sendable {
     private let settings: Settings
-    private let sampleRate: Double = 48_000
     private let ringBuffer: LockFreeFloatRingBuffer
     private let controlQueue: LockFreeControlEventQueue
     private let scratchFrameCapacity = 8192
     private let inputScratch: UnsafeMutablePointer<Float>
+    private let managerQueue = DispatchQueue(label: "com.codexaudiolab.lowendcircuit.audio-manager")
     private let engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
+    private var hardwareTracker: HardwareSampleRateTracker?
+    private var currentOutputDeviceID: AudioObjectID
+    private var currentSampleRate: Double
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private let cleanDSP: LowEndDSP
     private let circuitDSP: VirtualCircuitBassDSP
     private var activeDSPModel: Settings.DSPModel
-    private lazy var spatializer = Spatializer(sampleRate: Float(sampleRate), settings: settings.spatial)
+    private let spatializer: Spatializer
+    private var currentIntensity: Float
+    private var currentBody: Float
+    private var currentOutputDb: Float
+    private var currentDSPModel: Settings.DSPModel
+    private var currentSpatialSettings: SpatialSettings
+    private var isStarted = false
 
     init(settings: Settings) throws {
+        let outputDeviceID = try HardwareSampleRateTracker.defaultOutputDevice()
+        let detectedSampleRate = try HardwareSampleRateTracker.nominalSampleRate(for: outputDeviceID)
+        let sampleRate = Self.validSampleRate(detectedSampleRate)
+
         self.settings = settings
-        self.ringBuffer = try LockFreeFloatRingBuffer(capacityFrames: 48_000 * 4, channels: 2)
+        self.currentOutputDeviceID = outputDeviceID
+        self.currentSampleRate = sampleRate
+        self.currentIntensity = settings.intensity
+        self.currentBody = settings.body
+        self.currentOutputDb = settings.outputDb
+        self.currentDSPModel = settings.dspModel
+        self.currentSpatialSettings = settings.spatial
+        self.ringBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)) * 4, channels: 2)
         self.controlQueue = try LockFreeControlEventQueue(sampleRate: Float(sampleRate))
         self.inputScratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrameCapacity * 2)
         self.cleanDSP = LowEndDSP(
@@ -1391,48 +1680,94 @@ private final class SystemAudioProcessor {
             outputDb: settings.outputDb
         )
         self.activeDSPModel = settings.dspModel
+        self.spatializer = Spatializer(sampleRate: Float(sampleRate), settings: settings.spatial)
     }
 
     deinit {
+        stop()
         inputScratch.deallocate()
     }
 
     func start() throws {
-        try startOutput()
-        try createProcessTapAndAggregateDevice()
-        try startCapture()
+        try managerQueue.sync {
+            guard !isStarted else { return }
+            isStarted = true
+            try startOutput(sampleRate: currentSampleRate)
+            try createProcessTapAndAggregateDevice()
+            try startCapture()
+            hardwareTracker = HardwareSampleRateTracker(queue: managerQueue) { [weak self] deviceID, sampleRate in
+                self?.handleHardwareFormatChange(deviceID: deviceID, sampleRate: sampleRate)
+            }
+            try hardwareTracker?.start()
+            publishFormatStatus()
+        }
         print("LowEnd system audio processing is running. Press Ctrl-C to stop.")
     }
 
     func updateDSP(intensity: Float, body: Float, outputDb: Float, dspModel: Settings.DSPModel) {
-        controlQueue.pushDSP(intensity: intensity, body: body, outputDb: outputDb, dspModel: dspModel)
+        managerQueue.async { [weak self] in
+            guard let self else { return }
+            currentIntensity = intensity
+            currentBody = body
+            currentOutputDb = outputDb
+            currentDSPModel = dspModel
+            controlQueue.pushDSP(intensity: intensity, body: body, outputDb: outputDb, dspModel: dspModel)
+        }
     }
 
     func updateSpatial(_ settings: SpatialSettings) {
-        controlQueue.pushSpatial(settings)
+        managerQueue.async { [weak self] in
+            guard let self else { return }
+            currentSpatialSettings = settings
+            controlQueue.pushSpatial(settings)
+        }
     }
 
     func stop() {
-        if aggregateDeviceID != kAudioObjectUnknown {
-            if let ioProcID {
-                AudioDeviceStop(aggregateDeviceID, ioProcID)
-                AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+        managerQueue.sync {
+            guard isStarted || hardwareTracker != nil || aggregateDeviceID != kAudioObjectUnknown || tapID != kAudioObjectUnknown else {
+                engine.stop()
+                return
             }
-            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
-            aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
-        }
 
-        if tapID != kAudioObjectUnknown {
-            AudioHardwareDestroyProcessTap(tapID)
-            tapID = AudioObjectID(kAudioObjectUnknown)
+            hardwareTracker?.stop()
+            hardwareTracker = nil
+            stopCaptureAndDestroyAggregateDevice()
+            destroyProcessTap()
+            engine.stop()
+            if let sourceNode {
+                engine.disconnectNodeOutput(sourceNode)
+                engine.detach(sourceNode)
+                self.sourceNode = nil
+            }
+            ringBuffer.clear()
+            isStarted = false
         }
-
-        engine.stop()
     }
 
-    private func startOutput() throws {
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
-        let node = AVAudioSourceNode { [ringBuffer] _, _, frameCount, audioBufferList -> OSStatus in
+    private func startOutput(sampleRate: Double) throws {
+        try configureOutputGraph(sampleRate: sampleRate)
+        try engine.start()
+    }
+
+    private func configureOutputGraph(sampleRate: Double) throws {
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
+            throw AppError.message("Could not create AVAudioFormat for \(sampleRate) Hz.")
+        }
+
+        let node = try sourceNode ?? makeSourceNode()
+        if sourceNode == nil {
+            sourceNode = node
+            engine.attach(node)
+        }
+
+        engine.disconnectNodeOutput(node)
+        engine.connect(node, to: engine.outputNode, format: format)
+        engine.prepare()
+    }
+
+    private func makeSourceNode() throws -> AVAudioSourceNode {
+        AVAudioSourceNode { [ringBuffer] _, _, frameCount, audioBufferList -> OSStatus in
             let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
             let frames = Int(frameCount)
 
@@ -1450,11 +1785,131 @@ private final class SystemAudioProcessor {
 
             return noErr
         }
+    }
 
-        sourceNode = node
-        engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: format)
+    private func handleHardwareFormatChange(deviceID: AudioObjectID, sampleRate: Double) {
+        let newSampleRate = Self.validSampleRate(sampleRate)
+        let deviceChanged = deviceID != currentOutputDeviceID
+        let rateChanged = abs(newSampleRate - currentSampleRate) > 0.5
+
+        guard isStarted else {
+            currentOutputDeviceID = deviceID
+            currentSampleRate = newSampleRate
+            controlQueue.updateSampleRate(Float(newSampleRate))
+            publishFormatStatus()
+            return
+        }
+
+        guard deviceChanged || rateChanged else {
+            publishFormatStatus()
+            return
+        }
+
+        do {
+            try reconfigureForHardwareFormat(deviceID: deviceID, sampleRate: newSampleRate)
+        } catch {
+            fputs("Output format reconfigure failed: \(error)\n", stderr)
+        }
+    }
+
+    private func reconfigureForHardwareFormat(deviceID: AudioObjectID, sampleRate: Double) throws {
+        engine.stop()
+        stopCaptureForReconfigure()
+        ringBuffer.clear()
+        controlQueue.drain()
+        resetDSPState()
+
+        currentOutputDeviceID = deviceID
+        currentSampleRate = sampleRate
+        controlQueue.updateSampleRate(Float(sampleRate))
+        applyCurrentSettingsDirectly()
+
+        try configureOutputGraph(sampleRate: sampleRate)
         try engine.start()
+        try resumeCaptureAfterReconfigure()
+        publishFormatStatus()
+        print("Output format re-synced: \(AudioFormatStatus(sampleRate: sampleRate, sampleFormat: "32-bit Float", isSampleRateMatched: true).indicatorText)")
+    }
+
+    private func stopCaptureForReconfigure() {
+        if aggregateDeviceID != kAudioObjectUnknown {
+            if let ioProcID {
+                AudioDeviceStop(aggregateDeviceID, ioProcID)
+            }
+        }
+    }
+
+    private func resumeCaptureAfterReconfigure() throws {
+        if aggregateDeviceID != kAudioObjectUnknown, let ioProcID {
+            try check(AudioDeviceStart(aggregateDeviceID, ioProcID), "AudioDeviceStart")
+        }
+    }
+
+    private func stopCaptureAndDestroyAggregateDevice() {
+        if aggregateDeviceID == kAudioObjectUnknown {
+            return
+        }
+
+        if let ioProcID {
+            AudioDeviceStop(aggregateDeviceID, ioProcID)
+            AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+            self.ioProcID = nil
+        }
+
+        AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+        aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
+    }
+
+    private func destroyProcessTap() {
+        guard tapID != kAudioObjectUnknown else { return }
+        AudioHardwareDestroyProcessTap(tapID)
+        tapID = AudioObjectID(kAudioObjectUnknown)
+    }
+
+    private func resetDSPState() {
+        cleanDSP.resetState()
+        circuitDSP.resetState()
+        spatializer.resetState()
+    }
+
+    private func applyCurrentSettingsDirectly() {
+        let sampleRate = Float(currentSampleRate)
+        let dspSettings = DSPPrecompute.makeDSPSettings(
+            sampleRate: sampleRate,
+            intensity: currentIntensity,
+            body: currentBody,
+            outputDb: currentOutputDb,
+            dspModel: currentDSPModel
+        )
+        activeDSPModel = currentDSPModel
+        cleanDSP.update(dspSettings)
+        circuitDSP.update(dspSettings)
+        spatializer.update(DSPPrecompute.makeSpatialSettings(sampleRate: sampleRate, settings: currentSpatialSettings))
+    }
+
+    private func publishFormatStatus() {
+        let status = AudioFormatStatus(
+            sampleRate: currentSampleRate,
+            sampleFormat: "32-bit Float",
+            isSampleRateMatched: true
+        )
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: AudioFormatNotifications.didChange,
+                object: nil,
+                userInfo: [
+                    AudioFormatNotifications.sampleRateKey: status.sampleRate,
+                    AudioFormatNotifications.sampleFormatKey: status.sampleFormat,
+                    AudioFormatNotifications.isSampleRateMatchedKey: status.isSampleRateMatched,
+                    AudioFormatNotifications.indicatorTextKey: status.indicatorText
+                ]
+            )
+        }
+    }
+
+    private static func validSampleRate(_ sampleRate: Double) -> Double {
+        guard sampleRate.isFinite, sampleRate >= 8_000 else { return 48_000 }
+        return sampleRate
     }
 
     private func makeTapDescription() throws -> CATapDescription {
