@@ -9,8 +9,13 @@ let package = Package(
         .executable(name: "SystemAudioProcessor", targets: ["SystemAudioProcessor"])
     ],
     targets: [
+        .target(
+            name: "AudioRingBufferC",
+            path: "Sources/AudioRingBufferC"
+        ),
         .executableTarget(
             name: "SystemAudioProcessor",
+            dependencies: ["AudioRingBufferC"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),

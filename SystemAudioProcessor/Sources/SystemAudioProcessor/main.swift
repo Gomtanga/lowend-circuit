@@ -1,6 +1,7 @@
 import AppKit
 import AudioToolbox
 import AVFoundation
+import AudioRingBufferC
 import CoreAudio
 import Darwin
 import Foundation
@@ -782,7 +783,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         stopAudio()
 
         do {
-            let processor = SystemAudioProcessor(settings: settings)
+            let processor = try SystemAudioProcessor(settings: settings)
             try processor.start()
             self.processor = processor
             statusLabel.stringValue = "처리 중입니다. 소리가 안 나면 중지를 눌러 원래 출력으로 복구하세요."
@@ -863,60 +864,35 @@ private func listRunningApps() {
     }
 }
 
-private final class FloatRingBuffer {
-    private var storage: [Float]
-    private var readIndex = 0
-    private var writeIndex = 0
-    private var available = 0
-    private let lock = NSLock()
+private final class LockFreeFloatRingBuffer {
+    private let handle: OpaquePointer
 
-    init(capacityFrames: Int, channels: Int) {
-        storage = Array(repeating: 0, count: max(capacityFrames * channels, channels * 512))
+    init(capacityFrames: Int, channels: Int) throws {
+        let requestedSamples = UInt32(max(capacityFrames * channels, channels * 512))
+        guard let handle = lc_ring_buffer_create(requestedSamples) else {
+            throw AppError.message("Could not allocate audio ring buffer.")
+        }
+        self.handle = handle
     }
 
-    func push(_ samples: [Float]) {
-        lock.lock()
-        defer { lock.unlock() }
-
-        for sample in samples {
-            storage[writeIndex] = sample
-            writeIndex = (writeIndex + 1) % storage.count
-            if available < storage.count {
-                available += 1
-            } else {
-                readIndex = (readIndex + 1) % storage.count
-            }
-        }
+    deinit {
+        lc_ring_buffer_destroy(handle)
     }
 
-    func pop(into pointer: UnsafeMutablePointer<Float>, count: Int) {
-        lock.lock()
-        defer { lock.unlock() }
-
-        for index in 0..<count {
-            if available > 0 {
-                pointer[index] = storage[readIndex]
-                readIndex = (readIndex + 1) % storage.count
-                available -= 1
-            } else {
-                pointer[index] = 0
-            }
-        }
+    func push(_ samples: UnsafePointer<Float>, count: Int) {
+        _ = lc_ring_buffer_push(handle, samples, UInt32(max(count, 0)))
     }
 
-    func pop(count: Int) -> [Float] {
-        lock.lock()
-        defer { lock.unlock() }
+    func popInterleaved(into pointer: UnsafeMutablePointer<Float>, count: Int) {
+        _ = lc_ring_buffer_pop(handle, pointer, UInt32(max(count, 0)))
+    }
 
-        var result = Array(repeating: Float(0), count: count)
-        for index in 0..<count {
-            if available > 0 {
-                result[index] = storage[readIndex]
-                readIndex = (readIndex + 1) % storage.count
-                available -= 1
-            }
-        }
-        return result
+    func popStereo(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, frameCount: Int) {
+        _ = lc_ring_buffer_pop_deinterleaved_stereo(handle, left, right, UInt32(max(frameCount, 0)))
+    }
+
+    func clear() {
+        lc_ring_buffer_clear(handle)
     }
 }
 
@@ -1195,7 +1171,9 @@ private final class Spatializer {
 private final class SystemAudioProcessor {
     private let settings: Settings
     private let sampleRate: Double = 48_000
-    private let ringBuffer = FloatRingBuffer(capacityFrames: 48_000 * 4, channels: 2)
+    private let ringBuffer: LockFreeFloatRingBuffer
+    private let scratchFrameCapacity = 8192
+    private let inputScratch: UnsafeMutablePointer<Float>
     private let engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -1210,8 +1188,14 @@ private final class SystemAudioProcessor {
     )
     private lazy var spatializer = Spatializer(sampleRate: Float(sampleRate), settings: settings.spatial)
 
-    init(settings: Settings) {
+    init(settings: Settings) throws {
         self.settings = settings
+        self.ringBuffer = try LockFreeFloatRingBuffer(capacityFrames: 48_000 * 4, channels: 2)
+        self.inputScratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrameCapacity * 2)
+    }
+
+    deinit {
+        inputScratch.deallocate()
     }
 
     func start() throws {
@@ -1270,17 +1254,15 @@ private final class SystemAudioProcessor {
             let frames = Int(frameCount)
 
             if abl.count >= 2 {
-                let samples = ringBuffer.pop(count: frames * 2)
-                for channel in 0..<min(2, abl.count) {
-                    guard let data = abl[channel].mData?.assumingMemoryBound(to: Float.self) else { continue }
-                    for frame in 0..<frames {
-                        data[frame] = samples[frame * 2 + channel]
-                    }
+                guard let left = abl[0].mData?.assumingMemoryBound(to: Float.self),
+                      let right = abl[1].mData?.assumingMemoryBound(to: Float.self) else {
+                    return noErr
                 }
+                ringBuffer.popStereo(left: left, right: right, frameCount: frames)
             } else if let buffer = abl.first,
                       let data = buffer.mData?.assumingMemoryBound(to: Float.self) {
                 let channels = max(Int(buffer.mNumberChannels), 1)
-                ringBuffer.pop(into: data, count: frames * channels)
+                ringBuffer.popInterleaved(into: data, count: frames * channels)
             }
 
             return noErr
@@ -1397,7 +1379,6 @@ private final class SystemAudioProcessor {
         guard let first = buffers.first, first.mDataByteSize > 0 else { return }
 
         let frameCount = Int(first.mDataByteSize) / MemoryLayout<Float>.size
-        var output = Array(repeating: Float(0), count: frameCount * 2)
 
         dspLock.lock()
         defer { dspLock.unlock() }
@@ -1405,33 +1386,71 @@ private final class SystemAudioProcessor {
         if buffers.count >= 2,
            let leftData = buffers[0].mData?.assumingMemoryBound(to: Float.self),
            let rightData = buffers[1].mData?.assumingMemoryBound(to: Float.self) {
-            for frame in 0..<frameCount {
-                let processed = dsp.process(left: leftData[frame], right: rightData[frame])
-                let spatial = spatializer.process(left: processed.0, right: processed.1)
-                output[frame * 2] = spatial.0
-                output[frame * 2 + 1] = spatial.1
-            }
+            processAndPushStereo(left: leftData, right: rightData, frameCount: frameCount)
         } else if first.mNumberChannels == 2,
                   let interleaved = first.mData?.assumingMemoryBound(to: Float.self) {
             let stereoFrames = frameCount / 2
-            output.removeAll(keepingCapacity: true)
-            output.reserveCapacity(stereoFrames * 2)
-            for frame in 0..<stereoFrames {
-                let processed = dsp.process(left: interleaved[frame * 2], right: interleaved[frame * 2 + 1])
-                let spatial = spatializer.process(left: processed.0, right: processed.1)
-                output.append(spatial.0)
-                output.append(spatial.1)
-            }
+            processAndPushInterleavedStereo(interleaved, frameCount: stereoFrames)
         } else if let mono = first.mData?.assumingMemoryBound(to: Float.self) {
-            for frame in 0..<frameCount {
-                let processed = dsp.process(left: mono[frame], right: mono[frame])
-                let spatial = spatializer.process(left: processed.0, right: processed.1)
-                output[frame * 2] = spatial.0
-                output[frame * 2 + 1] = spatial.1
-            }
+            processAndPushMono(mono, frameCount: frameCount)
         }
+    }
 
-        ringBuffer.push(output)
+    private func processAndPushStereo(left: UnsafePointer<Float>,
+                                      right: UnsafePointer<Float>,
+                                      frameCount: Int) {
+        var offset = 0
+        while offset < frameCount {
+            let chunkFrames = min(scratchFrameCapacity, frameCount - offset)
+            let leftChunk = left.advanced(by: offset)
+            let rightChunk = right.advanced(by: offset)
+
+            for frame in 0..<chunkFrames {
+                let processed = dsp.process(left: leftChunk[frame], right: rightChunk[frame])
+                let spatial = spatializer.process(left: processed.0, right: processed.1)
+                inputScratch[frame * 2] = spatial.0
+                inputScratch[frame * 2 + 1] = spatial.1
+            }
+
+            ringBuffer.push(inputScratch, count: chunkFrames * 2)
+            offset += chunkFrames
+        }
+    }
+
+    private func processAndPushInterleavedStereo(_ interleaved: UnsafePointer<Float>, frameCount: Int) {
+        var offset = 0
+        while offset < frameCount {
+            let chunkFrames = min(scratchFrameCapacity, frameCount - offset)
+            let chunk = interleaved.advanced(by: offset * 2)
+
+            for frame in 0..<chunkFrames {
+                let processed = dsp.process(left: chunk[frame * 2], right: chunk[frame * 2 + 1])
+                let spatial = spatializer.process(left: processed.0, right: processed.1)
+                inputScratch[frame * 2] = spatial.0
+                inputScratch[frame * 2 + 1] = spatial.1
+            }
+
+            ringBuffer.push(inputScratch, count: chunkFrames * 2)
+            offset += chunkFrames
+        }
+    }
+
+    private func processAndPushMono(_ mono: UnsafePointer<Float>, frameCount: Int) {
+        var offset = 0
+        while offset < frameCount {
+            let chunkFrames = min(scratchFrameCapacity, frameCount - offset)
+            let chunk = mono.advanced(by: offset)
+
+            for frame in 0..<chunkFrames {
+                let processed = dsp.process(left: chunk[frame], right: chunk[frame])
+                let spatial = spatializer.process(left: processed.0, right: processed.1)
+                inputScratch[frame * 2] = spatial.0
+                inputScratch[frame * 2 + 1] = spatial.1
+            }
+
+            ringBuffer.push(inputScratch, count: chunkFrames * 2)
+            offset += chunkFrames
+        }
     }
 }
 
@@ -1454,7 +1473,7 @@ do {
         throw AppError.message("Native system audio processing requires macOS 14.4 or newer.")
     }
 
-    let processor = SystemAudioProcessor(settings: settings)
+    let processor = try SystemAudioProcessor(settings: settings)
     let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
     signal(SIGINT, SIG_IGN)
     signalSource.setEventHandler {
