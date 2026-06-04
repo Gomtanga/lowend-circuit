@@ -896,6 +896,50 @@ private final class LockFreeFloatRingBuffer {
     }
 }
 
+private final class LockFreeControlEventQueue {
+    private let handle: OpaquePointer
+
+    init(capacity: Int = 4096) throws {
+        guard let handle = lc_control_event_queue_create(UInt32(max(capacity, 16))) else {
+            throw AppError.message("Could not allocate audio control event queue.")
+        }
+        self.handle = handle
+    }
+
+    deinit {
+        lc_control_event_queue_destroy(handle)
+    }
+
+    func pushDSP(intensity: Float, body: Float, outputDb: Float, dspModel: Settings.DSPModel) {
+        var event = LCControlEvent()
+        event.type = UInt32(LC_CONTROL_EVENT_DSP)
+        event.dsp = LCDSPSettings(
+            intensity: intensity,
+            body: body,
+            outputDb: outputDb,
+            dspModel: dspModel == .circuit ? 1 : 0
+        )
+        _ = withUnsafePointer(to: &event) { lc_control_event_queue_push(handle, $0) }
+    }
+
+    func pushSpatial(_ settings: SpatialSettings) {
+        var event = LCControlEvent()
+        event.type = UInt32(LC_CONTROL_EVENT_SPATIAL)
+        event.spatial = LCSpatialSettings(
+            enabled: settings.enabled ? 1 : 0,
+            listenerX: settings.listenerX,
+            listenerZ: settings.listenerZ,
+            speakerWidth: settings.speakerWidth,
+            amount: settings.amount
+        )
+        _ = withUnsafePointer(to: &event) { lc_control_event_queue_push(handle, $0) }
+    }
+
+    func pop(into event: UnsafeMutablePointer<LCControlEvent>) -> Bool {
+        lc_control_event_queue_pop(handle, event) != 0
+    }
+}
+
 private struct Biquad {
     var b0: Float = 1
     var b1: Float = 0
@@ -1172,6 +1216,7 @@ private final class SystemAudioProcessor {
     private let settings: Settings
     private let sampleRate: Double = 48_000
     private let ringBuffer: LockFreeFloatRingBuffer
+    private let controlQueue: LockFreeControlEventQueue
     private let scratchFrameCapacity = 8192
     private let inputScratch: UnsafeMutablePointer<Float>
     private let engine = AVAudioEngine()
@@ -1179,7 +1224,6 @@ private final class SystemAudioProcessor {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
-    private let dspLock = NSLock()
     private lazy var dsp: BassProcessor = makeBassProcessor(
         dspModel: settings.dspModel,
         intensity: settings.intensity,
@@ -1191,6 +1235,7 @@ private final class SystemAudioProcessor {
     init(settings: Settings) throws {
         self.settings = settings
         self.ringBuffer = try LockFreeFloatRingBuffer(capacityFrames: 48_000 * 4, channels: 2)
+        self.controlQueue = try LockFreeControlEventQueue()
         self.inputScratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrameCapacity * 2)
     }
 
@@ -1206,15 +1251,11 @@ private final class SystemAudioProcessor {
     }
 
     func updateDSP(intensity: Float, body: Float, outputDb: Float, dspModel: Settings.DSPModel) {
-        dspLock.lock()
-        dsp = makeBassProcessor(dspModel: dspModel, intensity: intensity, body: body, outputDb: outputDb)
-        dspLock.unlock()
+        controlQueue.pushDSP(intensity: intensity, body: body, outputDb: outputDb, dspModel: dspModel)
     }
 
     func updateSpatial(_ settings: SpatialSettings) {
-        dspLock.lock()
-        spatializer.update(settings: settings)
-        dspLock.unlock()
+        controlQueue.pushSpatial(settings)
     }
 
     private func makeBassProcessor(dspModel: Settings.DSPModel,
@@ -1379,9 +1420,7 @@ private final class SystemAudioProcessor {
         guard let first = buffers.first, first.mDataByteSize > 0 else { return }
 
         let frameCount = Int(first.mDataByteSize) / MemoryLayout<Float>.size
-
-        dspLock.lock()
-        defer { dspLock.unlock() }
+        applyPendingControlEvents()
 
         if buffers.count >= 2,
            let leftData = buffers[0].mData?.assumingMemoryBound(to: Float.self),
@@ -1393,6 +1432,46 @@ private final class SystemAudioProcessor {
             processAndPushInterleavedStereo(interleaved, frameCount: stereoFrames)
         } else if let mono = first.mData?.assumingMemoryBound(to: Float.self) {
             processAndPushMono(mono, frameCount: frameCount)
+        }
+    }
+
+    private func applyPendingControlEvents() {
+        var event = LCControlEvent()
+        var latestDSP = LCDSPSettings()
+        var hasDSP = false
+        var latestSpatial = LCSpatialSettings()
+        var hasSpatial = false
+
+        while controlQueue.pop(into: &event) {
+            switch event.type {
+            case UInt32(LC_CONTROL_EVENT_DSP):
+                latestDSP = event.dsp
+                hasDSP = true
+            case UInt32(LC_CONTROL_EVENT_SPATIAL):
+                latestSpatial = event.spatial
+                hasSpatial = true
+            default:
+                break
+            }
+        }
+
+        if hasDSP {
+            dsp = makeBassProcessor(
+                dspModel: latestDSP.dspModel == 1 ? .circuit : .clean,
+                intensity: latestDSP.intensity,
+                body: latestDSP.body,
+                outputDb: latestDSP.outputDb
+            )
+        }
+
+        if hasSpatial {
+            spatializer.update(settings: SpatialSettings(
+                enabled: latestSpatial.enabled != 0,
+                listenerX: latestSpatial.listenerX,
+                listenerZ: latestSpatial.listenerZ,
+                speakerWidth: latestSpatial.speakerWidth,
+                amount: latestSpatial.amount
+            ))
         }
     }
 

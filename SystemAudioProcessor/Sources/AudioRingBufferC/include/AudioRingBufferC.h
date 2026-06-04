@@ -9,6 +9,33 @@ extern "C" {
 #endif
 
 typedef struct LCLockFreeRingBuffer LCLockFreeRingBuffer;
+typedef struct LCControlEventQueue LCControlEventQueue;
+
+enum {
+    LC_CONTROL_EVENT_DSP = 1,
+    LC_CONTROL_EVENT_SPATIAL = 2
+};
+
+typedef struct {
+    float intensity;
+    float body;
+    float outputDb;
+    uint32_t dspModel;
+} LCDSPSettings;
+
+typedef struct {
+    uint32_t enabled;
+    float listenerX;
+    float listenerZ;
+    float speakerWidth;
+    float amount;
+} LCSpatialSettings;
+
+typedef struct {
+    uint32_t type;
+    LCDSPSettings dsp;
+    LCSpatialSettings spatial;
+} LCControlEvent;
 
 LCLockFreeRingBuffer *lc_ring_buffer_create(uint32_t requestedCapacitySamples);
 void lc_ring_buffer_destroy(LCLockFreeRingBuffer *ringBuffer);
@@ -23,6 +50,12 @@ uint32_t lc_ring_buffer_pop_deinterleaved_stereo(LCLockFreeRingBuffer *ringBuffe
                                                  float *right,
                                                  uint32_t frameCount);
 void lc_ring_buffer_clear(LCLockFreeRingBuffer *ringBuffer);
+
+LCControlEventQueue *lc_control_event_queue_create(uint32_t requestedCapacityEvents);
+void lc_control_event_queue_destroy(LCControlEventQueue *queue);
+uint32_t lc_control_event_queue_push(LCControlEventQueue *queue, const LCControlEvent *event);
+uint32_t lc_control_event_queue_pop(LCControlEventQueue *queue, LCControlEvent *event);
+uint32_t lc_control_event_queue_available(const LCControlEventQueue *queue);
 
 #ifdef __cplusplus
 }

@@ -12,6 +12,14 @@ struct LCLockFreeRingBuffer {
     atomic_uint_fast64_t writeIndex;
 };
 
+struct LCControlEventQueue {
+    LCControlEvent *storage;
+    uint32_t capacity;
+    uint32_t mask;
+    atomic_uint_fast64_t readIndex;
+    atomic_uint_fast64_t writeIndex;
+};
+
 static uint32_t next_power_of_two(uint32_t value) {
     if (value < 2) {
         return 2;
@@ -178,4 +186,78 @@ void lc_ring_buffer_clear(LCLockFreeRingBuffer *ringBuffer) {
 
     const uint64_t writeIndex = atomic_load_explicit(&ringBuffer->writeIndex, memory_order_acquire);
     atomic_store_explicit(&ringBuffer->readIndex, writeIndex, memory_order_release);
+}
+
+LCControlEventQueue *lc_control_event_queue_create(uint32_t requestedCapacityEvents) {
+    LCControlEventQueue *queue = (LCControlEventQueue *)calloc(1, sizeof(LCControlEventQueue));
+    if (queue == NULL) {
+        return NULL;
+    }
+
+    const uint32_t capacity = next_power_of_two(requestedCapacityEvents);
+    queue->storage = (LCControlEvent *)calloc(capacity, sizeof(LCControlEvent));
+    if (queue->storage == NULL) {
+        free(queue);
+        return NULL;
+    }
+
+    queue->capacity = capacity;
+    queue->mask = capacity - 1;
+    atomic_init(&queue->readIndex, 0);
+    atomic_init(&queue->writeIndex, 0);
+    return queue;
+}
+
+void lc_control_event_queue_destroy(LCControlEventQueue *queue) {
+    if (queue == NULL) {
+        return;
+    }
+
+    free(queue->storage);
+    free(queue);
+}
+
+uint32_t lc_control_event_queue_push(LCControlEventQueue *queue, const LCControlEvent *event) {
+    if (queue == NULL || event == NULL) {
+        return 0;
+    }
+
+    const uint64_t readIndex = atomic_load_explicit(&queue->readIndex, memory_order_acquire);
+    const uint64_t writeIndex = atomic_load_explicit(&queue->writeIndex, memory_order_relaxed);
+
+    if (writeIndex - readIndex >= queue->capacity) {
+        return 0;
+    }
+
+    queue->storage[writeIndex & queue->mask] = *event;
+    atomic_store_explicit(&queue->writeIndex, writeIndex + 1, memory_order_release);
+    return 1;
+}
+
+uint32_t lc_control_event_queue_pop(LCControlEventQueue *queue, LCControlEvent *event) {
+    if (queue == NULL || event == NULL) {
+        return 0;
+    }
+
+    const uint64_t writeIndex = atomic_load_explicit(&queue->writeIndex, memory_order_acquire);
+    const uint64_t readIndex = atomic_load_explicit(&queue->readIndex, memory_order_relaxed);
+
+    if (writeIndex == readIndex) {
+        return 0;
+    }
+
+    *event = queue->storage[readIndex & queue->mask];
+    atomic_store_explicit(&queue->readIndex, readIndex + 1, memory_order_release);
+    return 1;
+}
+
+uint32_t lc_control_event_queue_available(const LCControlEventQueue *queue) {
+    if (queue == NULL) {
+        return 0;
+    }
+
+    const uint64_t writeIndex = atomic_load_explicit(&queue->writeIndex, memory_order_acquire);
+    const uint64_t readIndex = atomic_load_explicit(&queue->readIndex, memory_order_acquire);
+    const uint64_t available = writeIndex - readIndex;
+    return available > queue->capacity ? queue->capacity : (uint32_t)available;
 }
