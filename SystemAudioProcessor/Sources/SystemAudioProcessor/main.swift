@@ -956,21 +956,19 @@ private struct Biquad {
         return output
     }
 
-    static func lowPass(sampleRate: Float, frequency: Float, q: Float) -> Biquad {
+    mutating func updateLowPass(sampleRate: Float, frequency: Float, q: Float) {
         let w0 = 2 * Float.pi * frequency / sampleRate
         let alpha = sin(w0) / (2 * q)
         let cosW0 = cos(w0)
         let a0 = 1 + alpha
-        return Biquad(
-            b0: ((1 - cosW0) / 2) / a0,
-            b1: (1 - cosW0) / a0,
-            b2: ((1 - cosW0) / 2) / a0,
-            a1: (-2 * cosW0) / a0,
-            a2: (1 - alpha) / a0
-        )
+        b0 = ((1 - cosW0) / 2) / a0
+        b1 = (1 - cosW0) / a0
+        b2 = ((1 - cosW0) / 2) / a0
+        a1 = (-2 * cosW0) / a0
+        a2 = (1 - alpha) / a0
     }
 
-    static func lowShelf(sampleRate: Float, frequency: Float, q: Float, gainDb: Float) -> Biquad {
+    mutating func updateLowShelf(sampleRate: Float, frequency: Float, q: Float, gainDb: Float) {
         let a = pow(10, gainDb / 40)
         let w0 = 2 * Float.pi * frequency / sampleRate
         let cosW0 = cos(w0)
@@ -979,13 +977,23 @@ private struct Biquad {
         let beta = 2 * sqrt(a) * alpha
         let a0 = (a + 1) + (a - 1) * cosW0 + beta
 
-        return Biquad(
-            b0: a * ((a + 1) - (a - 1) * cosW0 + beta) / a0,
-            b1: 2 * a * ((a - 1) - (a + 1) * cosW0) / a0,
-            b2: a * ((a + 1) - (a - 1) * cosW0 - beta) / a0,
-            a1: -2 * ((a - 1) + (a + 1) * cosW0) / a0,
-            a2: ((a + 1) + (a - 1) * cosW0 - beta) / a0
-        )
+        b0 = a * ((a + 1) - (a - 1) * cosW0 + beta) / a0
+        b1 = 2 * a * ((a - 1) - (a + 1) * cosW0) / a0
+        b2 = a * ((a + 1) - (a - 1) * cosW0 - beta) / a0
+        a1 = -2 * ((a - 1) + (a + 1) * cosW0) / a0
+        a2 = ((a + 1) + (a - 1) * cosW0 - beta) / a0
+    }
+
+    static func lowPass(sampleRate: Float, frequency: Float, q: Float) -> Biquad {
+        var biquad = Biquad()
+        biquad.updateLowPass(sampleRate: sampleRate, frequency: frequency, q: q)
+        return biquad
+    }
+
+    static func lowShelf(sampleRate: Float, frequency: Float, q: Float, gainDb: Float) -> Biquad {
+        var biquad = Biquad()
+        biquad.updateLowShelf(sampleRate: sampleRate, frequency: frequency, q: q, gainDb: gainDb)
+        return biquad
     }
 }
 
@@ -994,25 +1002,33 @@ private protocol BassProcessor: AnyObject {
 }
 
 private final class LowEndDSP: BassProcessor {
-    private var shelfL: Biquad
-    private var shelfR: Biquad
+    private let sampleRate: Float
+    private var shelfL = Biquad()
+    private var shelfR = Biquad()
     private var subL: Biquad
     private var subR: Biquad
-    private let intensity: Float
-    private let body: Float
-    private let outputGain: Float
+    private var intensity: Float = 0
+    private var body: Float = 0
+    private var outputGain: Float = 1
+    private var headroomGain: Float = 1
 
     init(sampleRate: Float, intensity: Float, body: Float, outputDb: Float) {
+        self.sampleRate = sampleRate
+        self.subL = .lowPass(sampleRate: sampleRate, frequency: 135, q: 0.68)
+        self.subR = .lowPass(sampleRate: sampleRate, frequency: 135, q: 0.68)
+        update(intensity: intensity, body: body, outputDb: outputDb)
+    }
+
+    func update(intensity: Float, body: Float, outputDb: Float) {
         let normalIntensity = min(max(intensity / 100, 0), 1)
         let shelfDb = normalIntensity * 8.5
         let shelfFreq = 72 + normalIntensity * 33
         self.intensity = normalIntensity
         self.body = min(max(body / 100, 0), 1)
         self.outputGain = pow(10, outputDb / 20)
-        self.shelfL = .lowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb)
-        self.shelfR = .lowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb)
-        self.subL = .lowPass(sampleRate: sampleRate, frequency: 135, q: 0.68)
-        self.subR = .lowPass(sampleRate: sampleRate, frequency: 135, q: 0.68)
+        self.headroomGain = pow(10, (-3 * normalIntensity) / 20)
+        shelfL.updateLowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb)
+        shelfR.updateLowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb)
     }
 
     func process(left: Float, right: Float) -> (Float, Float) {
@@ -1020,18 +1036,21 @@ private final class LowEndDSP: BassProcessor {
         var rShelf = shelfR.process(right)
         let lSub = tanh(subL.process(left) * 2.4) * 0.18 * body
         let rSub = tanh(subR.process(right) * 2.4) * 0.18 * body
-        let headroom = pow(10, (-3 * intensity) / 20)
-        lShelf = tanh((lShelf + lSub) * headroom * outputGain * 1.05) / 1.05
-        rShelf = tanh((rShelf + rSub) * headroom * outputGain * 1.05) / 1.05
+        lShelf = tanh((lShelf + lSub) * headroomGain * outputGain * 1.05) / 1.05
+        rShelf = tanh((rShelf + rSub) * headroomGain * outputGain * 1.05) / 1.05
         return (lShelf, rShelf)
     }
 }
 
 private final class RcLowPass {
-    private let alpha: Float
+    private var alpha: Float = 0
     private var z: Float = 0
 
     init(sampleRate: Float, frequency: Float) {
+        update(sampleRate: sampleRate, frequency: frequency)
+    }
+
+    func update(sampleRate: Float, frequency: Float) {
         let clampedFrequency = min(max(frequency, 5), sampleRate * 0.45)
         alpha = 1 - exp(-2 * Float.pi * clampedFrequency / sampleRate)
     }
@@ -1044,21 +1063,41 @@ private final class RcLowPass {
 
 private final class VirtualCircuitBassDSP: BassProcessor {
     private final class Channel {
+        private let sampleRate: Float
         private let bassPole: RcLowPass
         private let subPole: RcLowPass
-        private let intensity: Float
-        private let body: Float
-        private let outputGain: Float
+        private var intensity: Float = 0
+        private var body: Float = 0
+        private var outputGain: Float = 1
+        private var warmthAmount: Float = 0
+        private var virtualFeedbackGain: Float = 0
+        private var bodyInjectionGain: Float = 0
+        private var headroomGain: Float = 1
+        private var drive: Float = 1
+        private var wetMix: Float = 0
 
         init(sampleRate: Float, intensity: Float, body: Float, outputDb: Float) {
+            self.sampleRate = sampleRate
+            self.bassPole = RcLowPass(sampleRate: sampleRate, frequency: 72)
+            self.subPole = RcLowPass(sampleRate: sampleRate, frequency: 38)
+            update(intensity: intensity, body: body, outputDb: outputDb)
+        }
+
+        func update(intensity: Float, body: Float, outputDb: Float) {
             self.intensity = min(max(intensity / 100, 0), 1)
             self.body = min(max(body / 100, 0), 1)
             self.outputGain = pow(10, outputDb / 20)
+            self.warmthAmount = 0.014 * self.intensity + 0.010 * self.body
+            self.virtualFeedbackGain = 0.48 * self.intensity
+            self.bodyInjectionGain = (0.08 + 0.14 * self.intensity) * self.body
+            self.headroomGain = pow(10, (-4.2 * self.intensity - 2.0 * self.body) / 20)
+            self.drive = 1 + 0.20 * self.intensity + 0.10 * self.body
+            self.wetMix = min(max(0.62 * self.intensity + 0.18 * self.body, 0), 0.82)
 
             let bassFrequency = 72 + self.intensity * 36
             let subFrequency = 38 + self.body * 26
-            bassPole = RcLowPass(sampleRate: sampleRate, frequency: bassFrequency)
-            subPole = RcLowPass(sampleRate: sampleRate, frequency: subFrequency)
+            bassPole.update(sampleRate: sampleRate, frequency: bassFrequency)
+            subPole.update(sampleRate: sampleRate, frequency: subFrequency)
         }
 
         func process(_ input: Float) -> Float {
@@ -1066,20 +1105,14 @@ private final class VirtualCircuitBassDSP: BassProcessor {
                 return input * outputGain
             }
 
-            let warmthAmount = 0.014 * intensity + 0.010 * body
             let softened = input + ((tanh(input * 1.8) / 1.8) - input) * warmthAmount
             let bassNode = bassPole.process(softened)
             let subNode = subPole.process(softened)
 
-            let virtualFeedbackGain = 0.48 * intensity
-            let bodyInjectionGain = (0.08 + 0.14 * intensity) * body
             let summed = softened + bassNode * virtualFeedbackGain + subNode * bodyInjectionGain
 
-            let headroom = pow(10, (-4.2 * intensity - 2.0 * body) / 20)
-            let drive = 1 + 0.20 * intensity + 0.10 * body
-            let opAmpStage = tanh(summed * headroom * drive) / drive
+            let opAmpStage = tanh(summed * headroomGain * drive) / drive
 
-            let wetMix = min(max(0.62 * intensity + 0.18 * body, 0), 0.82)
             let blended = input + (opAmpStage - input) * wetMix
             return tanh(blended * outputGain * 1.015) / 1.015
         }
@@ -1091,6 +1124,11 @@ private final class VirtualCircuitBassDSP: BassProcessor {
     init(sampleRate: Float, intensity: Float, body: Float, outputDb: Float) {
         left = Channel(sampleRate: sampleRate, intensity: intensity, body: body, outputDb: outputDb)
         right = Channel(sampleRate: sampleRate, intensity: intensity, body: body, outputDb: outputDb)
+    }
+
+    func update(intensity: Float, body: Float, outputDb: Float) {
+        left.update(intensity: intensity, body: body, outputDb: outputDb)
+        right.update(intensity: intensity, body: body, outputDb: outputDb)
     }
 
     func process(left inputLeft: Float, right inputRight: Float) -> (Float, Float) {
@@ -1224,12 +1262,9 @@ private final class SystemAudioProcessor {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
-    private lazy var dsp: BassProcessor = makeBassProcessor(
-        dspModel: settings.dspModel,
-        intensity: settings.intensity,
-        body: settings.body,
-        outputDb: settings.outputDb
-    )
+    private let cleanDSP: LowEndDSP
+    private let circuitDSP: VirtualCircuitBassDSP
+    private var activeDSPModel: Settings.DSPModel
     private lazy var spatializer = Spatializer(sampleRate: Float(sampleRate), settings: settings.spatial)
 
     init(settings: Settings) throws {
@@ -1237,6 +1272,19 @@ private final class SystemAudioProcessor {
         self.ringBuffer = try LockFreeFloatRingBuffer(capacityFrames: 48_000 * 4, channels: 2)
         self.controlQueue = try LockFreeControlEventQueue()
         self.inputScratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrameCapacity * 2)
+        self.cleanDSP = LowEndDSP(
+            sampleRate: Float(sampleRate),
+            intensity: settings.intensity,
+            body: settings.body,
+            outputDb: settings.outputDb
+        )
+        self.circuitDSP = VirtualCircuitBassDSP(
+            sampleRate: Float(sampleRate),
+            intensity: settings.intensity,
+            body: settings.body,
+            outputDb: settings.outputDb
+        )
+        self.activeDSPModel = settings.dspModel
     }
 
     deinit {
@@ -1256,18 +1304,6 @@ private final class SystemAudioProcessor {
 
     func updateSpatial(_ settings: SpatialSettings) {
         controlQueue.pushSpatial(settings)
-    }
-
-    private func makeBassProcessor(dspModel: Settings.DSPModel,
-                                   intensity: Float,
-                                   body: Float,
-                                   outputDb: Float) -> BassProcessor {
-        switch dspModel {
-        case .clean:
-            return LowEndDSP(sampleRate: Float(sampleRate), intensity: intensity, body: body, outputDb: outputDb)
-        case .circuit:
-            return VirtualCircuitBassDSP(sampleRate: Float(sampleRate), intensity: intensity, body: body, outputDb: outputDb)
-        }
     }
 
     func stop() {
@@ -1456,12 +1492,21 @@ private final class SystemAudioProcessor {
         }
 
         if hasDSP {
-            dsp = makeBassProcessor(
-                dspModel: latestDSP.dspModel == 1 ? .circuit : .clean,
-                intensity: latestDSP.intensity,
-                body: latestDSP.body,
-                outputDb: latestDSP.outputDb
-            )
+            activeDSPModel = latestDSP.dspModel == 1 ? .circuit : .clean
+            switch activeDSPModel {
+            case .clean:
+                cleanDSP.update(
+                    intensity: latestDSP.intensity,
+                    body: latestDSP.body,
+                    outputDb: latestDSP.outputDb
+                )
+            case .circuit:
+                circuitDSP.update(
+                    intensity: latestDSP.intensity,
+                    body: latestDSP.body,
+                    outputDb: latestDSP.outputDb
+                )
+            }
         }
 
         if hasSpatial {
@@ -1485,7 +1530,7 @@ private final class SystemAudioProcessor {
             let rightChunk = right.advanced(by: offset)
 
             for frame in 0..<chunkFrames {
-                let processed = dsp.process(left: leftChunk[frame], right: rightChunk[frame])
+                let processed = processBass(left: leftChunk[frame], right: rightChunk[frame])
                 let spatial = spatializer.process(left: processed.0, right: processed.1)
                 inputScratch[frame * 2] = spatial.0
                 inputScratch[frame * 2 + 1] = spatial.1
@@ -1503,7 +1548,7 @@ private final class SystemAudioProcessor {
             let chunk = interleaved.advanced(by: offset * 2)
 
             for frame in 0..<chunkFrames {
-                let processed = dsp.process(left: chunk[frame * 2], right: chunk[frame * 2 + 1])
+                let processed = processBass(left: chunk[frame * 2], right: chunk[frame * 2 + 1])
                 let spatial = spatializer.process(left: processed.0, right: processed.1)
                 inputScratch[frame * 2] = spatial.0
                 inputScratch[frame * 2 + 1] = spatial.1
@@ -1521,7 +1566,7 @@ private final class SystemAudioProcessor {
             let chunk = mono.advanced(by: offset)
 
             for frame in 0..<chunkFrames {
-                let processed = dsp.process(left: chunk[frame], right: chunk[frame])
+                let processed = processBass(left: chunk[frame], right: chunk[frame])
                 let spatial = spatializer.process(left: processed.0, right: processed.1)
                 inputScratch[frame * 2] = spatial.0
                 inputScratch[frame * 2 + 1] = spatial.1
@@ -1529,6 +1574,15 @@ private final class SystemAudioProcessor {
 
             ringBuffer.push(inputScratch, count: chunkFrames * 2)
             offset += chunkFrames
+        }
+    }
+
+    private func processBass(left: Float, right: Float) -> (Float, Float) {
+        switch activeDSPModel {
+        case .clean:
+            return cleanDSP.process(left: left, right: right)
+        case .circuit:
+            return circuitDSP.process(left: left, right: right)
         }
     }
 }
