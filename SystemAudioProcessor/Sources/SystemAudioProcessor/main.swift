@@ -898,12 +898,14 @@ private final class LockFreeFloatRingBuffer {
 
 private final class LockFreeControlEventQueue {
     private let handle: OpaquePointer
+    private let sampleRate: Float
 
-    init(capacity: Int = 4096) throws {
+    init(capacity: Int = 4096, sampleRate: Float) throws {
         guard let handle = lc_control_event_queue_create(UInt32(max(capacity, 16))) else {
             throw AppError.message("Could not allocate audio control event queue.")
         }
         self.handle = handle
+        self.sampleRate = sampleRate
     }
 
     deinit {
@@ -913,11 +915,12 @@ private final class LockFreeControlEventQueue {
     func pushDSP(intensity: Float, body: Float, outputDb: Float, dspModel: Settings.DSPModel) {
         var event = LCControlEvent()
         event.type = UInt32(LC_CONTROL_EVENT_DSP)
-        event.dsp = LCDSPSettings(
+        event.dsp = DSPPrecompute.makeDSPSettings(
+            sampleRate: sampleRate,
             intensity: intensity,
             body: body,
             outputDb: outputDb,
-            dspModel: dspModel == .circuit ? 1 : 0
+            dspModel: dspModel
         )
         _ = withUnsafePointer(to: &event) { lc_control_event_queue_push(handle, $0) }
     }
@@ -925,18 +928,132 @@ private final class LockFreeControlEventQueue {
     func pushSpatial(_ settings: SpatialSettings) {
         var event = LCControlEvent()
         event.type = UInt32(LC_CONTROL_EVENT_SPATIAL)
-        event.spatial = LCSpatialSettings(
-            enabled: settings.enabled ? 1 : 0,
-            listenerX: settings.listenerX,
-            listenerZ: settings.listenerZ,
-            speakerWidth: settings.speakerWidth,
-            amount: settings.amount
-        )
+        event.spatial = DSPPrecompute.makeSpatialSettings(sampleRate: sampleRate, settings: settings)
         _ = withUnsafePointer(to: &event) { lc_control_event_queue_push(handle, $0) }
     }
 
     func pop(into event: UnsafeMutablePointer<LCControlEvent>) -> Bool {
         lc_control_event_queue_pop(handle, event) != 0
+    }
+}
+
+private enum DSPPrecompute {
+    static func makeDSPSettings(sampleRate: Float,
+                                intensity: Float,
+                                body: Float,
+                                outputDb: Float,
+                                dspModel: Settings.DSPModel) -> LCDSPSettings {
+        let normalIntensity = clamp(intensity / 100, 0, 1)
+        let normalBody = clamp(body / 100, 0, 1)
+        let shelfDb = normalIntensity * 8.5
+        let shelfFreq = 72 + normalIntensity * 33
+        let outputGain = pow(10, outputDb / 20)
+
+        return LCDSPSettings(
+            intensity: normalIntensity,
+            body: normalBody,
+            outputGain: outputGain,
+            headroomGain: pow(10, (-3 * normalIntensity) / 20),
+            dspModel: dspModel == .circuit ? 1 : 0,
+            shelf: makeLowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb),
+            warmthAmount: 0.014 * normalIntensity + 0.010 * normalBody,
+            virtualFeedbackGain: 0.48 * normalIntensity,
+            bodyInjectionGain: (0.08 + 0.14 * normalIntensity) * normalBody,
+            circuitHeadroomGain: pow(10, (-4.2 * normalIntensity - 2.0 * normalBody) / 20),
+            drive: 1 + 0.20 * normalIntensity + 0.10 * normalBody,
+            wetMix: min(max(0.62 * normalIntensity + 0.18 * normalBody, 0), 0.82),
+            bassAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 72 + normalIntensity * 36),
+            subAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 38 + normalBody * 26)
+        )
+    }
+
+    static func makeSpatialSettings(sampleRate: Float, settings: SpatialSettings) -> LCSpatialSettings {
+        let width = clamp(settings.speakerWidth, 0.6, 3.0)
+        let listenerX = clamp(settings.listenerX, -3.0, 3.0)
+        let listenerZ = clamp(settings.listenerZ, -2.8, 2.8)
+        let earOffset: Float = 0.09
+        let speakerZ: Float = 1.8
+        let amount = clamp(settings.amount / 100, 0, 1)
+        let crossfeed = 0.16 + amount * 0.30
+
+        let leftSpeaker = (x: -width / 2, z: speakerZ)
+        let rightSpeaker = (x: width / 2, z: speakerZ)
+        let leftEar = (x: listenerX - earOffset, z: listenerZ)
+        let rightEar = (x: listenerX + earOffset, z: listenerZ)
+
+        let llDistance = distance(leftSpeaker, leftEar)
+        let lrDistance = distance(leftSpeaker, rightEar)
+        let rlDistance = distance(rightSpeaker, leftEar)
+        let rrDistance = distance(rightSpeaker, rightEar)
+        let minimumDistance = min(llDistance, lrDistance, rlDistance, rrDistance)
+
+        let llGain = inverseDistanceGain(llDistance)
+        let rrGain = inverseDistanceGain(rrDistance)
+        let lrGain = inverseDistanceGain(lrDistance) * crossfeed
+        let rlGain = inverseDistanceGain(rlDistance) * crossfeed
+        let normalizer = 1 / max((llGain + rrGain) * 0.5, 0.001)
+
+        return LCSpatialSettings(
+            enabled: settings.enabled ? 1 : 0,
+            amount: amount,
+            ll: makeSpatialPath(distanceOffset: llDistance - minimumDistance, gain: llGain * normalizer, sampleRate: sampleRate),
+            lr: makeSpatialPath(distanceOffset: lrDistance - minimumDistance, gain: lrGain * normalizer, sampleRate: sampleRate),
+            rl: makeSpatialPath(distanceOffset: rlDistance - minimumDistance, gain: rlGain * normalizer, sampleRate: sampleRate),
+            rr: makeSpatialPath(distanceOffset: rrDistance - minimumDistance, gain: rrGain * normalizer, sampleRate: sampleRate)
+        )
+    }
+
+    static func makeLowPass(sampleRate: Float, frequency: Float, q: Float) -> LCBiquadCoefficients {
+        let w0 = 2 * Float.pi * frequency / sampleRate
+        let alpha = sin(w0) / (2 * q)
+        let cosW0 = cos(w0)
+        let a0 = 1 + alpha
+        return LCBiquadCoefficients(
+            b0: ((1 - cosW0) / 2) / a0,
+            b1: (1 - cosW0) / a0,
+            b2: ((1 - cosW0) / 2) / a0,
+            a1: (-2 * cosW0) / a0,
+            a2: (1 - alpha) / a0
+        )
+    }
+
+    static func makeLowShelf(sampleRate: Float, frequency: Float, q: Float, gainDb: Float) -> LCBiquadCoefficients {
+        let a = pow(10, gainDb / 40)
+        let w0 = 2 * Float.pi * frequency / sampleRate
+        let cosW0 = cos(w0)
+        let sinW0 = sin(w0)
+        let alpha = sinW0 / (2 * q)
+        let beta = 2 * sqrt(a) * alpha
+        let a0 = (a + 1) + (a - 1) * cosW0 + beta
+
+        return LCBiquadCoefficients(
+            b0: a * ((a + 1) - (a - 1) * cosW0 + beta) / a0,
+            b1: 2 * a * ((a - 1) - (a + 1) * cosW0) / a0,
+            b2: a * ((a + 1) - (a - 1) * cosW0 - beta) / a0,
+            a1: -2 * ((a - 1) + (a + 1) * cosW0) / a0,
+            a2: ((a + 1) + (a - 1) * cosW0 - beta) / a0
+        )
+    }
+
+    static func makeRcAlpha(sampleRate: Float, frequency: Float) -> Float {
+        let clampedFrequency = min(max(frequency, 5), sampleRate * 0.45)
+        return 1 - exp(-2 * Float.pi * clampedFrequency / sampleRate)
+    }
+
+    private static func distance(_ a: (x: Float, z: Float), _ b: (x: Float, z: Float)) -> Float {
+        let dx = a.x - b.x
+        let dz = a.z - b.z
+        return max(sqrt(dx * dx + dz * dz), 0.12)
+    }
+
+    private static func inverseDistanceGain(_ meters: Float) -> Float {
+        1 / max(0.45 + meters * 0.62, 0.2)
+    }
+
+    private static func makeSpatialPath(distanceOffset: Float, gain: Float, sampleRate: Float) -> LCSpatialPathSettings {
+        let speedOfSound: Float = 343.0
+        let samples = Int((max(distanceOffset, 0) / speedOfSound * sampleRate).rounded())
+        return LCSpatialPathSettings(delaySamples: UInt32(max(samples, 0)), gain: gain)
     }
 }
 
@@ -956,43 +1073,23 @@ private struct Biquad {
         return output
     }
 
-    mutating func updateLowPass(sampleRate: Float, frequency: Float, q: Float) {
-        let w0 = 2 * Float.pi * frequency / sampleRate
-        let alpha = sin(w0) / (2 * q)
-        let cosW0 = cos(w0)
-        let a0 = 1 + alpha
-        b0 = ((1 - cosW0) / 2) / a0
-        b1 = (1 - cosW0) / a0
-        b2 = ((1 - cosW0) / 2) / a0
-        a1 = (-2 * cosW0) / a0
-        a2 = (1 - alpha) / a0
-    }
-
-    mutating func updateLowShelf(sampleRate: Float, frequency: Float, q: Float, gainDb: Float) {
-        let a = pow(10, gainDb / 40)
-        let w0 = 2 * Float.pi * frequency / sampleRate
-        let cosW0 = cos(w0)
-        let sinW0 = sin(w0)
-        let alpha = sinW0 / (2 * q)
-        let beta = 2 * sqrt(a) * alpha
-        let a0 = (a + 1) + (a - 1) * cosW0 + beta
-
-        b0 = a * ((a + 1) - (a - 1) * cosW0 + beta) / a0
-        b1 = 2 * a * ((a - 1) - (a + 1) * cosW0) / a0
-        b2 = a * ((a + 1) - (a - 1) * cosW0 - beta) / a0
-        a1 = -2 * ((a - 1) + (a + 1) * cosW0) / a0
-        a2 = ((a + 1) + (a - 1) * cosW0 - beta) / a0
+    mutating func update(_ coefficients: LCBiquadCoefficients) {
+        b0 = coefficients.b0
+        b1 = coefficients.b1
+        b2 = coefficients.b2
+        a1 = coefficients.a1
+        a2 = coefficients.a2
     }
 
     static func lowPass(sampleRate: Float, frequency: Float, q: Float) -> Biquad {
         var biquad = Biquad()
-        biquad.updateLowPass(sampleRate: sampleRate, frequency: frequency, q: q)
+        biquad.update(DSPPrecompute.makeLowPass(sampleRate: sampleRate, frequency: frequency, q: q))
         return biquad
     }
 
     static func lowShelf(sampleRate: Float, frequency: Float, q: Float, gainDb: Float) -> Biquad {
         var biquad = Biquad()
-        biquad.updateLowShelf(sampleRate: sampleRate, frequency: frequency, q: q, gainDb: gainDb)
+        biquad.update(DSPPrecompute.makeLowShelf(sampleRate: sampleRate, frequency: frequency, q: q, gainDb: gainDb))
         return biquad
     }
 }
@@ -1002,7 +1099,6 @@ private protocol BassProcessor: AnyObject {
 }
 
 private final class LowEndDSP: BassProcessor {
-    private let sampleRate: Float
     private var shelfL = Biquad()
     private var shelfR = Biquad()
     private var subL: Biquad
@@ -1013,22 +1109,24 @@ private final class LowEndDSP: BassProcessor {
     private var headroomGain: Float = 1
 
     init(sampleRate: Float, intensity: Float, body: Float, outputDb: Float) {
-        self.sampleRate = sampleRate
         self.subL = .lowPass(sampleRate: sampleRate, frequency: 135, q: 0.68)
         self.subR = .lowPass(sampleRate: sampleRate, frequency: 135, q: 0.68)
-        update(intensity: intensity, body: body, outputDb: outputDb)
+        update(DSPPrecompute.makeDSPSettings(
+            sampleRate: sampleRate,
+            intensity: intensity,
+            body: body,
+            outputDb: outputDb,
+            dspModel: .clean
+        ))
     }
 
-    func update(intensity: Float, body: Float, outputDb: Float) {
-        let normalIntensity = min(max(intensity / 100, 0), 1)
-        let shelfDb = normalIntensity * 8.5
-        let shelfFreq = 72 + normalIntensity * 33
-        self.intensity = normalIntensity
-        self.body = min(max(body / 100, 0), 1)
-        self.outputGain = pow(10, outputDb / 20)
-        self.headroomGain = pow(10, (-3 * normalIntensity) / 20)
-        shelfL.updateLowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb)
-        shelfR.updateLowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb)
+    func update(_ settings: LCDSPSettings) {
+        self.intensity = settings.intensity
+        self.body = settings.body
+        self.outputGain = settings.outputGain
+        self.headroomGain = settings.headroomGain
+        shelfL.update(settings.shelf)
+        shelfR.update(settings.shelf)
     }
 
     func process(left: Float, right: Float) -> (Float, Float) {
@@ -1047,12 +1145,11 @@ private final class RcLowPass {
     private var z: Float = 0
 
     init(sampleRate: Float, frequency: Float) {
-        update(sampleRate: sampleRate, frequency: frequency)
+        update(alpha: DSPPrecompute.makeRcAlpha(sampleRate: sampleRate, frequency: frequency))
     }
 
-    func update(sampleRate: Float, frequency: Float) {
-        let clampedFrequency = min(max(frequency, 5), sampleRate * 0.45)
-        alpha = 1 - exp(-2 * Float.pi * clampedFrequency / sampleRate)
+    func update(alpha: Float) {
+        self.alpha = alpha
     }
 
     func process(_ input: Float) -> Float {
@@ -1063,7 +1160,6 @@ private final class RcLowPass {
 
 private final class VirtualCircuitBassDSP: BassProcessor {
     private final class Channel {
-        private let sampleRate: Float
         private let bassPole: RcLowPass
         private let subPole: RcLowPass
         private var intensity: Float = 0
@@ -1077,27 +1173,29 @@ private final class VirtualCircuitBassDSP: BassProcessor {
         private var wetMix: Float = 0
 
         init(sampleRate: Float, intensity: Float, body: Float, outputDb: Float) {
-            self.sampleRate = sampleRate
             self.bassPole = RcLowPass(sampleRate: sampleRate, frequency: 72)
             self.subPole = RcLowPass(sampleRate: sampleRate, frequency: 38)
-            update(intensity: intensity, body: body, outputDb: outputDb)
+            update(DSPPrecompute.makeDSPSettings(
+                sampleRate: sampleRate,
+                intensity: intensity,
+                body: body,
+                outputDb: outputDb,
+                dspModel: .circuit
+            ))
         }
 
-        func update(intensity: Float, body: Float, outputDb: Float) {
-            self.intensity = min(max(intensity / 100, 0), 1)
-            self.body = min(max(body / 100, 0), 1)
-            self.outputGain = pow(10, outputDb / 20)
-            self.warmthAmount = 0.014 * self.intensity + 0.010 * self.body
-            self.virtualFeedbackGain = 0.48 * self.intensity
-            self.bodyInjectionGain = (0.08 + 0.14 * self.intensity) * self.body
-            self.headroomGain = pow(10, (-4.2 * self.intensity - 2.0 * self.body) / 20)
-            self.drive = 1 + 0.20 * self.intensity + 0.10 * self.body
-            self.wetMix = min(max(0.62 * self.intensity + 0.18 * self.body, 0), 0.82)
-
-            let bassFrequency = 72 + self.intensity * 36
-            let subFrequency = 38 + self.body * 26
-            bassPole.update(sampleRate: sampleRate, frequency: bassFrequency)
-            subPole.update(sampleRate: sampleRate, frequency: subFrequency)
+        func update(_ settings: LCDSPSettings) {
+            self.intensity = settings.intensity
+            self.body = settings.body
+            self.outputGain = settings.outputGain
+            self.warmthAmount = settings.warmthAmount
+            self.virtualFeedbackGain = settings.virtualFeedbackGain
+            self.bodyInjectionGain = settings.bodyInjectionGain
+            self.headroomGain = settings.circuitHeadroomGain
+            self.drive = settings.drive
+            self.wetMix = settings.wetMix
+            bassPole.update(alpha: settings.bassAlpha)
+            subPole.update(alpha: settings.subAlpha)
         }
 
         func process(_ input: Float) -> Float {
@@ -1126,9 +1224,9 @@ private final class VirtualCircuitBassDSP: BassProcessor {
         right = Channel(sampleRate: sampleRate, intensity: intensity, body: body, outputDb: outputDb)
     }
 
-    func update(intensity: Float, body: Float, outputDb: Float) {
-        left.update(intensity: intensity, body: body, outputDb: outputDb)
-        right.update(intensity: intensity, body: body, outputDb: outputDb)
+    func update(_ settings: LCDSPSettings) {
+        left.update(settings)
+        right.update(settings)
     }
 
     func process(left inputLeft: Float, right inputRight: Float) -> (Float, Float) {
@@ -1160,31 +1258,32 @@ private final class Spatializer {
         var gain: Float = 1
     }
 
-    private let sampleRate: Float
     private let leftToLeft = DelayLine(capacity: 2048)
     private let leftToRight = DelayLine(capacity: 2048)
     private let rightToLeft = DelayLine(capacity: 2048)
     private let rightToRight = DelayLine(capacity: 2048)
-    private var settings: SpatialSettings
+    private var enabled = true
+    private var amount: Float = 0
     private var ll = Path()
     private var lr = Path()
     private var rl = Path()
     private var rr = Path()
 
     init(sampleRate: Float, settings: SpatialSettings) {
-        self.sampleRate = sampleRate
-        self.settings = settings
-        recomputePaths()
+        update(DSPPrecompute.makeSpatialSettings(sampleRate: sampleRate, settings: settings))
     }
 
-    func update(settings: SpatialSettings) {
-        self.settings = settings
-        recomputePaths()
+    func update(_ settings: LCSpatialSettings) {
+        enabled = settings.enabled != 0
+        amount = settings.amount
+        ll = Path(delaySamples: Int(settings.ll.delaySamples), gain: settings.ll.gain)
+        lr = Path(delaySamples: Int(settings.lr.delaySamples), gain: settings.lr.gain)
+        rl = Path(delaySamples: Int(settings.rl.delaySamples), gain: settings.rl.gain)
+        rr = Path(delaySamples: Int(settings.rr.delaySamples), gain: settings.rr.gain)
     }
 
     func process(left: Float, right: Float) -> (Float, Float) {
-        let amount = clamp(settings.amount / 100, 0, 1)
-        guard settings.enabled, amount > 0.001 else {
+        guard enabled, amount > 0.001 else {
             return (left, right)
         }
 
@@ -1199,53 +1298,6 @@ private final class Spatializer {
         let outLeft = left * (1 - amount) + wetLeft * trim * amount
         let outRight = right * (1 - amount) + wetRight * trim * amount
         return (tanh(outLeft * 1.02) / 1.02, tanh(outRight * 1.02) / 1.02)
-    }
-
-    private func recomputePaths() {
-        let width = clamp(settings.speakerWidth, 0.6, 3.0)
-        let listenerX = clamp(settings.listenerX, -3.0, 3.0)
-        let listenerZ = clamp(settings.listenerZ, -2.8, 2.8)
-        let earOffset: Float = 0.09
-        let speakerZ: Float = 1.8
-        let amount = clamp(settings.amount / 100, 0, 1)
-        let crossfeed = 0.16 + amount * 0.30
-
-        let leftSpeaker = (x: -width / 2, z: speakerZ)
-        let rightSpeaker = (x: width / 2, z: speakerZ)
-        let leftEar = (x: listenerX - earOffset, z: listenerZ)
-        let rightEar = (x: listenerX + earOffset, z: listenerZ)
-
-        let llDistance = distance(leftSpeaker, leftEar)
-        let lrDistance = distance(leftSpeaker, rightEar)
-        let rlDistance = distance(rightSpeaker, leftEar)
-        let rrDistance = distance(rightSpeaker, rightEar)
-        let minimumDistance = min(llDistance, lrDistance, rlDistance, rrDistance)
-
-        let llGain = inverseDistanceGain(llDistance)
-        let rrGain = inverseDistanceGain(rrDistance)
-        let lrGain = inverseDistanceGain(lrDistance) * crossfeed
-        let rlGain = inverseDistanceGain(rlDistance) * crossfeed
-        let normalizer = 1 / max((llGain + rrGain) * 0.5, 0.001)
-
-        ll = Path(delaySamples: delaySamples(for: llDistance - minimumDistance), gain: llGain * normalizer)
-        lr = Path(delaySamples: delaySamples(for: lrDistance - minimumDistance), gain: lrGain * normalizer)
-        rl = Path(delaySamples: delaySamples(for: rlDistance - minimumDistance), gain: rlGain * normalizer)
-        rr = Path(delaySamples: delaySamples(for: rrDistance - minimumDistance), gain: rrGain * normalizer)
-    }
-
-    private func distance(_ a: (x: Float, z: Float), _ b: (x: Float, z: Float)) -> Float {
-        let dx = a.x - b.x
-        let dz = a.z - b.z
-        return max(sqrt(dx * dx + dz * dz), 0.12)
-    }
-
-    private func inverseDistanceGain(_ meters: Float) -> Float {
-        1 / max(0.45 + meters * 0.62, 0.2)
-    }
-
-    private func delaySamples(for meters: Float) -> Int {
-        let speedOfSound: Float = 343.0
-        return Int((max(meters, 0) / speedOfSound * sampleRate).rounded())
     }
 }
 
@@ -1270,7 +1322,7 @@ private final class SystemAudioProcessor {
     init(settings: Settings) throws {
         self.settings = settings
         self.ringBuffer = try LockFreeFloatRingBuffer(capacityFrames: 48_000 * 4, channels: 2)
-        self.controlQueue = try LockFreeControlEventQueue()
+        self.controlQueue = try LockFreeControlEventQueue(sampleRate: Float(sampleRate))
         self.inputScratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrameCapacity * 2)
         self.cleanDSP = LowEndDSP(
             sampleRate: Float(sampleRate),
@@ -1495,28 +1547,14 @@ private final class SystemAudioProcessor {
             activeDSPModel = latestDSP.dspModel == 1 ? .circuit : .clean
             switch activeDSPModel {
             case .clean:
-                cleanDSP.update(
-                    intensity: latestDSP.intensity,
-                    body: latestDSP.body,
-                    outputDb: latestDSP.outputDb
-                )
+                cleanDSP.update(latestDSP)
             case .circuit:
-                circuitDSP.update(
-                    intensity: latestDSP.intensity,
-                    body: latestDSP.body,
-                    outputDb: latestDSP.outputDb
-                )
+                circuitDSP.update(latestDSP)
             }
         }
 
         if hasSpatial {
-            spatializer.update(settings: SpatialSettings(
-                enabled: latestSpatial.enabled != 0,
-                listenerX: latestSpatial.listenerX,
-                listenerZ: latestSpatial.listenerZ,
-                speakerWidth: latestSpatial.speakerWidth,
-                amount: latestSpatial.amount
-            ))
+            spatializer.update(latestSpatial)
         }
     }
 

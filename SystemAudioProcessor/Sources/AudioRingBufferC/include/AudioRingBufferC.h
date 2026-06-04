@@ -17,18 +17,42 @@ enum {
 };
 
 typedef struct {
+    float b0;
+    float b1;
+    float b2;
+    float a1;
+    float a2;
+} LCBiquadCoefficients;
+
+typedef struct {
     float intensity;
     float body;
-    float outputDb;
+    float outputGain;
+    float headroomGain;
     uint32_t dspModel;
+    LCBiquadCoefficients shelf;
+    float warmthAmount;
+    float virtualFeedbackGain;
+    float bodyInjectionGain;
+    float circuitHeadroomGain;
+    float drive;
+    float wetMix;
+    float bassAlpha;
+    float subAlpha;
 } LCDSPSettings;
 
 typedef struct {
+    uint32_t delaySamples;
+    float gain;
+} LCSpatialPathSettings;
+
+typedef struct {
     uint32_t enabled;
-    float listenerX;
-    float listenerZ;
-    float speakerWidth;
     float amount;
+    LCSpatialPathSettings ll;
+    LCSpatialPathSettings lr;
+    LCSpatialPathSettings rl;
+    LCSpatialPathSettings rr;
 } LCSpatialSettings;
 
 typedef struct {
