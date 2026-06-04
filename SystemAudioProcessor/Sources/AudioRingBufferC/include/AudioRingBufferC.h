@@ -39,6 +39,12 @@ typedef struct {
     float wetMix;
     float bassAlpha;
     float subAlpha;
+    LCBiquadCoefficients transformerPreEmphasis;
+    LCBiquadCoefficients transformerDeEmphasis;
+    float transformerDrive;
+    float transformerAsymmetry;
+    float transformerBiasOffset;
+    float transformerMakeupGain;
 } LCDSPSettings;
 
 typedef struct {

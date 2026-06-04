@@ -948,6 +948,12 @@ private enum DSPPrecompute {
         let shelfDb = normalIntensity * 8.5
         let shelfFreq = 72 + normalIntensity * 33
         let outputGain = pow(10, outputDb / 20)
+        let transformerShelfDb = 1.2 + normalIntensity * 3.8 + normalBody * 1.4
+        let transformerShelfFreq = 82 + normalIntensity * 12 + normalBody * 30
+        let transformerDrive = 1.04 + normalIntensity * 0.56 + normalBody * 0.22
+        let transformerAsymmetry = 0.006 + normalIntensity * 0.018 + normalBody * 0.010
+        let transformerBiasOffset = makePolynomialSoftClip(transformerAsymmetry)
+        let transformerMakeupGain: Float = 1 / max(transformerDrive, 0.001)
 
         return LCDSPSettings(
             intensity: normalIntensity,
@@ -963,7 +969,13 @@ private enum DSPPrecompute {
             drive: 1 + 0.20 * normalIntensity + 0.10 * normalBody,
             wetMix: min(max(0.62 * normalIntensity + 0.18 * normalBody, 0), 0.82),
             bassAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 72 + normalIntensity * 36),
-            subAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 38 + normalBody * 26)
+            subAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 38 + normalBody * 26),
+            transformerPreEmphasis: makeLowShelf(sampleRate: sampleRate, frequency: transformerShelfFreq, q: 0.72, gainDb: transformerShelfDb),
+            transformerDeEmphasis: makeLowShelf(sampleRate: sampleRate, frequency: transformerShelfFreq, q: 0.72, gainDb: -transformerShelfDb),
+            transformerDrive: transformerDrive,
+            transformerAsymmetry: transformerAsymmetry,
+            transformerBiasOffset: transformerBiasOffset,
+            transformerMakeupGain: transformerMakeupGain
         )
     }
 
@@ -1038,6 +1050,16 @@ private enum DSPPrecompute {
     static func makeRcAlpha(sampleRate: Float, frequency: Float) -> Float {
         let clampedFrequency = min(max(frequency, 5), sampleRate * 0.45)
         return 1 - exp(-2 * Float.pi * clampedFrequency / sampleRate)
+    }
+
+    private static func makePolynomialSoftClip(_ input: Float) -> Float {
+        if input > 1 {
+            return 1
+        }
+        if input < -1 {
+            return -1
+        }
+        return input - (input * input * input) / 3
     }
 
     private static func distance(_ a: (x: Float, z: Float), _ b: (x: Float, z: Float)) -> Float {
@@ -1162,15 +1184,19 @@ private final class VirtualCircuitBassDSP: BassProcessor {
     private final class Channel {
         private let bassPole: RcLowPass
         private let subPole: RcLowPass
+        private var preEmphasis = Biquad()
+        private var deEmphasis = Biquad()
         private var intensity: Float = 0
         private var body: Float = 0
         private var outputGain: Float = 1
-        private var warmthAmount: Float = 0
         private var virtualFeedbackGain: Float = 0
         private var bodyInjectionGain: Float = 0
         private var headroomGain: Float = 1
-        private var drive: Float = 1
         private var wetMix: Float = 0
+        private var transformerDrive: Float = 1
+        private var transformerAsymmetry: Float = 0
+        private var transformerBiasOffset: Float = 0
+        private var transformerMakeupGain: Float = 1
 
         init(sampleRate: Float, intensity: Float, body: Float, outputDb: Float) {
             self.bassPole = RcLowPass(sampleRate: sampleRate, frequency: 72)
@@ -1188,12 +1214,16 @@ private final class VirtualCircuitBassDSP: BassProcessor {
             self.intensity = settings.intensity
             self.body = settings.body
             self.outputGain = settings.outputGain
-            self.warmthAmount = settings.warmthAmount
             self.virtualFeedbackGain = settings.virtualFeedbackGain
             self.bodyInjectionGain = settings.bodyInjectionGain
             self.headroomGain = settings.circuitHeadroomGain
-            self.drive = settings.drive
             self.wetMix = settings.wetMix
+            self.transformerDrive = settings.transformerDrive
+            self.transformerAsymmetry = settings.transformerAsymmetry
+            self.transformerBiasOffset = settings.transformerBiasOffset
+            self.transformerMakeupGain = settings.transformerMakeupGain
+            preEmphasis.update(settings.transformerPreEmphasis)
+            deEmphasis.update(settings.transformerDeEmphasis)
             bassPole.update(alpha: settings.bassAlpha)
             subPole.update(alpha: settings.subAlpha)
         }
@@ -1203,16 +1233,40 @@ private final class VirtualCircuitBassDSP: BassProcessor {
                 return input * outputGain
             }
 
-            let softened = input + ((tanh(input * 1.8) / 1.8) - input) * warmthAmount
-            let bassNode = bassPole.process(softened)
-            let subNode = subPole.process(softened)
+            let bassNode = bassPole.process(input)
+            let subNode = subPole.process(input)
+            let circuitInput = (input + bassNode * virtualFeedbackGain + subNode * bodyInjectionGain) * headroomGain
+            let emphasized = preEmphasis.process(circuitInput)
+            let saturated = asymmetricSaturate(emphasized)
+            let deEmphasized = deEmphasis.process(saturated)
+            let blended = input + (deEmphasized - input) * wetMix
+            return fastClamp(blended * outputGain)
+        }
 
-            let summed = softened + bassNode * virtualFeedbackGain + subNode * bodyInjectionGain
+        private func asymmetricSaturate(_ input: Float) -> Float {
+            let driven = input * transformerDrive
+            let biased = driven + transformerAsymmetry
+            let clipped: Float
 
-            let opAmpStage = tanh(summed * headroomGain * drive) / drive
+            if biased > 1 {
+                clipped = 1
+            } else if biased < -1 {
+                clipped = -1
+            } else {
+                clipped = biased - (biased * biased * biased) * 0.33333334
+            }
 
-            let blended = input + (opAmpStage - input) * wetMix
-            return tanh(blended * outputGain * 1.015) / 1.015
+            return (clipped - transformerBiasOffset) * transformerMakeupGain
+        }
+
+        private func fastClamp(_ input: Float) -> Float {
+            if input > 1 {
+                return 1
+            }
+            if input < -1 {
+                return -1
+            }
+            return input
         }
     }
 
