@@ -37,23 +37,29 @@ private struct Settings {
 
 private struct AudioFormatStatus {
     let sampleRate: Double
+    let processingSampleRate: Double
     let sampleFormat: String
     let isSampleRateMatched: Bool
 
     var indicatorText: String {
-        let rateText: String
-        if sampleRate >= 1000 {
-            rateText = String(format: "%.1f kHz", sampleRate / 1000)
-        } else {
-            rateText = String(format: "%.0f Hz", sampleRate)
+        if isSampleRateMatched {
+            return "\(Self.rateText(sampleRate)) / \(sampleFormat) / Bit-Perfect"
         }
-        return "\(rateText) / \(sampleFormat) / \(isSampleRateMatched ? "Bit-Perfect" : "SRC")"
+        return "\(Self.rateText(sampleRate)) DAC / \(Self.rateText(processingSampleRate)) Engine / SRC-safe"
+    }
+
+    private static func rateText(_ sampleRate: Double) -> String {
+        if sampleRate >= 1000 {
+            return String(format: "%.1f kHz", sampleRate / 1000)
+        }
+        return String(format: "%.0f Hz", sampleRate)
     }
 }
 
 private enum AudioFormatNotifications {
     static let didChange = Notification.Name("LowEndAudioHardwareFormatDidChange")
     static let sampleRateKey = "sampleRate"
+    static let processingSampleRateKey = "processingSampleRate"
     static let sampleFormatKey = "sampleFormat"
     static let isSampleRateMatchedKey = "isSampleRateMatched"
     static let indicatorTextKey = "indicatorText"
@@ -1607,6 +1613,26 @@ private final class HardwareSampleRateTracker {
         return Double(sampleRate)
     }
 
+    static func setNominalSampleRate(_ sampleRate: Double, for deviceID: AudioObjectID) throws {
+        guard deviceID != kAudioObjectUnknown else {
+            throw AppError.message("Audio device is unknown.")
+        }
+
+        var value = Float64(sampleRate)
+        var address = nominalSampleRateAddress()
+        try check(
+            AudioObjectSetPropertyData(
+                deviceID,
+                &address,
+                0,
+                nil,
+                UInt32(MemoryLayout<Float64>.size),
+                &value
+            ),
+            "AudioObjectSetPropertyData NominalSampleRate"
+        )
+    }
+
     private static func defaultOutputDeviceAddress() -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
@@ -1636,6 +1662,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private var sourceNode: AVAudioSourceNode?
     private var hardwareTracker: HardwareSampleRateTracker?
     private var currentOutputDeviceID: AudioObjectID
+    private var currentHardwareSampleRate: Double
     private var currentSampleRate: Double
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
@@ -1658,6 +1685,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
 
         self.settings = settings
         self.currentOutputDeviceID = outputDeviceID
+        self.currentHardwareSampleRate = sampleRate
         self.currentSampleRate = sampleRate
         self.currentIntensity = settings.intensity
         self.currentBody = settings.body
@@ -1692,8 +1720,11 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         try managerQueue.sync {
             guard !isStarted else { return }
             isStarted = true
-            try startOutput(sampleRate: currentSampleRate)
             try createProcessTapAndAggregateDevice()
+            currentSampleRate = syncAggregateSampleRate(preferredSampleRate: currentHardwareSampleRate)
+            controlQueue.updateSampleRate(Float(currentSampleRate))
+            applyCurrentSettingsDirectly()
+            try startOutput(sampleRate: currentSampleRate)
             try startCapture()
             hardwareTracker = HardwareSampleRateTracker(queue: managerQueue) { [weak self] deviceID, sampleRate in
                 self?.handleHardwareFormatChange(deviceID: deviceID, sampleRate: sampleRate)
@@ -1762,7 +1793,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
 
         engine.disconnectNodeOutput(node)
-        engine.connect(node, to: engine.outputNode, format: format)
+        engine.connect(node, to: engine.mainMixerNode, format: format)
         engine.prepare()
     }
 
@@ -1788,14 +1819,13 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     }
 
     private func handleHardwareFormatChange(deviceID: AudioObjectID, sampleRate: Double) {
-        let newSampleRate = Self.validSampleRate(sampleRate)
+        let newHardwareSampleRate = Self.validSampleRate(sampleRate)
         let deviceChanged = deviceID != currentOutputDeviceID
-        let rateChanged = abs(newSampleRate - currentSampleRate) > 0.5
+        let rateChanged = abs(newHardwareSampleRate - currentHardwareSampleRate) > 0.5
 
         guard isStarted else {
             currentOutputDeviceID = deviceID
-            currentSampleRate = newSampleRate
-            controlQueue.updateSampleRate(Float(newSampleRate))
+            currentHardwareSampleRate = newHardwareSampleRate
             publishFormatStatus()
             return
         }
@@ -1806,13 +1836,13 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
 
         do {
-            try reconfigureForHardwareFormat(deviceID: deviceID, sampleRate: newSampleRate)
+            try reconfigureForHardwareFormat(deviceID: deviceID, hardwareSampleRate: newHardwareSampleRate)
         } catch {
             fputs("Output format reconfigure failed: \(error)\n", stderr)
         }
     }
 
-    private func reconfigureForHardwareFormat(deviceID: AudioObjectID, sampleRate: Double) throws {
+    private func reconfigureForHardwareFormat(deviceID: AudioObjectID, hardwareSampleRate: Double) throws {
         engine.stop()
         stopCaptureForReconfigure()
         ringBuffer.clear()
@@ -1820,15 +1850,16 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         resetDSPState()
 
         currentOutputDeviceID = deviceID
-        currentSampleRate = sampleRate
-        controlQueue.updateSampleRate(Float(sampleRate))
+        currentHardwareSampleRate = hardwareSampleRate
+        currentSampleRate = syncAggregateSampleRate(preferredSampleRate: hardwareSampleRate)
+        controlQueue.updateSampleRate(Float(currentSampleRate))
         applyCurrentSettingsDirectly()
 
-        try configureOutputGraph(sampleRate: sampleRate)
+        try configureOutputGraph(sampleRate: currentSampleRate)
         try engine.start()
         try resumeCaptureAfterReconfigure()
         publishFormatStatus()
-        print("Output format re-synced: \(AudioFormatStatus(sampleRate: sampleRate, sampleFormat: "32-bit Float", isSampleRateMatched: true).indicatorText)")
+        print("Output format re-synced: \(makeFormatStatus().indicatorText)")
     }
 
     private func stopCaptureForReconfigure() {
@@ -1842,6 +1873,25 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private func resumeCaptureAfterReconfigure() throws {
         if aggregateDeviceID != kAudioObjectUnknown, let ioProcID {
             try check(AudioDeviceStart(aggregateDeviceID, ioProcID), "AudioDeviceStart")
+        }
+    }
+
+    private func syncAggregateSampleRate(preferredSampleRate: Double) -> Double {
+        guard aggregateDeviceID != kAudioObjectUnknown else {
+            return preferredSampleRate
+        }
+
+        do {
+            try HardwareSampleRateTracker.setNominalSampleRate(preferredSampleRate, for: aggregateDeviceID)
+        } catch {
+            fputs("Aggregate sample rate set skipped: \(error)\n", stderr)
+        }
+
+        do {
+            return Self.validSampleRate(try HardwareSampleRateTracker.nominalSampleRate(for: aggregateDeviceID))
+        } catch {
+            fputs("Aggregate sample rate read failed: \(error)\n", stderr)
+            return preferredSampleRate
         }
     }
 
@@ -1888,23 +1938,29 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     }
 
     private func publishFormatStatus() {
-        let status = AudioFormatStatus(
-            sampleRate: currentSampleRate,
-            sampleFormat: "32-bit Float",
-            isSampleRateMatched: true
-        )
+        let status = makeFormatStatus()
         DispatchQueue.main.async {
             NotificationCenter.default.post(
                 name: AudioFormatNotifications.didChange,
                 object: nil,
                 userInfo: [
                     AudioFormatNotifications.sampleRateKey: status.sampleRate,
+                    AudioFormatNotifications.processingSampleRateKey: status.processingSampleRate,
                     AudioFormatNotifications.sampleFormatKey: status.sampleFormat,
                     AudioFormatNotifications.isSampleRateMatchedKey: status.isSampleRateMatched,
                     AudioFormatNotifications.indicatorTextKey: status.indicatorText
                 ]
             )
         }
+    }
+
+    private func makeFormatStatus() -> AudioFormatStatus {
+        AudioFormatStatus(
+            sampleRate: currentHardwareSampleRate,
+            processingSampleRate: currentSampleRate,
+            sampleFormat: "32-bit Float",
+            isSampleRateMatched: abs(currentHardwareSampleRate - currentSampleRate) <= 0.5
+        )
     }
 
     private static func validSampleRate(_ sampleRate: Double) -> Double {
