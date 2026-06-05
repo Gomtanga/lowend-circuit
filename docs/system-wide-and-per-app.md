@@ -58,11 +58,13 @@ The spatial processor treats the left and right channels as front speakers, then
 
 Preset buttons:
 
-- `IEM`: low-noise starting point for sensitive earphones, with light spatial compensation.
-- `Gentle`: light bass support for long listening, with subtle space recovery.
-- `LowEnd`: balanced default starting point with spatial stage compensation.
-- `Deep`: stronger bass, tuned with reduced circuit drive and wider stage support.
-- `Clear`: near-bypass reference point. It also disables the spatial processor.
+- `IEM`: low-noise starting point for sensitive earphones.
+- `Gentle`: light bass support for long listening.
+- `LowEnd`: balanced default starting point.
+- `Deep`: stronger bass, tuned with reduced circuit drive.
+- `Clear`: near-bypass reference point.
+
+Presets only change `LowEnd`, `Body`, and `Output`. They keep the spatial on/off state, listener position, `Width`, and `Space` exactly as you set them.
 
 Slider meanings:
 

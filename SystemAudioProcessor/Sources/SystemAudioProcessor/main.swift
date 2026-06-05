@@ -772,38 +772,32 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     @objc private func applyIEMPreset() {
-        applyPreset(name: "IEM", intensity: 30, body: 8, outputDb: -2.0, space: 22, spatialEnabled: true)
+        applyPreset(name: "IEM", intensity: 30, body: 8, outputDb: -2.0)
     }
 
     @objc private func applyGentlePreset() {
-        applyPreset(name: "Gentle", intensity: 22, body: 8, outputDb: -1.0, space: 24, spatialEnabled: true)
+        applyPreset(name: "Gentle", intensity: 22, body: 8, outputDb: -1.0)
     }
 
     @objc private func applyLowEndPreset() {
-        applyPreset(name: "LowEnd", intensity: 42, body: 18, outputDb: -1.8, space: 34, spatialEnabled: true)
+        applyPreset(name: "LowEnd", intensity: 42, body: 18, outputDb: -1.8)
     }
 
     @objc private func applyDeepPreset() {
-        applyPreset(name: "Deep", intensity: 54, body: 22, outputDb: -2.8, space: 38, spatialEnabled: true)
+        applyPreset(name: "Deep", intensity: 54, body: 22, outputDb: -2.8)
     }
 
     @objc private func applyClearPreset() {
-        applyPreset(name: "Clear", intensity: 0, body: 0, outputDb: 0, space: 0, spatialEnabled: false)
+        applyPreset(name: "Clear", intensity: 0, body: 0, outputDb: 0)
     }
 
     private func applyPreset(name: String,
                              intensity: Double,
                              body: Double,
-                             outputDb: Double,
-                             space: Double,
-                             spatialEnabled: Bool) {
+                             outputDb: Double) {
         intensitySlider.doubleValue = intensity
         bodySlider.doubleValue = body
         outputSlider.doubleValue = outputDb
-        var spatial = spatialSettingsFromControls()
-        spatial.enabled = spatialEnabled
-        spatial.amount = Float(space)
-        updateSpatialControls(from: spatial, notifyProcessor: true)
         sliderChanged()
         statusLabel.stringValue = "프리셋 적용: \(name)"
     }
