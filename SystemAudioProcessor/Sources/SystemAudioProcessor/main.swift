@@ -751,27 +751,30 @@ private final class SpectrumView: NSView {
 }
 
 private final class AudioSpectrumAnalyzer: NSObject {
+    private static let fftSize = 16384
+    private static let halfSize = 8192
+    private static let barCount = 96
+
     private let ringBuffer: LockFreeFloatRingBuffer
     private let dynamicsModel: DynamicsMeterModel
-    private let fftSize = 2048
-    private let halfSize = 1024
-    private let log2n = vDSP_Length(11)
-    private let barCount = 96
+    private let fftSize = AudioSpectrumAnalyzer.fftSize
+    private let halfSize = AudioSpectrumAnalyzer.halfSize
+    private let log2n = vDSP_Length(14)
+    private let barCount = AudioSpectrumAnalyzer.barCount
     private var sampleRate: Float
     private var timer: Timer?
     private var fftSetup: FFTSetup?
-    private var drainBuffer = [Float](repeating: 0, count: 16_384)
-    private var absoluteDrainBuffer = [Float](repeating: 0, count: 16_384)
-    private var history = [Float](repeating: 0, count: 2048)
-    private var window = [Float](repeating: 0, count: 2048)
-    private var windowed = [Float](repeating: 0, count: 2048)
-    private var real = [Float](repeating: 0, count: 1024)
-    private var imag = [Float](repeating: 0, count: 1024)
-    private var powerBins = [Float](repeating: 0, count: 1024)
-    private var dbBins = [Float](repeating: -120, count: 1024)
-    private var magnitudes = [Float](repeating: 0, count: 96)
-    private var binStarts = [Int](repeating: 1, count: 96)
-    private var binEnds = [Int](repeating: 2, count: 96)
+    private var drainBuffer = [Float](repeating: 0, count: 32_768)
+    private var absoluteDrainBuffer = [Float](repeating: 0, count: 32_768)
+    private var history = [Float](repeating: 0, count: AudioSpectrumAnalyzer.fftSize)
+    private var window = [Float](repeating: 0, count: AudioSpectrumAnalyzer.fftSize)
+    private var windowed = [Float](repeating: 0, count: AudioSpectrumAnalyzer.fftSize)
+    private var real = [Float](repeating: 0, count: AudioSpectrumAnalyzer.halfSize)
+    private var imag = [Float](repeating: 0, count: AudioSpectrumAnalyzer.halfSize)
+    private var powerBins = [Float](repeating: 0, count: AudioSpectrumAnalyzer.halfSize)
+    private var dbBins = [Float](repeating: -120, count: AudioSpectrumAnalyzer.halfSize)
+    private var magnitudes = [Float](repeating: 0, count: AudioSpectrumAnalyzer.barCount)
+    private var binCenters = [Float](repeating: 1, count: AudioSpectrumAnalyzer.barCount)
     private var filledSamples = 0
     private var smoothedPeakDb: Float = -100
     private var smoothedRMSDb: Float = -100
@@ -893,16 +896,22 @@ private final class AudioSpectrumAnalyzer: NSObject {
         vDSP_vdbcon(powerBins, 1, &reference, &dbBins, 1, vDSP_Length(halfSize), 0)
 
         for bar in 0..<barCount {
-            let start = binStarts[bar]
-            let end = max(binEnds[bar], start + 1)
-            var sum: Float = 0
-            for bin in start..<end {
-                sum += dbBins[bin]
-            }
-            let average = sum / Float(end - start)
-            let normalized = clamp((average + 96) / 78, 0, 1)
-            magnitudes[bar] = magnitudes[bar] * 0.72 + normalized * 0.28
+            let sampledDb = interpolatedDb(at: binCenters[bar])
+            let normalized = clamp((sampledDb + 96) / 78, 0, 1)
+            magnitudes[bar] = magnitudes[bar] * 0.68 + normalized * 0.32
         }
+    }
+
+    private func interpolatedDb(at fractionalBin: Float) -> Float {
+        let clampedBin = clamp(fractionalBin, 1, Float(halfSize - 2))
+        let lowerIndex = Int(clampedBin)
+        let upperIndex = lowerIndex + 1
+        let fraction = clampedBin - Float(lowerIndex)
+        let lower = dbBins[lowerIndex]
+        let upper = dbBins[upperIndex]
+        let center = lower + (upper - lower) * fraction
+        let shoulder = (dbBins[max(1, lowerIndex - 1)] + dbBins[min(halfSize - 1, upperIndex + 1)]) * 0.5
+        return center * 0.82 + shoulder * 0.18
     }
 
     private func updateDynamics(sampleCount: Int) {
@@ -945,20 +954,25 @@ private final class AudioSpectrumAnalyzer: NSObject {
 
     private func rebuildLogBins() {
         let nyquist = max(sampleRate * 0.5, 1_000)
-        let minHz: Float = 35
+        let minHz: Float = 24
+        let bassMaxHz: Float = min(420, nyquist * 0.75)
         let maxHz = min(nyquist, 20_000)
-        let minLog = log(max(minHz, 1))
-        let maxLog = log(max(maxHz, minHz + 1))
+        let bassBarRatio: Float = 0.58
+        let bassCurve: Float = 1.28
+        let minLog = log(max(bassMaxHz, minHz + 1))
+        let maxLog = log(max(maxHz, bassMaxHz + 1))
 
         for bar in 0..<barCount {
-            let lowerRatio = Float(bar) / Float(barCount)
-            let upperRatio = Float(bar + 1) / Float(barCount)
-            let lowerHz = exp(minLog + (maxLog - minLog) * lowerRatio)
-            let upperHz = exp(minLog + (maxLog - minLog) * upperRatio)
-            let start = max(1, min(halfSize - 1, Int((lowerHz / sampleRate) * Float(fftSize))))
-            let end = max(start + 1, min(halfSize, Int((upperHz / sampleRate) * Float(fftSize))))
-            binStarts[bar] = start
-            binEnds[bar] = end
+            let ratio = (Float(bar) + 0.5) / Float(barCount)
+            let centerHz: Float
+            if ratio < bassBarRatio {
+                let bassRatio = ratio / bassBarRatio
+                centerHz = minHz + pow(bassRatio, bassCurve) * (bassMaxHz - minHz)
+            } else {
+                let trebleRatio = (ratio - bassBarRatio) / (1 - bassBarRatio)
+                centerHz = exp(minLog + (maxLog - minLog) * trebleRatio)
+            }
+            binCenters[bar] = clamp((centerHz / sampleRate) * Float(fftSize), 1, Float(halfSize - 2))
         }
     }
 }
