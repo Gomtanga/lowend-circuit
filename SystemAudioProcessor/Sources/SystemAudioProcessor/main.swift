@@ -103,49 +103,343 @@ private final class DynamicsMeterModel: ObservableObject {
     }
 }
 
+private final class SpectrumModel: ObservableObject {
+    @Published var magnitudes = [Float](repeating: 0, count: 96)
+
+    func update(_ values: [Float]) {
+        magnitudes = values
+    }
+
+    func reset() {
+        magnitudes = [Float](repeating: 0, count: 96)
+    }
+}
+
+private final class SpatialControlModel: ObservableObject {
+    @Published var settings: SpatialSettings
+
+    init(settings: SpatialSettings = SpatialSettings()) {
+        self.settings = settings
+    }
+
+    func update(_ newSettings: SpatialSettings) {
+        var clamped = newSettings
+        clamped.listenerX = clamp(clamped.listenerX, -3.0, 3.0)
+        clamped.listenerZ = clamp(clamped.listenerZ, -2.8, 2.8)
+        clamped.speakerWidth = clamp(clamped.speakerWidth, 0.6, 3.0)
+        clamped.amount = clamp(clamped.amount, 0, 100)
+        settings = clamped
+    }
+}
+
+private enum DynamicsMeterStyle {
+    case compactHorizontal
+    case analysis
+}
+
 private struct DynamicsMeterView: View {
     @ObservedObject var model: DynamicsMeterModel
+    var style: DynamicsMeterStyle = .compactHorizontal
 
     var body: some View {
-        HStack(spacing: 8) {
-            levelBar(title: "P", db: model.currentPeak, color: Color(red: 0.96, green: 0.75, blue: 0.31))
-            levelBar(title: "R", db: model.currentRMS, color: Color(red: 0.34, green: 0.80, blue: 0.92))
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Crest")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
-                Text(String(format: "%.1f", model.currentCrestFactor))
-                    .font(.system(size: 13, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.white)
-                Text("dB")
-                    .font(.system(size: 8, weight: .regular))
-                    .foregroundStyle(Color(red: 0.62, green: 0.66, blue: 0.72))
-            }
-            .frame(width: 46, alignment: .leading)
+        switch style {
+        case .compactHorizontal:
+            compactBody
+        case .analysis:
+            analysisBody
+        }
+    }
+
+    private var compactBody: some View {
+        VStack(spacing: 4) {
+            horizontalLevelBar(title: "Peak", db: model.currentPeak, color: Color(red: 0.96, green: 0.75, blue: 0.31), showValue: false)
+            horizontalLevelBar(title: "RMS", db: model.currentRMS, color: Color(red: 0.34, green: 0.80, blue: 0.92), showValue: false)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(Color(red: 0.07, green: 0.08, blue: 0.10))
     }
 
-    private func levelBar(title: String, db: Float, color: Color) -> some View {
+    private var analysisBody: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Dynamics")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
+                    Text("Crest Factor")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color(red: 0.58, green: 0.62, blue: 0.68))
+                }
+                Spacer(minLength: 8)
+                Text(String(format: "%.1f dB", model.currentCrestFactor))
+                    .font(.system(size: 30, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(Color(red: 0.96, green: 0.75, blue: 0.31))
+                    .minimumScaleFactor(0.72)
+            }
+
+            VStack(spacing: 9) {
+                horizontalLevelBar(title: "Peak", db: model.currentPeak, color: Color(red: 0.96, green: 0.75, blue: 0.31), showValue: true)
+                horizontalLevelBar(title: "RMS", db: model.currentRMS, color: Color(red: 0.34, green: 0.80, blue: 0.92), showValue: true)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(red: 0.07, green: 0.08, blue: 0.10))
+    }
+
+    private func horizontalLevelBar(title: String, db: Float, color: Color, showValue: Bool) -> some View {
         let normalized = max(0, min(1, Double((db + 60) / 60)))
-        return VStack(spacing: 2) {
+        return HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
+                .frame(width: showValue ? 42 : 28, alignment: .leading)
             GeometryReader { proxy in
-                ZStack(alignment: .bottom) {
+                ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(Color(red: 0.18, green: 0.21, blue: 0.25))
                     RoundedRectangle(cornerRadius: 2)
                         .fill(color)
-                        .frame(height: max(2, proxy.size.height * normalized))
+                        .frame(width: max(2, proxy.size.width * normalized))
                 }
             }
-            .frame(width: 12)
-            Text(title)
-                .font(.system(size: 8, weight: .semibold))
-                .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
+            .frame(height: showValue ? 14 : 6)
+            if showValue {
+                Text(String(format: "%.1f dB", db))
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .frame(width: 72, alignment: .trailing)
+            }
         }
-        .frame(width: 16)
+    }
+
+}
+
+private struct AudioSpectrumView: View {
+    @ObservedObject var model: SpectrumModel
+
+    var body: some View {
+        Canvas { context, size in
+            let rect = CGRect(origin: .zero, size: size)
+            context.fill(Path(rect), with: .color(Color(red: 0.07, green: 0.08, blue: 0.10)))
+
+            let gridColor = Color(red: 0.22, green: 0.26, blue: 0.31).opacity(0.72)
+            for line in 1..<5 {
+                let y = size.height * CGFloat(line) / 5.0
+                var path = Path()
+                path.move(to: CGPoint(x: 0, y: y))
+                path.addLine(to: CGPoint(x: size.width, y: y))
+                context.stroke(path, with: .color(gridColor), lineWidth: 1)
+            }
+
+            let values = model.magnitudes
+            guard !values.isEmpty, size.width > 4, size.height > 4 else { return }
+            let gap: CGFloat = 1.5
+            let barWidth = max((size.width - CGFloat(values.count - 1) * gap) / CGFloat(values.count), 1)
+            for index in values.indices {
+                let value = CGFloat(clamp(values[index], 0, 1))
+                let height = max(value * (size.height - 14), 1)
+                let x = CGFloat(index) * (barWidth + gap)
+                let y = size.height - height - 4
+                let barRect = CGRect(x: x, y: y, width: barWidth, height: height)
+                context.fill(
+                    Path(roundedRect: barRect, cornerRadius: 1.5),
+                    with: .color(Color(red: 0.34, green: 0.80, blue: 0.92).opacity(0.9))
+                )
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            Text("Spectrum")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+}
+
+@available(macOS 14.4, *)
+private struct SpatialStageRepresentable: NSViewRepresentable {
+    @ObservedObject var model: SpatialControlModel
+    let onChange: (SpatialSettings) -> Void
+
+    func makeNSView(context: Context) -> SpatialStageView {
+        let view = SpatialStageView(frame: .zero)
+        view.wantsLayer = true
+        view.layer?.cornerRadius = 6
+        view.onChange = { settings in
+            model.update(settings)
+            onChange(model.settings)
+        }
+        view.setSettings(model.settings)
+        return view
+    }
+
+    func updateNSView(_ nsView: SpatialStageView, context: Context) {
+        nsView.setSettings(model.settings)
+    }
+}
+
+@available(macOS 14.4, *)
+private struct RightPanelContainerView: View {
+    private enum PanelTab: String, CaseIterable, Identifiable {
+        case spatial = "Spatial Stage"
+        case analysis = "Analysis"
+
+        var id: String { rawValue }
+    }
+
+    @State private var selectedTab: PanelTab = .spatial
+    @ObservedObject var spatialModel: SpatialControlModel
+    @ObservedObject var dynamicsModel: DynamicsMeterModel
+    @ObservedObject var spectrumModel: SpectrumModel
+    let onSpatialChange: (SpatialSettings) -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Picker("", selection: $selectedTab) {
+                ForEach(PanelTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            ZStack {
+                switch selectedTab {
+                case .spatial:
+                    spatialTab
+                        .transition(.opacity)
+                case .analysis:
+                    analysisTab
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.16), value: selectedTab)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(red: 0.12, green: 0.14, blue: 0.17))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var spatialTab: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Text("Spatial Stage")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(Color(red: 0.96, green: 0.75, blue: 0.31))
+                Spacer()
+                Button("원위치") {
+                    applySpatialChange { settings in
+                        settings.listenerX = 0
+                        settings.listenerZ = 0
+                    }
+                }
+                .buttonStyle(.bordered)
+                Toggle("공간음향", isOn: spatialEnabledBinding)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+
+            SpatialStageRepresentable(model: spatialModel, onChange: onSpatialChange)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minHeight: 310)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            VStack(spacing: 8) {
+                spatialSlider(title: "나 X", value: listenerXBinding, range: -3.0...3.0, suffix: "m")
+                spatialSlider(title: "나 Z", value: listenerZBinding, range: -2.8...2.8, suffix: "m")
+                spatialSlider(title: "Width", value: speakerWidthBinding, range: 0.6...3.0, suffix: "m")
+                spatialSlider(title: "Space", value: spatialAmountBinding, range: 0...100, suffix: "%")
+            }
+
+            DynamicsMeterView(model: dynamicsModel, style: .compactHorizontal)
+                .frame(maxWidth: .infinity)
+                .frame(height: 34)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var analysisTab: some View {
+        VStack(spacing: 12) {
+            AudioSpectrumView(model: spectrumModel)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minHeight: 330)
+            DynamicsMeterView(model: dynamicsModel, style: .analysis)
+                .frame(maxWidth: .infinity)
+                .frame(height: 162)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func spatialSlider(title: String, value: Binding<Double>, range: ClosedRange<Double>, suffix: String) -> some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
+                .frame(width: 46, alignment: .leading)
+            Slider(value: value, in: range)
+            Text(valueText(value.wrappedValue, suffix: suffix))
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white)
+                .frame(width: 70, alignment: .trailing)
+        }
+    }
+
+    private var spatialEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { spatialModel.settings.enabled },
+            set: { newValue in
+                applySpatialChange { settings in settings.enabled = newValue }
+            }
+        )
+    }
+
+    private var listenerXBinding: Binding<Double> {
+        spatialBinding(\.listenerX)
+    }
+
+    private var listenerZBinding: Binding<Double> {
+        spatialBinding(\.listenerZ)
+    }
+
+    private var speakerWidthBinding: Binding<Double> {
+        spatialBinding(\.speakerWidth)
+    }
+
+    private var spatialAmountBinding: Binding<Double> {
+        spatialBinding(\.amount)
+    }
+
+    private func spatialBinding(_ keyPath: WritableKeyPath<SpatialSettings, Float>) -> Binding<Double> {
+        Binding(
+            get: { Double(spatialModel.settings[keyPath: keyPath]) },
+            set: { newValue in
+                applySpatialChange { settings in settings[keyPath: keyPath] = Float(newValue) }
+            }
+        )
+    }
+
+    private func applySpatialChange(_ change: (inout SpatialSettings) -> Void) {
+        var settings = spatialModel.settings
+        change(&settings)
+        spatialModel.update(settings)
+        onSpatialChange(spatialModel.settings)
+    }
+
+    private func valueText(_ value: Double, suffix: String) -> String {
+        if suffix == "%" {
+            return "\(Int(value.rounded()))\(suffix)"
+        }
+        return String(format: "%.2f %@", value, suffix)
     }
 }
 
@@ -675,8 +969,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var window: NSWindow!
     private var statusLabel: NSTextField!
     private var formatLabel: NSTextField!
-    private var spectrumView: SpectrumView!
-    private var dynamicsMeterView: NSHostingView<DynamicsMeterView>!
+    private var rightPanelView: NSHostingView<AnyView>!
     private var bundleField: NSTextField!
     private var appsView: NSTextView!
     private var intensitySlider: NSSlider!
@@ -696,6 +989,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var processor: SystemAudioProcessor?
     private var spectrumAnalyzer: AudioSpectrumAnalyzer?
     private let dynamicsMeterModel = DynamicsMeterModel()
+    private let spectrumModel = SpectrumModel()
+    private let spatialControlModel = SpatialControlModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NotificationCenter.default.addObserver(
@@ -753,9 +1048,21 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         formatLabel.toolTip = "앱 내부 처리 포맷입니다. 재생 중인 음원의 원본 bit depth나 파일 샘플레이트를 표시하는 값은 아닙니다."
         content.addSubview(formatLabel)
 
-        let spatial = makeSpatialSection()
-        spatial.frame = NSRect(x: 740, y: 28, width: 430, height: 636)
-        content.addSubview(spatial)
+        rightPanelView = NSHostingView(rootView: AnyView(
+            RightPanelContainerView(
+                spatialModel: spatialControlModel,
+                dynamicsModel: dynamicsMeterModel,
+                spectrumModel: spectrumModel,
+                onSpatialChange: { [weak self] settings in
+                    self?.updateSpatialControls(from: settings, notifyProcessor: true)
+                }
+            )
+        ))
+        rightPanelView.frame = NSRect(x: 740, y: 28, width: 430, height: 636)
+        rightPanelView.wantsLayer = true
+        rightPanelView.layer?.cornerRadius = 8
+        rightPanelView.toolTip = "Spatial Stage와 분석계를 전환해 보는 우측 작업 패널입니다."
+        content.addSubview(rightPanelView)
 
         statusLabel = makeLabel("대기 중", size: 14, weight: .semibold)
         statusLabel.textColor = .white
@@ -810,19 +1117,6 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         listButton.frame = NSRect(x: 30, y: 184, width: 220, height: 38)
         content.addSubview(listButton)
         listButton.toolTip = "아래 목록을 갱신합니다. 특정 앱 적용 때 bundle id를 참고하세요."
-
-        spectrumView = SpectrumView(frame: NSRect(x: 270, y: 184, width: 300, height: 38))
-        spectrumView.wantsLayer = true
-        spectrumView.layer?.cornerRadius = 6
-        spectrumView.toolTip = "최종 출력 신호의 실시간 FFT 스펙트럼입니다."
-        content.addSubview(spectrumView)
-
-        dynamicsMeterView = NSHostingView(rootView: DynamicsMeterView(model: dynamicsMeterModel))
-        dynamicsMeterView.frame = NSRect(x: 584, y: 184, width: 126, height: 38)
-        dynamicsMeterView.wantsLayer = true
-        dynamicsMeterView.layer?.cornerRadius = 6
-        dynamicsMeterView.toolTip = "Peak, RMS, Crest Factor 실시간 다이나믹 분석계입니다."
-        content.addSubview(dynamicsMeterView)
 
         let scroll = NSScrollView(frame: NSRect(x: 30, y: 28, width: 680, height: 148))
         scroll.borderType = .bezelBorder
@@ -1049,7 +1343,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     @objc private func spatialControlChanged() {
-        updateSpatialControls(from: spatialSettingsFromControls(), notifyProcessor: true)
+        updateSpatialControls(from: spatialControlModel.settings, notifyProcessor: true)
     }
 
     @objc private func spatialFieldChanged() {
@@ -1061,14 +1355,14 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     private func spatialStageChanged(_ settings: SpatialSettings) {
-        var updated = spatialSettingsFromControls()
+        var updated = spatialControlModel.settings
         updated.listenerX = settings.listenerX
         updated.listenerZ = settings.listenerZ
         updateSpatialControls(from: updated, notifyProcessor: true)
     }
 
     @objc private func resetSpatialPosition() {
-        var updated = spatialSettingsFromControls()
+        var updated = spatialControlModel.settings
         updated.listenerX = 0
         updated.listenerZ = 0
         updateSpatialControls(from: updated, notifyProcessor: true)
@@ -1087,26 +1381,21 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     private func spatialSettingsFromControls() -> SpatialSettings {
-        SpatialSettings(
-            enabled: spatialEnabledButton?.state == .on,
-            listenerX: clamp(Float(listenerXField?.doubleValue ?? 0), -3.0, 3.0),
-            listenerZ: clamp(Float(listenerZField?.doubleValue ?? 0), -2.8, 2.8),
-            speakerWidth: clamp(Float(speakerWidthField?.doubleValue ?? 1.65), 0.6, 3.0),
-            amount: clamp(Float(spatialAmountSlider?.doubleValue ?? 35.0), 0, 100)
-        )
+        spatialControlModel.settings
     }
 
     private func updateSpatialControls(from settings: SpatialSettings, notifyProcessor: Bool) {
-        spatialEnabledButton.state = settings.enabled ? .on : .off
-        listenerXField.stringValue = String(format: "%.2f", settings.listenerX)
-        listenerZField.stringValue = String(format: "%.2f", settings.listenerZ)
-        speakerWidthField.stringValue = String(format: "%.2f", settings.speakerWidth)
-        spatialAmountSlider.doubleValue = Double(settings.amount)
-        spatialAmountValueLabel.stringValue = "\(Int(settings.amount.rounded()))%"
-        spatialStageView.setSettings(settings)
+        spatialControlModel.update(settings)
+        spatialEnabledButton?.state = spatialControlModel.settings.enabled ? .on : .off
+        listenerXField?.stringValue = String(format: "%.2f", spatialControlModel.settings.listenerX)
+        listenerZField?.stringValue = String(format: "%.2f", spatialControlModel.settings.listenerZ)
+        speakerWidthField?.stringValue = String(format: "%.2f", spatialControlModel.settings.speakerWidth)
+        spatialAmountSlider?.doubleValue = Double(spatialControlModel.settings.amount)
+        spatialAmountValueLabel?.stringValue = "\(Int(spatialControlModel.settings.amount.rounded()))%"
+        spatialStageView?.setSettings(spatialControlModel.settings)
 
         if notifyProcessor {
-            processor?.updateSpatial(settings)
+            processor?.updateSpatial(spatialControlModel.settings)
         }
     }
 
@@ -1190,6 +1479,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         spectrumAnalyzer?.stop()
         spectrumAnalyzer = nil
         dynamicsMeterModel.reset()
+        spectrumModel.reset()
         processor?.stop()
         processor = nil
         if statusLabel != nil {
@@ -1226,7 +1516,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         guard let magnitudes = notification.userInfo?[SpectrumNotifications.magnitudesKey] as? [Float] else {
             return
         }
-        spectrumView?.updateMagnitudes(magnitudes)
+        spectrumModel.update(magnitudes)
     }
 }
 
