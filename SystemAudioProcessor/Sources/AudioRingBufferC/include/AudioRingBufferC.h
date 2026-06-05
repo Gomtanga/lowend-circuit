@@ -45,6 +45,9 @@ typedef struct {
     float transformerAsymmetry;
     float transformerBiasOffset;
     float transformerMakeupGain;
+    LCBiquadCoefficients exciterHighPass;
+    float exciterDrive;
+    float exciterWetMix;
 } LCDSPSettings;
 
 typedef struct {

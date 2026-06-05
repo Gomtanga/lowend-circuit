@@ -17,7 +17,9 @@ LowEnd Circuit는 저역 보강과 간단한 공간음향 처리를 제공하는
 - macOS에서는 `LowEnd Native Audio` 앱으로 컴퓨터 전체 소리 또는 특정 앱 소리에 처리를 적용할 수 있습니다.
 - Windows에서는 `Standalone.exe`와 `VST3` 플러그인을 제공합니다. Windows 전체 시스템 오디오 적용 앱은 아직 별도 개발이 필요합니다.
 - `LowEnd`는 저역 보강 강도, `Body`는 서브 저역의 두께, `Output`은 최종 출력 보정입니다.
+- 고역 exciter는 11 kHz 이상 성분을 아주 작게 병렬 보강해 저역 보강 후 답답함을 줄입니다.
 - `Spatial Stage`에서는 파란 청취자 포인트를 드래그하거나 `나 X`, `나 Z`, `Width` 값을 직접 입력해 공간감을 조정합니다.
+- macOS native 앱에는 최종 출력의 실시간 FFT 스펙트럼 표시가 포함됩니다.
 - `원위치` 버튼은 청취자 위치를 중앙 기준점으로 되돌립니다. `Width`와 `Space` 값은 유지됩니다.
 - `Width`는 좌우 가상 스피커 사이 거리이고, `Space`는 원본 스테레오와 공간 처리 신호를 섞는 양입니다.
 - 프리셋은 `LowEnd`, `Body`, `Output`만 바꾸며 사용자가 맞춰둔 공간음향 설정은 유지합니다.
@@ -39,6 +41,8 @@ This repository is licensed under `AGPL-3.0-or-later`. JUCE is fetched at build 
 - `Mix`: parallel wet/dry blend.
 - `Output`: final trim before a gentle tanh safety stage.
 - `Spatial Stage`: native macOS app only. Adds a drag-controlled 3D listener position with distance, inter-ear delay, level difference, and crossfeed processing.
+- `High Exciter`: native macOS app only. Adds a subtle high-frequency harmonic branch above about 11 kHz.
+- `Spectrum`: native macOS app only. Copies final output samples to a lock-free visualizer buffer and runs Accelerate/vDSP FFT analysis outside the audio callback.
 
 This is an original approximation, not an emulation endorsed by or affiliated with any hardware manufacturer.
 

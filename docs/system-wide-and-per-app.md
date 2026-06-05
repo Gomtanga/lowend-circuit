@@ -38,6 +38,10 @@ The format indicator shows the app's internal processing format, not the origina
 
 Tidal `Use Exclusive Mode` and similar exclusive-output modes are not compatible with system-wide processing. Exclusive mode lets the player take over the output device directly, so the Core Audio process tap can be bypassed or starved. Turn exclusive mode off when using LowEnd Native Audio.
 
+The native processor also includes a subtle high-frequency exciter. Its 11 kHz high-pass coefficients and blend values are precomputed outside the audio callback, then applied as a small parallel harmonic branch at the final output stage.
+
+The small spectrum display next to the app-list refresh button is a UI-side FFT visualizer. The audio callback only copies final output samples into a lock-free visualizer ring buffer. A 60 Hz UI timer drains that buffer and runs Hann windowing plus real FFT analysis with Accelerate/vDSP.
+
 The GUI version also includes a `Spatial Stage` panel:
 
 - Drag the blue listener point in the 3D view to move the listening position in real time.

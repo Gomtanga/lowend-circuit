@@ -1,4 +1,5 @@
 import AppKit
+import Accelerate
 import AudioToolbox
 import AVFoundation
 import AudioRingBufferC
@@ -63,6 +64,11 @@ private enum AudioFormatNotifications {
     static let sampleFormatKey = "sampleFormat"
     static let isSampleRateMatchedKey = "isSampleRateMatched"
     static let indicatorTextKey = "indicatorText"
+}
+
+private enum SpectrumNotifications {
+    static let didUpdate = Notification.Name("LowEndSpectrumDidUpdate")
+    static let magnitudesKey = "magnitudes"
 }
 
 private enum AppError: Error, CustomStringConvertible {
@@ -355,10 +361,210 @@ private final class SpatialStageView: SCNView {
 
 @available(macOS 14.4, *)
 @MainActor
+private final class SpectrumView: NSView {
+    private var magnitudes = [Float](repeating: 0, count: 96)
+
+    override var isFlipped: Bool { true }
+
+    func updateMagnitudes(_ values: [Float]) {
+        magnitudes = values
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1).setFill()
+        bounds.fill()
+
+        guard !magnitudes.isEmpty, bounds.width > 2, bounds.height > 2 else { return }
+
+        let barCount = magnitudes.count
+        let gap: CGFloat = 1
+        let barWidth = max((bounds.width - CGFloat(barCount - 1) * gap) / CGFloat(barCount), 1)
+        let baseline = bounds.maxY - 3
+
+        NSColor(calibratedRed: 0.34, green: 0.80, blue: 0.92, alpha: 0.86).setFill()
+        for index in 0..<barCount {
+            let value = CGFloat(clamp(magnitudes[index], 0, 1))
+            let height = max(value * (bounds.height - 6), 1)
+            let x = CGFloat(index) * (barWidth + gap)
+            NSBezierPath(rect: NSRect(x: x, y: baseline - height, width: barWidth, height: height)).fill()
+        }
+    }
+}
+
+private final class AudioSpectrumAnalyzer: NSObject {
+    private let ringBuffer: LockFreeFloatRingBuffer
+    private let fftSize = 2048
+    private let halfSize = 1024
+    private let log2n = vDSP_Length(11)
+    private let barCount = 96
+    private var sampleRate: Float
+    private var timer: Timer?
+    private var fftSetup: FFTSetup?
+    private var drainBuffer = [Float](repeating: 0, count: 16_384)
+    private var history = [Float](repeating: 0, count: 2048)
+    private var window = [Float](repeating: 0, count: 2048)
+    private var windowed = [Float](repeating: 0, count: 2048)
+    private var real = [Float](repeating: 0, count: 1024)
+    private var imag = [Float](repeating: 0, count: 1024)
+    private var powerBins = [Float](repeating: 0, count: 1024)
+    private var dbBins = [Float](repeating: -120, count: 1024)
+    private var magnitudes = [Float](repeating: 0, count: 96)
+    private var binStarts = [Int](repeating: 1, count: 96)
+    private var binEnds = [Int](repeating: 2, count: 96)
+    private var filledSamples = 0
+
+    init(ringBuffer: LockFreeFloatRingBuffer, sampleRate: Float) {
+        self.ringBuffer = ringBuffer
+        self.sampleRate = sampleRate
+        super.init()
+        fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
+        vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
+        rebuildLogBins()
+    }
+
+    deinit {
+        stop()
+        if let fftSetup {
+            vDSP_destroy_fftsetup(fftSetup)
+        }
+    }
+
+    func start() {
+        stop()
+        timer = Timer.scheduledTimer(timeInterval: 1.0 / 60.0, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func updateSampleRate(_ sampleRate: Float) {
+        self.sampleRate = sampleRate
+        rebuildLogBins()
+    }
+
+    @objc private func tick() {
+        drainAudio()
+        guard filledSamples > 0 else { return }
+        computeSpectrum()
+        NotificationCenter.default.post(
+            name: SpectrumNotifications.didUpdate,
+            object: nil,
+            userInfo: [SpectrumNotifications.magnitudesKey: magnitudes]
+        )
+    }
+
+    private func drainAudio() {
+        let available = min(ringBuffer.availableSamples(), drainBuffer.count)
+        let sampleCount = available - (available % 2)
+        guard sampleCount >= 2 else { return }
+
+        drainBuffer.withUnsafeMutableBufferPointer { pointer in
+            if let baseAddress = pointer.baseAddress {
+                ringBuffer.popInterleaved(into: baseAddress, count: sampleCount)
+            }
+        }
+
+        let frameCount = sampleCount / 2
+        if frameCount >= fftSize {
+            let startFrame = frameCount - fftSize
+            for index in 0..<fftSize {
+                let sourceIndex = (startFrame + index) * 2
+                history[index] = (drainBuffer[sourceIndex] + drainBuffer[sourceIndex + 1]) * 0.5
+            }
+            filledSamples = fftSize
+            return
+        }
+
+        let keepCount = fftSize - frameCount
+        for index in 0..<keepCount {
+            history[index] = history[index + frameCount]
+        }
+        for index in 0..<frameCount {
+            let sourceIndex = index * 2
+            history[keepCount + index] = (drainBuffer[sourceIndex] + drainBuffer[sourceIndex + 1]) * 0.5
+        }
+        filledSamples = min(fftSize, filledSamples + frameCount)
+    }
+
+    private func computeSpectrum() {
+        guard let fftSetup else { return }
+
+        vDSP_vmul(history, 1, window, 1, &windowed, 1, vDSP_Length(fftSize))
+
+        windowed.withUnsafeBufferPointer { windowPointer in
+            real.withUnsafeMutableBufferPointer { realPointer in
+                imag.withUnsafeMutableBufferPointer { imagPointer in
+                    guard let windowBase = windowPointer.baseAddress,
+                          let realBase = realPointer.baseAddress,
+                          let imagBase = imagPointer.baseAddress else { return }
+                    var split = DSPSplitComplex(realp: realBase, imagp: imagBase)
+
+                    windowBase.withMemoryRebound(to: DSPComplex.self, capacity: halfSize) { complexPointer in
+                        vDSP_ctoz(complexPointer, 2, &split, 1, vDSP_Length(halfSize))
+                    }
+
+                    vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+
+                    var scale = 1 / Float(fftSize)
+                    vDSP_vsmul(split.realp, 1, &scale, split.realp, 1, vDSP_Length(halfSize))
+                    vDSP_vsmul(split.imagp, 1, &scale, split.imagp, 1, vDSP_Length(halfSize))
+
+                    powerBins.withUnsafeMutableBufferPointer { powerPointer in
+                        guard let powerBase = powerPointer.baseAddress else { return }
+                        vDSP_zvmags(&split, 1, powerBase, 1, vDSP_Length(halfSize))
+                    }
+                }
+            }
+        }
+
+        var floor: Float = 1.0e-12
+        vDSP_vthr(powerBins, 1, &floor, &powerBins, 1, vDSP_Length(halfSize))
+        var reference: Float = 1
+        vDSP_vdbcon(powerBins, 1, &reference, &dbBins, 1, vDSP_Length(halfSize), 0)
+
+        for bar in 0..<barCount {
+            let start = binStarts[bar]
+            let end = max(binEnds[bar], start + 1)
+            var sum: Float = 0
+            for bin in start..<end {
+                sum += dbBins[bin]
+            }
+            let average = sum / Float(end - start)
+            let normalized = clamp((average + 96) / 78, 0, 1)
+            magnitudes[bar] = magnitudes[bar] * 0.72 + normalized * 0.28
+        }
+    }
+
+    private func rebuildLogBins() {
+        let nyquist = max(sampleRate * 0.5, 1_000)
+        let minHz: Float = 35
+        let maxHz = min(nyquist, 20_000)
+        let minLog = log(max(minHz, 1))
+        let maxLog = log(max(maxHz, minHz + 1))
+
+        for bar in 0..<barCount {
+            let lowerRatio = Float(bar) / Float(barCount)
+            let upperRatio = Float(bar + 1) / Float(barCount)
+            let lowerHz = exp(minLog + (maxLog - minLog) * lowerRatio)
+            let upperHz = exp(minLog + (maxLog - minLog) * upperRatio)
+            let start = max(1, min(halfSize - 1, Int((lowerHz / sampleRate) * Float(fftSize))))
+            let end = max(start + 1, min(halfSize, Int((upperHz / sampleRate) * Float(fftSize))))
+            binStarts[bar] = start
+            binEnds[bar] = end
+        }
+    }
+}
+
+@available(macOS 14.4, *)
+@MainActor
 private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     private var window: NSWindow!
     private var statusLabel: NSTextField!
     private var formatLabel: NSTextField!
+    private var spectrumView: SpectrumView!
     private var bundleField: NSTextField!
     private var appsView: NSTextView!
     private var intensitySlider: NSSlider!
@@ -376,12 +582,19 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var spatialAmountSlider: NSSlider!
     private var spatialAmountValueLabel: NSTextField!
     private var processor: SystemAudioProcessor?
+    private var spectrumAnalyzer: AudioSpectrumAnalyzer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(audioFormatDidChange(_:)),
             name: AudioFormatNotifications.didChange,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(spectrumDidUpdate(_:)),
+            name: SpectrumNotifications.didUpdate,
             object: nil
         )
         buildWindow()
@@ -484,6 +697,12 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         listButton.frame = NSRect(x: 30, y: 184, width: 220, height: 38)
         content.addSubview(listButton)
         listButton.toolTip = "아래 목록을 갱신합니다. 특정 앱 적용 때 bundle id를 참고하세요."
+
+        spectrumView = SpectrumView(frame: NSRect(x: 270, y: 184, width: 440, height: 38))
+        spectrumView.wantsLayer = true
+        spectrumView.layer?.cornerRadius = 6
+        spectrumView.toolTip = "최종 출력 신호의 실시간 FFT 스펙트럼입니다."
+        content.addSubview(spectrumView)
 
         let scroll = NSScrollView(frame: NSRect(x: 30, y: 28, width: 680, height: 148))
         scroll.borderType = .bezelBorder
@@ -836,14 +1055,20 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             let processor = try SystemAudioProcessor(settings: settings)
             try processor.start()
             self.processor = processor
+            let analyzer = processor.makeSpectrumAnalyzer()
+            analyzer.start()
+            self.spectrumAnalyzer = analyzer
             statusLabel.stringValue = "처리 중입니다. 소리가 안 나면 중지를 눌러 원래 출력으로 복구하세요."
         } catch {
             statusLabel.stringValue = "실행 실패: \(error)"
             self.processor = nil
+            self.spectrumAnalyzer = nil
         }
     }
 
     @objc private func stopAudio() {
+        spectrumAnalyzer?.stop()
+        spectrumAnalyzer = nil
         processor?.stop()
         processor = nil
         if statusLabel != nil {
@@ -870,6 +1095,17 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             return
         }
         formatLabel?.stringValue = text
+
+        if let sampleRate = notification.userInfo?[AudioFormatNotifications.processingSampleRateKey] as? Double {
+            spectrumAnalyzer?.updateSampleRate(Float(sampleRate))
+        }
+    }
+
+    @objc private func spectrumDidUpdate(_ notification: Notification) {
+        guard let magnitudes = notification.userInfo?[SpectrumNotifications.magnitudesKey] as? [Float] else {
+            return
+        }
+        spectrumView?.updateMagnitudes(magnitudes)
     }
 }
 
@@ -941,6 +1177,10 @@ private final class LockFreeFloatRingBuffer {
 
     func push(_ samples: UnsafePointer<Float>, count: Int) {
         _ = lc_ring_buffer_push(handle, samples, UInt32(max(count, 0)))
+    }
+
+    func availableSamples() -> Int {
+        Int(lc_ring_buffer_available(handle))
     }
 
     func popInterleaved(into pointer: UnsafeMutablePointer<Float>, count: Int) {
@@ -1023,6 +1263,9 @@ private enum DSPPrecompute {
         let transformerAsymmetry = 0.002 + normalIntensity * 0.008 + normalBody * 0.004
         let transformerBiasOffset = makePolynomialSoftClip(transformerAsymmetry)
         let transformerMakeupGain: Float = 1 / max(1 + (transformerDrive - 1) * 0.35, 0.001)
+        let exciterFrequency = min(max(Float(11_000), sampleRate * 0.20), sampleRate * 0.45)
+        let exciterDrive = 0.55 + normalIntensity * 0.35 + normalBody * 0.10
+        let exciterWetMix = min(max(normalIntensity * 0.026 + normalBody * 0.006, 0), 0.034)
 
         return LCDSPSettings(
             intensity: normalIntensity,
@@ -1044,7 +1287,10 @@ private enum DSPPrecompute {
             transformerDrive: transformerDrive,
             transformerAsymmetry: transformerAsymmetry,
             transformerBiasOffset: transformerBiasOffset,
-            transformerMakeupGain: transformerMakeupGain
+            transformerMakeupGain: transformerMakeupGain,
+            exciterHighPass: makeHighPass(sampleRate: sampleRate, frequency: exciterFrequency, q: 0.707),
+            exciterDrive: exciterDrive,
+            exciterWetMix: exciterWetMix
         )
     }
 
@@ -1093,6 +1339,21 @@ private enum DSPPrecompute {
             b0: ((1 - cosW0) / 2) / a0,
             b1: (1 - cosW0) / a0,
             b2: ((1 - cosW0) / 2) / a0,
+            a1: (-2 * cosW0) / a0,
+            a2: (1 - alpha) / a0
+        )
+    }
+
+    static func makeHighPass(sampleRate: Float, frequency: Float, q: Float) -> LCBiquadCoefficients {
+        let clampedFrequency = min(max(frequency, 20), sampleRate * 0.45)
+        let w0 = 2 * Float.pi * clampedFrequency / sampleRate
+        let alpha = sin(w0) / (2 * q)
+        let cosW0 = cos(w0)
+        let a0 = 1 + alpha
+        return LCBiquadCoefficients(
+            b0: ((1 + cosW0) / 2) / a0,
+            b1: (-(1 + cosW0)) / a0,
+            b2: ((1 + cosW0) / 2) / a0,
             a1: (-2 * cosW0) / a0,
             a2: (1 - alpha) / a0
         )
@@ -1385,6 +1646,72 @@ private final class VirtualCircuitBassDSP: BassProcessor {
     }
 }
 
+private final class HighExciterDSP {
+    private final class Channel {
+        private var highPass = Biquad()
+        private var drive: Float = 0
+        private var wetMix: Float = 0
+
+        func update(_ settings: LCDSPSettings) {
+            highPass.update(settings.exciterHighPass)
+            drive = settings.exciterDrive
+            wetMix = settings.exciterWetMix
+        }
+
+        func resetState() {
+            highPass.resetState()
+        }
+
+        func process(_ input: Float) -> Float {
+            if wetMix < 0.0001 {
+                return input
+            }
+
+            let high = highPass.process(input)
+            let high2 = high * high
+            let harmonic = (high2 + high2 * high * 0.5) * drive
+            return fastClamp(input + harmonic * wetMix)
+        }
+
+        private func fastClamp(_ input: Float) -> Float {
+            if input > 1 {
+                return 1
+            }
+            if input < -1 {
+                return -1
+            }
+            return input
+        }
+    }
+
+    private let left = Channel()
+    private let right = Channel()
+
+    init(sampleRate: Float, intensity: Float, body: Float, outputDb: Float, dspModel: Settings.DSPModel) {
+        update(DSPPrecompute.makeDSPSettings(
+            sampleRate: sampleRate,
+            intensity: intensity,
+            body: body,
+            outputDb: outputDb,
+            dspModel: dspModel
+        ))
+    }
+
+    func update(_ settings: LCDSPSettings) {
+        left.update(settings)
+        right.update(settings)
+    }
+
+    func resetState() {
+        left.resetState()
+        right.resetState()
+    }
+
+    func process(left inputLeft: Float, right inputRight: Float) -> (Float, Float) {
+        (left.process(inputLeft), right.process(inputRight))
+    }
+}
+
 private final class DelayLine {
     private var buffer: [Float]
     private var writeIndex = 0
@@ -1657,6 +1984,7 @@ private final class HardwareSampleRateTracker {
 private final class SystemAudioProcessor: @unchecked Sendable {
     private let settings: Settings
     private let ringBuffer: LockFreeFloatRingBuffer
+    private let visualizerRingBuffer: LockFreeFloatRingBuffer
     private let controlQueue: LockFreeControlEventQueue
     private let scratchFrameCapacity = 8192
     private let inputScratch: UnsafeMutablePointer<Float>
@@ -1672,6 +2000,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private var ioProcID: AudioDeviceIOProcID?
     private let cleanDSP: LowEndDSP
     private let circuitDSP: VirtualCircuitBassDSP
+    private let exciterDSP: HighExciterDSP
     private var activeDSPModel: Settings.DSPModel
     private let spatializer: Spatializer
     private var currentIntensity: Float
@@ -1696,6 +2025,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         self.currentDSPModel = settings.dspModel
         self.currentSpatialSettings = settings.spatial
         self.ringBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)) * 4, channels: 2)
+        self.visualizerRingBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)), channels: 2)
         self.controlQueue = try LockFreeControlEventQueue(sampleRate: Float(sampleRate))
         self.inputScratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrameCapacity * 2)
         self.cleanDSP = LowEndDSP(
@@ -1709,6 +2039,13 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             intensity: settings.intensity,
             body: settings.body,
             outputDb: settings.outputDb
+        )
+        self.exciterDSP = HighExciterDSP(
+            sampleRate: Float(sampleRate),
+            intensity: settings.intensity,
+            body: settings.body,
+            outputDb: settings.outputDb,
+            dspModel: settings.dspModel
         )
         self.activeDSPModel = settings.dspModel
         self.spatializer = Spatializer(sampleRate: Float(sampleRate), settings: settings.spatial)
@@ -1757,6 +2094,12 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
     }
 
+    func makeSpectrumAnalyzer() -> AudioSpectrumAnalyzer {
+        managerQueue.sync {
+            AudioSpectrumAnalyzer(ringBuffer: visualizerRingBuffer, sampleRate: Float(currentSampleRate))
+        }
+    }
+
     func stop() {
         managerQueue.sync {
             guard isStarted || hardwareTracker != nil || aggregateDeviceID != kAudioObjectUnknown || tapID != kAudioObjectUnknown else {
@@ -1775,6 +2118,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 self.sourceNode = nil
             }
             ringBuffer.clear()
+            visualizerRingBuffer.clear()
             isStarted = false
         }
     }
@@ -1922,6 +2266,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private func resetDSPState() {
         cleanDSP.resetState()
         circuitDSP.resetState()
+        exciterDSP.resetState()
         spatializer.resetState()
     }
 
@@ -1937,6 +2282,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         activeDSPModel = currentDSPModel
         cleanDSP.update(dspSettings)
         circuitDSP.update(dspSettings)
+        exciterDSP.update(dspSettings)
         spatializer.update(DSPPrecompute.makeSpatialSettings(sampleRate: sampleRate, settings: currentSpatialSettings))
     }
 
@@ -2119,6 +2465,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             case .circuit:
                 circuitDSP.update(latestDSP)
             }
+            exciterDSP.update(latestDSP)
         }
 
         if hasSpatial {
@@ -2138,11 +2485,13 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             for frame in 0..<chunkFrames {
                 let processed = processBass(left: leftChunk[frame], right: rightChunk[frame])
                 let spatial = spatializer.process(left: processed.0, right: processed.1)
-                inputScratch[frame * 2] = spatial.0
-                inputScratch[frame * 2 + 1] = spatial.1
+                let excited = exciterDSP.process(left: spatial.0, right: spatial.1)
+                inputScratch[frame * 2] = excited.0
+                inputScratch[frame * 2 + 1] = excited.1
             }
 
             ringBuffer.push(inputScratch, count: chunkFrames * 2)
+            visualizerRingBuffer.push(inputScratch, count: chunkFrames * 2)
             offset += chunkFrames
         }
     }
@@ -2156,11 +2505,13 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             for frame in 0..<chunkFrames {
                 let processed = processBass(left: chunk[frame * 2], right: chunk[frame * 2 + 1])
                 let spatial = spatializer.process(left: processed.0, right: processed.1)
-                inputScratch[frame * 2] = spatial.0
-                inputScratch[frame * 2 + 1] = spatial.1
+                let excited = exciterDSP.process(left: spatial.0, right: spatial.1)
+                inputScratch[frame * 2] = excited.0
+                inputScratch[frame * 2 + 1] = excited.1
             }
 
             ringBuffer.push(inputScratch, count: chunkFrames * 2)
+            visualizerRingBuffer.push(inputScratch, count: chunkFrames * 2)
             offset += chunkFrames
         }
     }
@@ -2174,11 +2525,13 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             for frame in 0..<chunkFrames {
                 let processed = processBass(left: chunk[frame], right: chunk[frame])
                 let spatial = spatializer.process(left: processed.0, right: processed.1)
-                inputScratch[frame * 2] = spatial.0
-                inputScratch[frame * 2 + 1] = spatial.1
+                let excited = exciterDSP.process(left: spatial.0, right: spatial.1)
+                inputScratch[frame * 2] = excited.0
+                inputScratch[frame * 2 + 1] = excited.1
             }
 
             ringBuffer.push(inputScratch, count: chunkFrames * 2)
+            visualizerRingBuffer.push(inputScratch, count: chunkFrames * 2)
             offset += chunkFrames
         }
     }
