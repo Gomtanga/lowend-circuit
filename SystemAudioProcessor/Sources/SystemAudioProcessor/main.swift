@@ -18,6 +18,12 @@ private struct SpatialSettings {
     var amount: Float = 35.0
 }
 
+private enum DSPModelID {
+    static let clean: UInt32 = 0
+    static let circuit: UInt32 = 1
+    static let highExciter: UInt32 = 2
+}
+
 private struct Settings {
     var mode: Mode = .all
     var intensity: Float = 55.0
@@ -35,6 +41,47 @@ private struct Settings {
     enum DSPModel: String {
         case clean
         case circuit
+        case highExciter = "highexciter"
+
+        var controlID: UInt32 {
+            switch self {
+            case .clean:
+                return DSPModelID.clean
+            case .circuit:
+                return DSPModelID.circuit
+            case .highExciter:
+                return DSPModelID.highExciter
+            }
+        }
+
+        var displayName: String {
+            switch self {
+            case .clean:
+                return "Clean"
+            case .circuit:
+                return "Circuit"
+            case .highExciter:
+                return "HighExciter"
+            }
+        }
+
+        static func fromArgument(_ value: String) -> DSPModel? {
+            let normalized = value
+                .lowercased()
+                .replacingOccurrences(of: "-", with: "")
+                .replacingOccurrences(of: "_", with: "")
+                .replacingOccurrences(of: " ", with: "")
+            switch normalized {
+            case "clean":
+                return .clean
+            case "circuit":
+                return .circuit
+            case "highexciter", "exciter":
+                return .highExciter
+            default:
+                return nil
+            }
+        }
     }
 }
 
@@ -493,8 +540,8 @@ private func parseArguments() throws -> Settings {
             }
             settings.outputDb = number
         case "--model":
-            guard let value = iterator.next(), let model = Settings.DSPModel(rawValue: value.lowercased()) else {
-                throw AppError.message("--model needs clean or circuit")
+            guard let value = iterator.next(), let model = Settings.DSPModel.fromArgument(value) else {
+                throw AppError.message("--model needs clean, circuit, or highexciter")
             }
             settings.dspModel = model
         case "--spatial":
@@ -987,6 +1034,9 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var intensitySlider: NSSlider!
     private var bodySlider: NSSlider!
     private var outputSlider: NSSlider!
+    private var intensityNameLabel: NSTextField!
+    private var bodyNameLabel: NSTextField!
+    private var outputNameLabel: NSTextField!
     private var intensityValueLabel: NSTextField!
     private var bodyValueLabel: NSTextField!
     private var outputValueLabel: NSTextField!
@@ -1085,11 +1135,11 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         content.addSubview(modelLabel)
 
         modelPopup = NSPopUpButton(frame: NSRect(x: 552, y: 635, width: 158, height: 30), pullsDown: false)
-        modelPopup.addItems(withTitles: ["Circuit", "Clean DSP"])
-        modelPopup.selectItem(at: 0)
+        modelPopup.addItems(withTitles: ["Clean", "Circuit", "HighExciter"])
+        modelPopup.selectItem(withTitle: "Circuit")
         modelPopup.target = self
         modelPopup.action = #selector(modelChanged)
-        modelPopup.toolTip = "Circuit은 가상 RC 회로/포화 모델이고, Clean DSP는 기존 필터 기반 모델입니다."
+        modelPopup.toolTip = "Clean은 DSP bypass, Circuit은 저역 회로 모델, HighExciter는 독립 고역 배음 모델입니다."
         content.addSubview(modelPopup)
 
         let explanation = makeExplanationSection()
@@ -1194,13 +1244,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         bodyValueLabel = makeLabel("", size: 13, weight: .semibold)
         outputValueLabel = makeLabel("", size: 13, weight: .semibold)
 
-        addSliderRow(to: view, y: 86, title: "LowEnd", slider: intensitySlider, valueLabel: intensityValueLabel)
-        addSliderRow(to: view, y: 48, title: "Body", slider: bodySlider, valueLabel: bodyValueLabel)
-        addSliderRow(to: view, y: 10, title: "Output", slider: outputSlider, valueLabel: outputValueLabel)
-        intensitySlider.toolTip = "저역 부스트의 강도입니다. 높일수록 베이스가 앞으로 나옵니다."
-        bodySlider.toolTip = "서브 저역의 두께감입니다. 높일수록 묵직하지만 과하면 부풀 수 있습니다."
-        outputSlider.toolTip = "최종 출력 보정입니다. 저역을 많이 올릴수록 낮춰두는 편이 안전합니다."
-        updateSliderLabels()
+        intensityNameLabel = addSliderRow(to: view, y: 86, title: "LowEnd", slider: intensitySlider, valueLabel: intensityValueLabel)
+        bodyNameLabel = addSliderRow(to: view, y: 48, title: "Body", slider: bodySlider, valueLabel: bodyValueLabel)
+        outputNameLabel = addSliderRow(to: view, y: 10, title: "Output", slider: outputSlider, valueLabel: outputValueLabel)
+        configureControlsForSelectedModel()
         return view
     }
 
@@ -1307,14 +1354,16 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         return slider
     }
 
-    private func addSliderRow(to view: NSView, y: CGFloat, title: String, slider: NSSlider, valueLabel: NSTextField) {
+    @discardableResult
+    private func addSliderRow(to view: NSView, y: CGFloat, title: String, slider: NSSlider, valueLabel: NSTextField) -> NSTextField {
         let label = makeLabel(title, size: 13, weight: .semibold)
-        label.frame = NSRect(x: 18, y: y, width: 72, height: 24)
-        slider.frame = NSRect(x: 96, y: y, width: 420, height: 24)
+        label.frame = NSRect(x: 18, y: y, width: 108, height: 24)
+        slider.frame = NSRect(x: 132, y: y, width: 384, height: 24)
         valueLabel.frame = NSRect(x: 530, y: y, width: 92, height: 24)
         view.addSubview(label)
         view.addSubview(slider)
         view.addSubview(valueLabel)
+        return label
     }
 
     private func makeNumberField(value: Double) -> NSTextField {
@@ -1381,14 +1430,70 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     @objc private func modelChanged() {
+        configureControlsForSelectedModel()
         sliderChanged()
-        statusLabel.stringValue = "모델 변경: \(selectedDSPModel() == .circuit ? "Circuit" : "Clean DSP")"
+        statusLabel.stringValue = "모델 변경: \(selectedDSPModel().displayName)"
+    }
+
+    private func configureControlsForSelectedModel() {
+        guard intensitySlider != nil,
+              bodySlider != nil,
+              outputSlider != nil,
+              intensityNameLabel != nil,
+              bodyNameLabel != nil,
+              outputNameLabel != nil else { return }
+
+        switch selectedDSPModel() {
+        case .clean:
+            intensityNameLabel.stringValue = "Bypass"
+            bodyNameLabel.stringValue = "Bypass"
+            outputNameLabel.stringValue = "Output"
+            intensitySlider.isEnabled = false
+            bodySlider.isEnabled = false
+            outputSlider.isEnabled = false
+            intensitySlider.toolTip = "Clean 모델에서는 DSP 처리를 완전히 우회합니다."
+            bodySlider.toolTip = "Clean 모델에서는 DSP 처리를 완전히 우회합니다."
+            outputSlider.toolTip = "Clean 모델에서는 출력 게인도 적용하지 않습니다."
+        case .circuit:
+            intensityNameLabel.stringValue = "LowEnd"
+            bodyNameLabel.stringValue = "Body"
+            outputNameLabel.stringValue = "Output"
+            intensitySlider.isEnabled = true
+            bodySlider.isEnabled = true
+            outputSlider.isEnabled = true
+            intensitySlider.toolTip = "저역 부스트의 강도입니다. 높일수록 베이스가 앞으로 나옵니다."
+            bodySlider.toolTip = "서브 저역의 두께감입니다. 높일수록 묵직하지만 과하면 부풀 수 있습니다."
+            outputSlider.toolTip = "Circuit 모델의 최종 출력 보정입니다. 저역을 많이 올릴수록 낮춰두는 편이 안전합니다."
+        case .highExciter:
+            intensityNameLabel.stringValue = "Exciter Drive"
+            bodyNameLabel.stringValue = "Wet Mix"
+            outputNameLabel.stringValue = "Output"
+            intensitySlider.isEnabled = true
+            bodySlider.isEnabled = true
+            outputSlider.isEnabled = false
+            intensitySlider.toolTip = "11 kHz 이상 고역 성분에 적용할 배음 생성 drive입니다."
+            bodySlider.toolTip = "원본 신호에 병렬로 더할 고역 배음 wet mix입니다."
+            outputSlider.toolTip = "HighExciter 모델은 dry 신호 보존을 위해 출력 게인을 적용하지 않습니다."
+        }
+
+        updateSliderLabels()
     }
 
     private func updateSliderLabels() {
-        intensityValueLabel.stringValue = "\(Int(intensitySlider.doubleValue.rounded()))%"
-        bodyValueLabel.stringValue = "\(Int(bodySlider.doubleValue.rounded()))%"
-        outputValueLabel.stringValue = String(format: "%.1f dB", outputSlider.doubleValue)
+        switch selectedDSPModel() {
+        case .clean:
+            intensityValueLabel.stringValue = "Off"
+            bodyValueLabel.stringValue = "Off"
+            outputValueLabel.stringValue = "Bypass"
+        case .circuit:
+            intensityValueLabel.stringValue = "\(Int(intensitySlider.doubleValue.rounded()))%"
+            bodyValueLabel.stringValue = "\(Int(bodySlider.doubleValue.rounded()))%"
+            outputValueLabel.stringValue = String(format: "%.1f dB", outputSlider.doubleValue)
+        case .highExciter:
+            intensityValueLabel.stringValue = String(format: "%.2f", intensitySlider.doubleValue / 100)
+            bodyValueLabel.stringValue = String(format: "%.2f", bodySlider.doubleValue / 100)
+            outputValueLabel.stringValue = "Bypass"
+        }
     }
 
     private func spatialSettingsFromControls() -> SpatialSettings {
@@ -1465,7 +1570,14 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     private func selectedDSPModel() -> Settings.DSPModel {
-        modelPopup.indexOfSelectedItem == 0 ? .circuit : .clean
+        switch modelPopup.indexOfSelectedItem {
+        case 1:
+            return .circuit
+        case 2:
+            return .highExciter
+        default:
+            return .clean
+        }
     }
 
     private func start(_ settings: Settings) {
@@ -1559,7 +1671,7 @@ private func printUsageAndExit() -> Never {
       --intensity 0...100
       --body 0...100
       --output dB
-      --model circuit|clean
+      --model clean|circuit|highexciter
       --spatial on|off
       --listener-x meters
       --listener-z meters
@@ -1686,15 +1798,15 @@ private enum DSPPrecompute {
         let transformerBiasOffset = makePolynomialSoftClip(transformerAsymmetry)
         let transformerMakeupGain: Float = 1 / max(1 + (transformerDrive - 1) * 0.35, 0.001)
         let exciterFrequency = min(max(Float(11_000), sampleRate * 0.20), sampleRate * 0.45)
-        let exciterDrive = 0.55 + normalIntensity * 0.35 + normalBody * 0.10
-        let exciterWetMix = min(max(normalIntensity * 0.026 + normalBody * 0.006, 0), 0.034)
+        let exciterDrive = dspModel == .highExciter ? normalIntensity : 0
+        let exciterWetMix = dspModel == .highExciter ? normalBody : 0
 
         return LCDSPSettings(
             intensity: normalIntensity,
             body: normalBody,
             outputGain: outputGain,
             headroomGain: pow(10, (-3 * normalIntensity) / 20),
-            dspModel: dspModel == .circuit ? 1 : 0,
+            dspModel: dspModel.controlID,
             shelf: makeLowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb),
             warmthAmount: 0.008 * normalIntensity + 0.004 * normalBody,
             virtualFeedbackGain: 0.30 * normalIntensity,
@@ -2035,6 +2147,9 @@ private final class VirtualCircuitBassDSP: BassProcessor {
         }
 
         private func fastClamp(_ input: Float) -> Float {
+            if !input.isFinite {
+                return 0
+            }
             if input > 1 {
                 return 1
             }
@@ -2085,17 +2200,22 @@ private final class HighExciterDSP {
         }
 
         func process(_ input: Float) -> Float {
+            let dry = input.isFinite ? input : 0
             if wetMix < 0.0001 {
-                return input
+                return dry
             }
 
-            let high = highPass.process(input)
-            let high2 = high * high
-            let harmonic = (high2 + high2 * high * 0.5) * drive
-            return fastClamp(input + harmonic * wetMix)
+            let high = highPass.process(dry)
+            let driven = high * drive
+            let driven2 = driven * driven
+            let harmonic = driven2 + driven2 * driven * 0.5
+            return fastClamp(dry + harmonic * wetMix)
         }
 
         private func fastClamp(_ input: Float) -> Float {
+            if !input.isFinite {
+                return 0
+            }
             if input > 1 {
                 return 1
             }
@@ -2420,10 +2540,9 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
-    private let cleanDSP: LowEndDSP
     private let circuitDSP: VirtualCircuitBassDSP
     private let exciterDSP: HighExciterDSP
-    private var activeDSPModel: Settings.DSPModel
+    private var activeDSPModelID: UInt32
     private let spatializer: Spatializer
     private var currentIntensity: Float
     private var currentBody: Float
@@ -2450,12 +2569,6 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         self.visualizerRingBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)), channels: 2)
         self.controlQueue = try LockFreeControlEventQueue(sampleRate: Float(sampleRate))
         self.inputScratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrameCapacity * 2)
-        self.cleanDSP = LowEndDSP(
-            sampleRate: Float(sampleRate),
-            intensity: settings.intensity,
-            body: settings.body,
-            outputDb: settings.outputDb
-        )
         self.circuitDSP = VirtualCircuitBassDSP(
             sampleRate: Float(sampleRate),
             intensity: settings.intensity,
@@ -2469,7 +2582,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             outputDb: settings.outputDb,
             dspModel: settings.dspModel
         )
-        self.activeDSPModel = settings.dspModel
+        self.activeDSPModelID = settings.dspModel.controlID
         self.spatializer = Spatializer(sampleRate: Float(sampleRate), settings: settings.spatial)
     }
 
@@ -2689,7 +2802,6 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     }
 
     private func resetDSPState() {
-        cleanDSP.resetState()
         circuitDSP.resetState()
         exciterDSP.resetState()
         spatializer.resetState()
@@ -2704,8 +2816,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             outputDb: currentOutputDb,
             dspModel: currentDSPModel
         )
-        activeDSPModel = currentDSPModel
-        cleanDSP.update(dspSettings)
+        activeDSPModelID = currentDSPModel.controlID
         circuitDSP.update(dspSettings)
         exciterDSP.update(dspSettings)
         spatializer.update(DSPPrecompute.makeSpatialSettings(sampleRate: sampleRate, settings: currentSpatialSettings))
@@ -2883,14 +2994,15 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
 
         if hasDSP {
-            activeDSPModel = latestDSP.dspModel == 1 ? .circuit : .clean
-            switch activeDSPModel {
-            case .clean:
-                cleanDSP.update(latestDSP)
-            case .circuit:
+            activeDSPModelID = latestDSP.dspModel
+            switch activeDSPModelID {
+            case DSPModelID.circuit:
                 circuitDSP.update(latestDSP)
+            case DSPModelID.highExciter:
+                exciterDSP.update(latestDSP)
+            default:
+                break
             }
-            exciterDSP.update(latestDSP)
         }
 
         if hasSpatial {
@@ -2908,11 +3020,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             let rightChunk = right.advanced(by: offset)
 
             for frame in 0..<chunkFrames {
-                let processed = processBass(left: leftChunk[frame], right: rightChunk[frame])
-                let spatial = spatializer.process(left: processed.0, right: processed.1)
-                let excited = exciterDSP.process(left: spatial.0, right: spatial.1)
-                inputScratch[frame * 2] = excited.0
-                inputScratch[frame * 2 + 1] = excited.1
+                let processed = processSelectedModel(left: leftChunk[frame], right: rightChunk[frame])
+                let output = processPostModel(left: processed.0, right: processed.1)
+                inputScratch[frame * 2] = output.0
+                inputScratch[frame * 2 + 1] = output.1
             }
 
             ringBuffer.push(inputScratch, count: chunkFrames * 2)
@@ -2928,11 +3039,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             let chunk = interleaved.advanced(by: offset * 2)
 
             for frame in 0..<chunkFrames {
-                let processed = processBass(left: chunk[frame * 2], right: chunk[frame * 2 + 1])
-                let spatial = spatializer.process(left: processed.0, right: processed.1)
-                let excited = exciterDSP.process(left: spatial.0, right: spatial.1)
-                inputScratch[frame * 2] = excited.0
-                inputScratch[frame * 2 + 1] = excited.1
+                let processed = processSelectedModel(left: chunk[frame * 2], right: chunk[frame * 2 + 1])
+                let output = processPostModel(left: processed.0, right: processed.1)
+                inputScratch[frame * 2] = output.0
+                inputScratch[frame * 2 + 1] = output.1
             }
 
             ringBuffer.push(inputScratch, count: chunkFrames * 2)
@@ -2948,11 +3058,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             let chunk = mono.advanced(by: offset)
 
             for frame in 0..<chunkFrames {
-                let processed = processBass(left: chunk[frame], right: chunk[frame])
-                let spatial = spatializer.process(left: processed.0, right: processed.1)
-                let excited = exciterDSP.process(left: spatial.0, right: spatial.1)
-                inputScratch[frame * 2] = excited.0
-                inputScratch[frame * 2 + 1] = excited.1
+                let processed = processSelectedModel(left: chunk[frame], right: chunk[frame])
+                let output = processPostModel(left: processed.0, right: processed.1)
+                inputScratch[frame * 2] = output.0
+                inputScratch[frame * 2 + 1] = output.1
             }
 
             ringBuffer.push(inputScratch, count: chunkFrames * 2)
@@ -2961,13 +3070,25 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
     }
 
-    private func processBass(left: Float, right: Float) -> (Float, Float) {
-        switch activeDSPModel {
-        case .clean:
-            return cleanDSP.process(left: left, right: right)
-        case .circuit:
-            return circuitDSP.process(left: left, right: right)
+    private func processSelectedModel(left: Float, right: Float) -> (Float, Float) {
+        let safeLeft = left.isFinite ? left : 0
+        let safeRight = right.isFinite ? right : 0
+
+        switch activeDSPModelID {
+        case DSPModelID.circuit:
+            return circuitDSP.process(left: safeLeft, right: safeRight)
+        case DSPModelID.highExciter:
+            return exciterDSP.process(left: safeLeft, right: safeRight)
+        default:
+            return (safeLeft, safeRight)
         }
+    }
+
+    private func processPostModel(left: Float, right: Float) -> (Float, Float) {
+        if activeDSPModelID == DSPModelID.clean {
+            return (left, right)
+        }
+        return spatializer.process(left: left, right: right)
     }
 }
 

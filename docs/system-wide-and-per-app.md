@@ -32,13 +32,13 @@ If enabling system-wide mode makes the computer silent:
 4. Allow `LowEnd Native Audio` under audio/system-audio recording permissions if macOS shows it there.
 5. Reopen the app and press `전체 시스템 적용` again.
 
-The GUI version includes `LowEnd`, `Body`, and `Output` sliders. Changes apply while processing is running.
+The GUI version remaps the lower sliders based on the selected model. `Circuit` uses `LowEnd`, `Body`, and `Output`; `HighExciter` uses `Exciter Drive` and `Wet Mix`; `Clean` disables the DSP sliders and outputs the dry signal. Changes apply while processing is running.
 
 The format indicator shows the app's internal processing format, not the original file format from Apple Music, Tidal, or another player. For example, a 16-bit 44.1 kHz track can still show `Processing 96.0 kHz / 32-bit Float` if the current Core Audio tap/engine path is running at 96 kHz.
 
 Tidal `Use Exclusive Mode` and similar exclusive-output modes are not compatible with system-wide processing. Exclusive mode lets the player take over the output device directly, so the Core Audio process tap can be bypassed or starved. Turn exclusive mode off when using LowEnd Native Audio.
 
-The native processor also includes a subtle high-frequency exciter. Its 11 kHz high-pass coefficients and blend values are precomputed outside the audio callback, then applied as a small parallel harmonic branch at the final output stage.
+The native processor also includes `HighExciter` as a separate selectable model. Its 11 kHz high-pass coefficients and drive/wet values are precomputed outside the audio callback, then delivered through the lock-free control queue.
 
 The small spectrum display next to the app-list refresh button is a UI-side FFT visualizer. The audio callback only copies final output samples into a lock-free visualizer ring buffer. A 60 Hz UI timer drains that buffer and runs Hann windowing plus real FFT analysis with Accelerate/vDSP.
 
@@ -80,8 +80,9 @@ Slider meanings:
 
 Model selector:
 
+- `Clean`: dry bypass. Use it to compare against the unprocessed tap signal.
 - `Circuit`: virtual analog model using RC-style bass nodes, lighter transformer-style saturation, and parallel wet/dry blending. This is the default.
-- `Clean DSP`: the earlier filter-based bass enhancer. Use it when you want a cleaner, more direct low-shelf sound.
+- `HighExciter`: independent 11 kHz high-pass harmonic exciter. `Exciter Drive` controls harmonic generation and `Wet Mix` controls the parallel blend.
 
 For sensitive IEMs, start with `IEM` or `Gentle`. If you hear roughness, lower `Body` first, then lower `LowEnd`, and keep `Output` around `-3 dB` to `-5 dB`.
 

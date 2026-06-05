@@ -16,8 +16,8 @@ LowEnd Circuit는 저역 보강과 간단한 공간음향 처리를 제공하는
 - DAW/플러그인 호스트용 `VST3`, macOS `AU`, 일반 데스크톱용 `Standalone` 앱을 빌드할 수 있습니다.
 - macOS에서는 `LowEnd Native Audio` 앱으로 컴퓨터 전체 소리 또는 특정 앱 소리에 처리를 적용할 수 있습니다.
 - Windows에서는 `Standalone.exe`와 `VST3` 플러그인을 제공합니다. Windows 전체 시스템 오디오 적용 앱은 아직 별도 개발이 필요합니다.
-- `LowEnd`는 저역 보강 강도, `Body`는 서브 저역의 두께, `Output`은 최종 출력 보정입니다.
-- 고역 exciter는 11 kHz 이상 성분을 아주 작게 병렬 보강해 저역 보강 후 답답함을 줄입니다.
+- `Circuit` 모델에서 `LowEnd`는 저역 보강 강도, `Body`는 서브 저역의 두께, `Output`은 최종 출력 보정입니다.
+- `HighExciter` 모델은 11 kHz 이상 성분만 분리해 `Exciter Drive`와 `Wet Mix`로 고역 배음을 병렬 보강합니다.
 - `Spatial Stage`에서는 파란 청취자 포인트를 드래그하거나 `나 X`, `나 Z`, `Width` 값을 직접 입력해 공간감을 조정합니다.
 - macOS native 앱에는 최종 출력의 실시간 FFT 스펙트럼 표시가 포함됩니다.
 - Peak/RMS/Crest Factor 미터로 출력 레벨과 압축감을 실시간으로 확인할 수 있습니다.
@@ -37,12 +37,12 @@ This repository is licensed under `AGPL-3.0-or-later`. JUCE is fetched at build 
 
 ## What it does
 
-- `LowEnd`: low-shelf boost from roughly 72-105 Hz, up to about 8.5 dB in the clean model.
+- `LowEnd`: low-shelf boost from roughly 72-105 Hz in the Circuit model.
 - `Body`: blends in a controlled low-passed soft-saturated sub component.
 - `Mix`: parallel wet/dry blend.
 - `Output`: final trim before a gentle tanh safety stage.
 - `Spatial Stage`: native macOS app only. Adds a drag-controlled 3D listener position with distance, inter-ear delay, level difference, and crossfeed processing.
-- `High Exciter`: native macOS app only. Adds a subtle high-frequency harmonic branch above about 11 kHz.
+- `HighExciter`: native macOS app only. A separate selectable model that adds a high-frequency harmonic branch above about 11 kHz while preserving the dry signal.
 - `Spectrum`: native macOS app only. Copies final output samples to a lock-free visualizer buffer and runs Accelerate/vDSP FFT analysis outside the audio callback.
 - `Dynamics Meter`: native macOS app only. Uses Accelerate/vDSP peak and RMS analysis outside the audio callback, then shows crest factor in dB.
 
@@ -86,10 +86,11 @@ The native system-audio app includes simple presets:
 - `Deep`
 - `Clear`
 
-It also has two models:
+It also has three native system-audio models:
 
+- `Clean`: dry bypass for comparing against the unprocessed tap signal.
 - `Circuit`: virtual analog RC/transformer-style bass circuit model with lighter saturation and wet/dry blending.
-- `Clean DSP`: the earlier filter-based bass enhancer.
+- `HighExciter`: independent 11 kHz high-pass harmonic exciter with `Exciter Drive` and `Wet Mix` controls.
 
 The native app also includes a `Spatial Stage` panel. Drag the blue listener point in the 3D view or type exact meter values for `나 X`, `나 Z`, and `Width`. The `원위치` button returns the listener point to the center while keeping `Width` and `Space`. The setting updates while system audio is running.
 
