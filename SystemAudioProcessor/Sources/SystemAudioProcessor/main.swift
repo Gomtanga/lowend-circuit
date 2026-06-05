@@ -3,10 +3,12 @@ import Accelerate
 import AudioToolbox
 import AVFoundation
 import AudioRingBufferC
+import Combine
 import CoreAudio
 import Darwin
 import Foundation
 import SceneKit
+import SwiftUI
 
 private struct SpatialSettings {
     var enabled: Bool = true
@@ -82,6 +84,68 @@ private enum AppError: Error, CustomStringConvertible {
         case .osStatus(let label, let status):
             return "\(label) failed: \(status) \(fourCC(status))"
         }
+    }
+}
+
+private final class DynamicsMeterModel: ObservableObject {
+    @Published var currentPeak: Float = -100
+    @Published var currentRMS: Float = -100
+    @Published var currentCrestFactor: Float = 0
+
+    func update(peak: Float, rms: Float, crestFactor: Float) {
+        currentPeak = peak
+        currentRMS = rms
+        currentCrestFactor = crestFactor
+    }
+
+    func reset() {
+        update(peak: -100, rms: -100, crestFactor: 0)
+    }
+}
+
+private struct DynamicsMeterView: View {
+    @ObservedObject var model: DynamicsMeterModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            levelBar(title: "P", db: model.currentPeak, color: Color(red: 0.96, green: 0.75, blue: 0.31))
+            levelBar(title: "R", db: model.currentRMS, color: Color(red: 0.34, green: 0.80, blue: 0.92))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Crest")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
+                Text(String(format: "%.1f", model.currentCrestFactor))
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                Text("dB")
+                    .font(.system(size: 8, weight: .regular))
+                    .foregroundStyle(Color(red: 0.62, green: 0.66, blue: 0.72))
+            }
+            .frame(width: 46, alignment: .leading)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color(red: 0.07, green: 0.08, blue: 0.10))
+    }
+
+    private func levelBar(title: String, db: Float, color: Color) -> some View {
+        let normalized = max(0, min(1, Double((db + 60) / 60)))
+        return VStack(spacing: 2) {
+            GeometryReader { proxy in
+                ZStack(alignment: .bottom) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(red: 0.18, green: 0.21, blue: 0.25))
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(color)
+                        .frame(height: max(2, proxy.size.height * normalized))
+                }
+            }
+            .frame(width: 12)
+            Text(title)
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
+        }
+        .frame(width: 16)
     }
 }
 
@@ -394,6 +458,7 @@ private final class SpectrumView: NSView {
 
 private final class AudioSpectrumAnalyzer: NSObject {
     private let ringBuffer: LockFreeFloatRingBuffer
+    private let dynamicsModel: DynamicsMeterModel
     private let fftSize = 2048
     private let halfSize = 1024
     private let log2n = vDSP_Length(11)
@@ -402,6 +467,7 @@ private final class AudioSpectrumAnalyzer: NSObject {
     private var timer: Timer?
     private var fftSetup: FFTSetup?
     private var drainBuffer = [Float](repeating: 0, count: 16_384)
+    private var absoluteDrainBuffer = [Float](repeating: 0, count: 16_384)
     private var history = [Float](repeating: 0, count: 2048)
     private var window = [Float](repeating: 0, count: 2048)
     private var windowed = [Float](repeating: 0, count: 2048)
@@ -413,9 +479,15 @@ private final class AudioSpectrumAnalyzer: NSObject {
     private var binStarts = [Int](repeating: 1, count: 96)
     private var binEnds = [Int](repeating: 2, count: 96)
     private var filledSamples = 0
+    private var smoothedPeakDb: Float = -100
+    private var smoothedRMSDb: Float = -100
+    private var smoothedCrestDb: Float = 0
+    private let levelReleaseDbPerTick: Float = 0.55
+    private let crestReleaseDbPerTick: Float = 0.20
 
-    init(ringBuffer: LockFreeFloatRingBuffer, sampleRate: Float) {
+    init(ringBuffer: LockFreeFloatRingBuffer, sampleRate: Float, dynamicsModel: DynamicsMeterModel) {
         self.ringBuffer = ringBuffer
+        self.dynamicsModel = dynamicsModel
         self.sampleRate = sampleRate
         super.init()
         fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
@@ -466,6 +538,7 @@ private final class AudioSpectrumAnalyzer: NSObject {
                 ringBuffer.popInterleaved(into: baseAddress, count: sampleCount)
             }
         }
+        updateDynamics(sampleCount: sampleCount)
 
         let frameCount = sampleCount / 2
         if frameCount >= fftSize {
@@ -538,6 +611,44 @@ private final class AudioSpectrumAnalyzer: NSObject {
         }
     }
 
+    private func updateDynamics(sampleCount: Int) {
+        var peak: Float = 0
+        var rms: Float = 0
+
+        drainBuffer.withUnsafeBufferPointer { sourcePointer in
+            absoluteDrainBuffer.withUnsafeMutableBufferPointer { absolutePointer in
+                guard let sourceBase = sourcePointer.baseAddress,
+                      let absoluteBase = absolutePointer.baseAddress else { return }
+                let count = vDSP_Length(sampleCount)
+                vDSP_vabs(sourceBase, 1, absoluteBase, 1, count)
+                vDSP_maxv(absoluteBase, 1, &peak, count)
+                vDSP_rmsqv(sourceBase, 1, &rms, count)
+            }
+        }
+
+        let peakDb = amplitudeToDb(peak)
+        let rmsDb = amplitudeToDb(rms)
+        let crestDb = max(0, peakDb - rmsDb)
+
+        smoothedPeakDb = releaseSmooth(current: smoothedPeakDb, target: peakDb, step: levelReleaseDbPerTick)
+        smoothedRMSDb = releaseSmooth(current: smoothedRMSDb, target: rmsDb, step: levelReleaseDbPerTick)
+        smoothedCrestDb = releaseSmooth(current: smoothedCrestDb, target: crestDb, step: crestReleaseDbPerTick)
+
+        dynamicsModel.update(peak: smoothedPeakDb, rms: smoothedRMSDb, crestFactor: smoothedCrestDb)
+    }
+
+    private func amplitudeToDb(_ value: Float) -> Float {
+        let clamped = max(value, 0.00001)
+        return max(20 * log10(clamped), -100)
+    }
+
+    private func releaseSmooth(current: Float, target: Float, step: Float) -> Float {
+        if target >= current {
+            return target
+        }
+        return max(current - step, target)
+    }
+
     private func rebuildLogBins() {
         let nyquist = max(sampleRate * 0.5, 1_000)
         let minHz: Float = 35
@@ -565,6 +676,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var statusLabel: NSTextField!
     private var formatLabel: NSTextField!
     private var spectrumView: SpectrumView!
+    private var dynamicsMeterView: NSHostingView<DynamicsMeterView>!
     private var bundleField: NSTextField!
     private var appsView: NSTextView!
     private var intensitySlider: NSSlider!
@@ -583,6 +695,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var spatialAmountValueLabel: NSTextField!
     private var processor: SystemAudioProcessor?
     private var spectrumAnalyzer: AudioSpectrumAnalyzer?
+    private let dynamicsMeterModel = DynamicsMeterModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NotificationCenter.default.addObserver(
@@ -698,11 +811,18 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         content.addSubview(listButton)
         listButton.toolTip = "아래 목록을 갱신합니다. 특정 앱 적용 때 bundle id를 참고하세요."
 
-        spectrumView = SpectrumView(frame: NSRect(x: 270, y: 184, width: 440, height: 38))
+        spectrumView = SpectrumView(frame: NSRect(x: 270, y: 184, width: 300, height: 38))
         spectrumView.wantsLayer = true
         spectrumView.layer?.cornerRadius = 6
         spectrumView.toolTip = "최종 출력 신호의 실시간 FFT 스펙트럼입니다."
         content.addSubview(spectrumView)
+
+        dynamicsMeterView = NSHostingView(rootView: DynamicsMeterView(model: dynamicsMeterModel))
+        dynamicsMeterView.frame = NSRect(x: 584, y: 184, width: 126, height: 38)
+        dynamicsMeterView.wantsLayer = true
+        dynamicsMeterView.layer?.cornerRadius = 6
+        dynamicsMeterView.toolTip = "Peak, RMS, Crest Factor 실시간 다이나믹 분석계입니다."
+        content.addSubview(dynamicsMeterView)
 
         let scroll = NSScrollView(frame: NSRect(x: 30, y: 28, width: 680, height: 148))
         scroll.borderType = .bezelBorder
@@ -1055,7 +1175,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             let processor = try SystemAudioProcessor(settings: settings)
             try processor.start()
             self.processor = processor
-            let analyzer = processor.makeSpectrumAnalyzer()
+            let analyzer = processor.makeSpectrumAnalyzer(dynamicsModel: dynamicsMeterModel)
             analyzer.start()
             self.spectrumAnalyzer = analyzer
             statusLabel.stringValue = "처리 중입니다. 소리가 안 나면 중지를 눌러 원래 출력으로 복구하세요."
@@ -1069,6 +1189,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     @objc private func stopAudio() {
         spectrumAnalyzer?.stop()
         spectrumAnalyzer = nil
+        dynamicsMeterModel.reset()
         processor?.stop()
         processor = nil
         if statusLabel != nil {
@@ -2094,10 +2215,13 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
     }
 
-    func makeSpectrumAnalyzer() -> AudioSpectrumAnalyzer {
-        managerQueue.sync {
-            AudioSpectrumAnalyzer(ringBuffer: visualizerRingBuffer, sampleRate: Float(currentSampleRate))
-        }
+    func makeSpectrumAnalyzer(dynamicsModel: DynamicsMeterModel) -> AudioSpectrumAnalyzer {
+        let sampleRate = managerQueue.sync { currentSampleRate }
+        return AudioSpectrumAnalyzer(
+            ringBuffer: visualizerRingBuffer,
+            sampleRate: Float(sampleRate),
+            dynamicsModel: dynamicsModel
+        )
     }
 
     func stop() {

@@ -42,6 +42,8 @@ The native processor also includes a subtle high-frequency exciter. Its 11 kHz h
 
 The small spectrum display next to the app-list refresh button is a UI-side FFT visualizer. The audio callback only copies final output samples into a lock-free visualizer ring buffer. A 60 Hz UI timer drains that buffer and runs Hann windowing plus real FFT analysis with Accelerate/vDSP.
 
+The small meter next to the spectrum display shows Peak, RMS, and Crest Factor. Peak and RMS are calculated with Accelerate/vDSP after the visualizer buffer is drained, then converted to dB and release-smoothed for readability. Crest Factor is `Peak dB - RMS dB`; lower values usually mean the signal is more compressed.
+
 The GUI version also includes a `Spatial Stage` panel:
 
 - Drag the blue listener point in the 3D view to move the listening position in real time.
