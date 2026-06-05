@@ -104,14 +104,14 @@ private final class DynamicsMeterModel: ObservableObject {
 }
 
 private final class SpectrumModel: ObservableObject {
-    @Published var magnitudes = [Float](repeating: 0, count: 96)
+    @Published var magnitudes = [Float](repeating: 0, count: 128)
 
     func update(_ values: [Float]) {
         magnitudes = values
     }
 
     func reset() {
-        magnitudes = [Float](repeating: 0, count: 96)
+        magnitudes = [Float](repeating: 0, count: 128)
     }
 }
 
@@ -720,7 +720,7 @@ private final class SpatialStageView: SCNView {
 @available(macOS 14.4, *)
 @MainActor
 private final class SpectrumView: NSView {
-    private var magnitudes = [Float](repeating: 0, count: 96)
+    private var magnitudes = [Float](repeating: 0, count: 128)
 
     override var isFlipped: Bool { true }
 
@@ -753,7 +753,7 @@ private final class SpectrumView: NSView {
 private final class AudioSpectrumAnalyzer: NSObject {
     private static let fftSize = 16384
     private static let halfSize = 8192
-    private static let barCount = 96
+    private static let barCount = 128
 
     private let ringBuffer: LockFreeFloatRingBuffer
     private let dynamicsModel: DynamicsMeterModel
@@ -909,9 +909,7 @@ private final class AudioSpectrumAnalyzer: NSObject {
         let fraction = clampedBin - Float(lowerIndex)
         let lower = dbBins[lowerIndex]
         let upper = dbBins[upperIndex]
-        let center = lower + (upper - lower) * fraction
-        let shoulder = (dbBins[max(1, lowerIndex - 1)] + dbBins[min(halfSize - 1, upperIndex + 1)]) * 0.5
-        return center * 0.82 + shoulder * 0.18
+        return lower + (upper - lower) * fraction
     }
 
     private func updateDynamics(sampleCount: Int) {
@@ -954,11 +952,11 @@ private final class AudioSpectrumAnalyzer: NSObject {
 
     private func rebuildLogBins() {
         let nyquist = max(sampleRate * 0.5, 1_000)
-        let minHz: Float = 24
+        let minHz: Float = 28
         let bassMaxHz: Float = min(420, nyquist * 0.75)
         let maxHz = min(nyquist, 20_000)
-        let bassBarRatio: Float = 0.58
-        let bassCurve: Float = 1.28
+        let bassBarRatio: Float = 0.38
+        let bassCurve: Float = 0.82
         let minLog = log(max(bassMaxHz, minHz + 1))
         let maxLog = log(max(maxHz, bassMaxHz + 1))
 
@@ -1075,7 +1073,6 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         rightPanelView.frame = NSRect(x: 740, y: 28, width: 430, height: 636)
         rightPanelView.wantsLayer = true
         rightPanelView.layer?.cornerRadius = 8
-        rightPanelView.toolTip = "Spatial Stage와 분석계를 전환해 보는 우측 작업 패널입니다."
         content.addSubview(rightPanelView)
 
         statusLabel = makeLabel("대기 중", size: 14, weight: .semibold)
