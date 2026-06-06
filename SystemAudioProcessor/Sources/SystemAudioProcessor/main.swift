@@ -992,6 +992,8 @@ private final class AudioSpectrumAnalyzer: NSObject {
         )
         timer.tolerance = 1.0 / 120.0
         RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .eventTracking)
+        RunLoop.main.add(timer, forMode: .modalPanel)
         self.timer = timer
     }
 
@@ -1242,6 +1244,11 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        stopAudio()
+        return .terminateNow
     }
 
     private func buildWindow() {
@@ -1813,12 +1820,32 @@ private var nativeAppDelegateHolder: AnyObject?
 private func launchGUI() -> Never {
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
+    installMainMenu(for: app)
     let delegate = NativeAppDelegate()
     nativeAppDelegateHolder = delegate
     app.delegate = delegate
     app.finishLaunching()
     app.run()
     exit(0)
+}
+
+@available(macOS 14.4, *)
+@MainActor
+private func installMainMenu(for app: NSApplication) {
+    let mainMenu = NSMenu()
+    let appMenuItem = NSMenuItem()
+    let appMenu = NSMenu(title: "LowEnd Native Audio")
+    let quitItem = NSMenuItem(
+        title: "LowEnd Native Audio 종료",
+        action: #selector(NSApplication.terminate(_:)),
+        keyEquivalent: "q"
+    )
+    quitItem.keyEquivalentModifierMask = [.command]
+    quitItem.target = app
+    appMenu.addItem(quitItem)
+    appMenuItem.submenu = appMenu
+    mainMenu.addItem(appMenuItem)
+    app.mainMenu = mainMenu
 }
 
 private func printUsageAndExit() -> Never {
