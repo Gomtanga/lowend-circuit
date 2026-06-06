@@ -43,7 +43,7 @@ This repository is licensed under `AGPL-3.0-or-later`. JUCE is fetched at build 
 - `Output`: final trim before a gentle tanh safety stage.
 - `Spatial Stage`: native macOS app only. Adds a drag-controlled 3D listener position with distance, inter-ear delay, level difference, and crossfeed processing.
 - `HighExciter`: native macOS app only. A separate selectable model that adds a high-frequency harmonic branch above about 11 kHz while preserving the dry signal.
-- `Spectrum`: native macOS app only. Copies final output samples to a lock-free visualizer buffer and runs Accelerate/vDSP FFT analysis outside the audio callback.
+- `Spectrum`: native macOS app only. Copies final output samples to a lock-free visualizer buffer, runs Accelerate/vDSP FFT analysis outside the audio callback, and renders 128 instanced bars with MetalKit at 30 fps.
 - `Dynamics Meter`: native macOS app only. Uses Accelerate/vDSP peak and RMS analysis outside the audio callback, then shows crest factor in dB.
 
 This is an original approximation, not an emulation endorsed by or affiliated with any hardware manufacturer.

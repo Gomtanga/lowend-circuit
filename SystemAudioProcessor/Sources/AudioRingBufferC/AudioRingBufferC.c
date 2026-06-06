@@ -20,6 +20,23 @@ struct LCControlEventQueue {
     atomic_uint_fast64_t writeIndex;
 };
 
+struct LCSpectrumSnapshot {
+    atomic_uint_fast64_t sequence;
+    atomic_uint_fast32_t values[LC_SPECTRUM_BIN_COUNT];
+};
+
+static uint32_t float_to_bits(float value) {
+    uint32_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static float bits_to_float(uint32_t bits) {
+    float value = 0;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 static uint32_t next_power_of_two(uint32_t value) {
     if (value < 2) {
         return 2;
@@ -261,4 +278,74 @@ uint32_t lc_control_event_queue_available(const LCControlEventQueue *queue) {
     const uint64_t readIndex = atomic_load_explicit(&queue->readIndex, memory_order_acquire);
     const uint64_t available = writeIndex - readIndex;
     return available > queue->capacity ? queue->capacity : (uint32_t)available;
+}
+
+LCSpectrumSnapshot *lc_spectrum_snapshot_create(void) {
+    LCSpectrumSnapshot *snapshot = (LCSpectrumSnapshot *)calloc(1, sizeof(LCSpectrumSnapshot));
+    if (snapshot == NULL) {
+        return NULL;
+    }
+
+    atomic_init(&snapshot->sequence, 0);
+    for (uint32_t index = 0; index < LC_SPECTRUM_BIN_COUNT; ++index) {
+        atomic_init(&snapshot->values[index], 0);
+    }
+    return snapshot;
+}
+
+void lc_spectrum_snapshot_destroy(LCSpectrumSnapshot *snapshot) {
+    free(snapshot);
+}
+
+void lc_spectrum_snapshot_publish(LCSpectrumSnapshot *snapshot, const float *values, uint32_t count) {
+    if (snapshot == NULL || values == NULL) {
+        return;
+    }
+
+    const uint32_t readable = count < LC_SPECTRUM_BIN_COUNT ? count : LC_SPECTRUM_BIN_COUNT;
+    atomic_fetch_add_explicit(&snapshot->sequence, 1, memory_order_acq_rel);
+    for (uint32_t index = 0; index < readable; ++index) {
+        atomic_store_explicit(&snapshot->values[index], float_to_bits(values[index]), memory_order_relaxed);
+    }
+    for (uint32_t index = readable; index < LC_SPECTRUM_BIN_COUNT; ++index) {
+        atomic_store_explicit(&snapshot->values[index], 0, memory_order_relaxed);
+    }
+    atomic_fetch_add_explicit(&snapshot->sequence, 1, memory_order_release);
+}
+
+uint32_t lc_spectrum_snapshot_copy(const LCSpectrumSnapshot *snapshot, float *destination, uint32_t count) {
+    if (snapshot == NULL || destination == NULL || count == 0) {
+        return 0;
+    }
+
+    const uint32_t writable = count < LC_SPECTRUM_BIN_COUNT ? count : LC_SPECTRUM_BIN_COUNT;
+    for (uint32_t attempt = 0; attempt < 3; ++attempt) {
+        const uint64_t before = atomic_load_explicit(&snapshot->sequence, memory_order_acquire);
+        if ((before & 1U) != 0) {
+            continue;
+        }
+
+        for (uint32_t index = 0; index < writable; ++index) {
+            const uint32_t bits = (uint32_t)atomic_load_explicit(&snapshot->values[index], memory_order_relaxed);
+            destination[index] = bits_to_float(bits);
+        }
+
+        const uint64_t after = atomic_load_explicit(&snapshot->sequence, memory_order_acquire);
+        if (before == after) {
+            return writable;
+        }
+    }
+    return 0;
+}
+
+void lc_spectrum_snapshot_clear(LCSpectrumSnapshot *snapshot) {
+    if (snapshot == NULL) {
+        return;
+    }
+
+    atomic_fetch_add_explicit(&snapshot->sequence, 1, memory_order_acq_rel);
+    for (uint32_t index = 0; index < LC_SPECTRUM_BIN_COUNT; ++index) {
+        atomic_store_explicit(&snapshot->values[index], 0, memory_order_relaxed);
+    }
+    atomic_fetch_add_explicit(&snapshot->sequence, 1, memory_order_release);
 }

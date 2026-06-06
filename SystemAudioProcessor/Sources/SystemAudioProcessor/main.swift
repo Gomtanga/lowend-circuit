@@ -7,6 +7,8 @@ import Combine
 import CoreAudio
 import Darwin
 import Foundation
+import Metal
+import MetalKit
 import SceneKit
 import SwiftUI
 
@@ -115,11 +117,6 @@ private enum AudioFormatNotifications {
     static let indicatorTextKey = "indicatorText"
 }
 
-private enum SpectrumNotifications {
-    static let didUpdate = Notification.Name("LowEndSpectrumDidUpdate")
-    static let magnitudesKey = "magnitudes"
-}
-
 private enum AppError: Error, CustomStringConvertible {
     case message(String)
     case osStatus(String, OSStatus)
@@ -150,15 +147,34 @@ private final class DynamicsMeterModel: ObservableObject {
     }
 }
 
-private final class SpectrumModel: ObservableObject {
-    @Published var magnitudes = [Float](repeating: 0, count: 128)
+private final class SpectrumModel {
+    static let binCount = Int(LC_SPECTRUM_BIN_COUNT)
+    private let snapshot: OpaquePointer
 
-    func update(_ values: [Float]) {
-        magnitudes = values
+    init() {
+        guard let snapshot = lc_spectrum_snapshot_create() else {
+            fatalError("Could not allocate spectrum snapshot.")
+        }
+        self.snapshot = snapshot
+    }
+
+    deinit {
+        lc_spectrum_snapshot_destroy(snapshot)
+    }
+
+    func publish(_ values: [Float]) {
+        values.withUnsafeBufferPointer { pointer in
+            guard let baseAddress = pointer.baseAddress else { return }
+            lc_spectrum_snapshot_publish(snapshot, baseAddress, UInt32(pointer.count))
+        }
+    }
+
+    func copySnapshot(into destination: UnsafeMutablePointer<Float>) -> Bool {
+        lc_spectrum_snapshot_copy(snapshot, destination, UInt32(Self.binCount)) == UInt32(Self.binCount)
     }
 
     func reset() {
-        magnitudes = [Float](repeating: 0, count: 128)
+        lc_spectrum_snapshot_clear(snapshot)
     }
 }
 
@@ -263,50 +279,150 @@ private struct DynamicsMeterView: View {
 
 }
 
-private struct AudioSpectrumView: View {
-    @ObservedObject var model: SpectrumModel
+private struct MetalSpectrumUniforms {
+    var viewportAndCount = SIMD4<Float>(0, 0, Float(SpectrumModel.binCount), 0)
+    var layout = SIMD4<Float>(42, 5, 1.5, 0)
+}
 
-    var body: some View {
-        Canvas { context, size in
-            let rect = CGRect(origin: .zero, size: size)
-            context.fill(Path(rect), with: .color(Color(red: 0.07, green: 0.08, blue: 0.10)))
+@available(macOS 14.4, *)
+private struct MetalSpectrumView: NSViewRepresentable {
+    let model: SpectrumModel
+    var isActive = true
 
-            let gridColor = Color(red: 0.22, green: 0.26, blue: 0.31).opacity(0.72)
-            for line in 1..<5 {
-                let y = size.height * CGFloat(line) / 5.0
-                var path = Path()
-                path.move(to: CGPoint(x: 0, y: y))
-                path.addLine(to: CGPoint(x: size.width, y: y))
-                context.stroke(path, with: .color(gridColor), lineWidth: 1)
-            }
-
-            let values = model.magnitudes
-            guard !values.isEmpty, size.width > 4, size.height > 4 else { return }
-            let gap: CGFloat = 1.5
-            let barWidth = max((size.width - CGFloat(values.count - 1) * gap) / CGFloat(values.count), 1)
-            for index in values.indices {
-                let value = CGFloat(clamp(values[index], 0, 1))
-                let height = max(value * (size.height - 14), 1)
-                let x = CGFloat(index) * (barWidth + gap)
-                let y = size.height - height - 4
-                let barRect = CGRect(x: x, y: y, width: barWidth, height: height)
-                context.fill(
-                    Path(roundedRect: barRect, cornerRadius: 1.5),
-                    with: .color(Color(red: 0.34, green: 0.80, blue: 0.92).opacity(0.9))
-                )
-            }
-        }
-        .overlay(alignment: .topLeading) {
-            Text("Spectrum")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    func makeCoordinator() -> Coordinator {
+        Coordinator(model: model)
     }
 
+    func makeNSView(context: Context) -> MTKView {
+        let view = MTKView(frame: .zero, device: context.coordinator.device)
+        view.delegate = context.coordinator
+        view.colorPixelFormat = .bgra8Unorm
+        view.framebufferOnly = true
+        view.clearColor = MTLClearColor(red: 0.07, green: 0.08, blue: 0.10, alpha: 1)
+        view.preferredFramesPerSecond = 30
+        view.enableSetNeedsDisplay = false
+        view.isPaused = !isActive || !context.coordinator.isReady
+        view.presentsWithTransaction = false
+        return view
+    }
+
+    func updateNSView(_ nsView: MTKView, context: Context) {
+        nsView.isPaused = !isActive || !context.coordinator.isReady
+    }
+
+    final class Coordinator: NSObject, MTKViewDelegate {
+        let device: MTLDevice?
+        private let model: SpectrumModel
+        private let commandQueue: MTLCommandQueue?
+        private let pipelineState: MTLRenderPipelineState?
+        private let amplitudeBuffers: [MTLBuffer]
+        private let uniformBuffers: [MTLBuffer]
+        private var bufferIndex = 0
+        private var drawableSize = SIMD2<Float>(0, 0)
+
+        var isReady: Bool {
+            device != nil &&
+                commandQueue != nil &&
+                pipelineState != nil &&
+                amplitudeBuffers.count == 3 &&
+                uniformBuffers.count == 3
+        }
+
+        init(model: SpectrumModel) {
+            self.model = model
+            let device = MTLCreateSystemDefaultDevice()
+            self.device = device
+            self.commandQueue = device?.makeCommandQueue()
+            self.pipelineState = Self.makePipeline(device: device)
+
+            var amplitudes: [MTLBuffer] = []
+            var uniforms: [MTLBuffer] = []
+            if let device {
+                let amplitudeLength = SpectrumModel.binCount * MemoryLayout<Float>.stride
+                let uniformLength = MemoryLayout<MetalSpectrumUniforms>.stride
+                for _ in 0..<3 {
+                    if let amplitude = device.makeBuffer(length: amplitudeLength, options: .storageModeShared),
+                       let uniform = device.makeBuffer(length: uniformLength, options: .storageModeShared) {
+                        memset(amplitude.contents(), 0, amplitudeLength)
+                        memset(uniform.contents(), 0, uniformLength)
+                        amplitudes.append(amplitude)
+                        uniforms.append(uniform)
+                    }
+                }
+            }
+            self.amplitudeBuffers = amplitudes
+            self.uniformBuffers = uniforms
+            super.init()
+        }
+
+        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+            drawableSize = SIMD2(Float(size.width), Float(size.height))
+        }
+
+        func draw(in view: MTKView) {
+            guard isReady,
+                  drawableSize.x > 0,
+                  drawableSize.y > 0,
+                  let commandQueue,
+                  let pipelineState,
+                  let descriptor = view.currentRenderPassDescriptor,
+                  let drawable = view.currentDrawable else { return }
+
+            let index = bufferIndex
+            bufferIndex = (bufferIndex + 1) % 3
+            let amplitudeBuffer = amplitudeBuffers[index]
+            let amplitudePointer = amplitudeBuffer.contents().bindMemory(
+                to: Float.self,
+                capacity: SpectrumModel.binCount
+            )
+            guard model.copySnapshot(into: amplitudePointer) else { return }
+
+            let uniformBuffer = uniformBuffers[index]
+            let uniformPointer = uniformBuffer.contents().bindMemory(
+                to: MetalSpectrumUniforms.self,
+                capacity: 1
+            )
+            uniformPointer.pointee.viewportAndCount = SIMD4(
+                drawableSize.x,
+                drawableSize.y,
+                Float(SpectrumModel.binCount),
+                0
+            )
+
+            guard let commandBuffer = commandQueue.makeCommandBuffer(),
+                  let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+            encoder.setRenderPipelineState(pipelineState)
+            encoder.setVertexBuffer(amplitudeBuffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+            encoder.drawPrimitives(
+                type: .triangle,
+                vertexStart: 0,
+                vertexCount: 6,
+                instanceCount: SpectrumModel.binCount
+            )
+            encoder.endEncoding()
+            commandBuffer.present(drawable)
+            commandBuffer.commit()
+        }
+
+        private static func makePipeline(device: MTLDevice?) -> MTLRenderPipelineState? {
+            guard let device,
+                  let shaderURL = Bundle.main.url(forResource: "SpectrumShaders", withExtension: "metal"),
+                  let shaderSource = try? String(contentsOf: shaderURL, encoding: .utf8),
+                  let library = try? device.makeLibrary(source: shaderSource, options: nil),
+                  let vertexFunction = library.makeFunction(name: "spectrumVertex"),
+                  let fragmentFunction = library.makeFunction(name: "spectrumFragment") else {
+                return nil
+            }
+
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.label = "LowEnd Spectrum Bars"
+            descriptor.vertexFunction = vertexFunction
+            descriptor.fragmentFunction = fragmentFunction
+            descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+            return try? device.makeRenderPipelineState(descriptor: descriptor)
+        }
+    }
 }
 
 @available(macOS 14.4, *)
@@ -343,7 +459,7 @@ private struct RightPanelContainerView: View {
     @State private var selectedTab: PanelTab = .spatial
     @ObservedObject var spatialModel: SpatialControlModel
     @ObservedObject var dynamicsModel: DynamicsMeterModel
-    @ObservedObject var spectrumModel: SpectrumModel
+    let spectrumModel: SpectrumModel
     let onSpatialChange: (SpatialSettings) -> Void
 
     var body: some View {
@@ -416,9 +532,17 @@ private struct RightPanelContainerView: View {
 
     private var analysisTab: some View {
         VStack(spacing: 12) {
-            AudioSpectrumView(model: spectrumModel)
+            MetalSpectrumView(model: spectrumModel, isActive: selectedTab == .analysis)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .frame(minHeight: 330)
+                .overlay(alignment: .topLeading) {
+                    Text("Spectrum")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 6))
             DynamicsMeterView(model: dynamicsModel, style: .analysis)
                 .frame(maxWidth: .infinity)
                 .frame(height: 162)
@@ -764,39 +888,6 @@ private final class SpatialStageView: SCNView {
     }
 }
 
-@available(macOS 14.4, *)
-@MainActor
-private final class SpectrumView: NSView {
-    private var magnitudes = [Float](repeating: 0, count: 128)
-
-    override var isFlipped: Bool { true }
-
-    func updateMagnitudes(_ values: [Float]) {
-        magnitudes = values
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1).setFill()
-        bounds.fill()
-
-        guard !magnitudes.isEmpty, bounds.width > 2, bounds.height > 2 else { return }
-
-        let barCount = magnitudes.count
-        let gap: CGFloat = 1
-        let barWidth = max((bounds.width - CGFloat(barCount - 1) * gap) / CGFloat(barCount), 1)
-        let baseline = bounds.maxY - 3
-
-        NSColor(calibratedRed: 0.34, green: 0.80, blue: 0.92, alpha: 0.86).setFill()
-        for index in 0..<barCount {
-            let value = CGFloat(clamp(magnitudes[index], 0, 1))
-            let height = max(value * (bounds.height - 6), 1)
-            let x = CGFloat(index) * (barWidth + gap)
-            NSBezierPath(rect: NSRect(x: x, y: baseline - height, width: barWidth, height: height)).fill()
-        }
-    }
-}
-
 private final class AudioSpectrumAnalyzer: NSObject {
     private static let fftSize = 16384
     private static let halfSize = 8192
@@ -804,6 +895,7 @@ private final class AudioSpectrumAnalyzer: NSObject {
 
     private let ringBuffer: LockFreeFloatRingBuffer
     private let dynamicsModel: DynamicsMeterModel
+    private let spectrumModel: SpectrumModel
     private let fftSize = AudioSpectrumAnalyzer.fftSize
     private let halfSize = AudioSpectrumAnalyzer.halfSize
     private let log2n = vDSP_Length(14)
@@ -829,9 +921,13 @@ private final class AudioSpectrumAnalyzer: NSObject {
     private let levelReleaseDbPerTick: Float = 0.55
     private let crestReleaseDbPerTick: Float = 0.20
 
-    init(ringBuffer: LockFreeFloatRingBuffer, sampleRate: Float, dynamicsModel: DynamicsMeterModel) {
+    init(ringBuffer: LockFreeFloatRingBuffer,
+         sampleRate: Float,
+         dynamicsModel: DynamicsMeterModel,
+         spectrumModel: SpectrumModel) {
         self.ringBuffer = ringBuffer
         self.dynamicsModel = dynamicsModel
+        self.spectrumModel = spectrumModel
         self.sampleRate = sampleRate
         super.init()
         fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
@@ -865,11 +961,7 @@ private final class AudioSpectrumAnalyzer: NSObject {
         drainAudio()
         guard filledSamples > 0 else { return }
         computeSpectrum()
-        NotificationCenter.default.post(
-            name: SpectrumNotifications.didUpdate,
-            object: nil,
-            userInfo: [SpectrumNotifications.magnitudesKey: magnitudes]
-        )
+        spectrumModel.publish(magnitudes)
     }
 
     private func drainAudio() {
@@ -1059,12 +1151,6 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             self,
             selector: #selector(audioFormatDidChange(_:)),
             name: AudioFormatNotifications.didChange,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(spectrumDidUpdate(_:)),
-            name: SpectrumNotifications.didUpdate,
             object: nil
         )
         buildWindow()
@@ -1587,7 +1673,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             let processor = try SystemAudioProcessor(settings: settings)
             try processor.start()
             self.processor = processor
-            let analyzer = processor.makeSpectrumAnalyzer(dynamicsModel: dynamicsMeterModel)
+            let analyzer = processor.makeSpectrumAnalyzer(
+                dynamicsModel: dynamicsMeterModel,
+                spectrumModel: spectrumModel
+            )
             analyzer.start()
             self.spectrumAnalyzer = analyzer
             statusLabel.stringValue = "처리 중입니다. 소리가 안 나면 중지를 눌러 원래 출력으로 복구하세요."
@@ -1635,12 +1724,6 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         }
     }
 
-    @objc private func spectrumDidUpdate(_ notification: Notification) {
-        guard let magnitudes = notification.userInfo?[SpectrumNotifications.magnitudesKey] as? [Float] else {
-            return
-        }
-        spectrumModel.update(magnitudes)
-    }
 }
 
 private var nativeAppDelegateHolder: AnyObject?
@@ -2629,12 +2712,14 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
     }
 
-    func makeSpectrumAnalyzer(dynamicsModel: DynamicsMeterModel) -> AudioSpectrumAnalyzer {
+    func makeSpectrumAnalyzer(dynamicsModel: DynamicsMeterModel,
+                              spectrumModel: SpectrumModel) -> AudioSpectrumAnalyzer {
         let sampleRate = managerQueue.sync { currentSampleRate }
         return AudioSpectrumAnalyzer(
             ringBuffer: visualizerRingBuffer,
             sampleRate: Float(sampleRate),
-            dynamicsModel: dynamicsModel
+            dynamicsModel: dynamicsModel,
+            spectrumModel: spectrumModel
         )
     }
 

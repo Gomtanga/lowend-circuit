@@ -7,6 +7,7 @@ BUILD_DIR="$ROOT/build/SystemAudioProcessor"
 APP_DIR="$ROOT/build/LowEndCircuit_artefacts/Release/NativeSystemAudio/LowEnd Native Audio.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 RESOURCES_DIR="$APP_DIR/Contents/Resources"
+SHADER_SOURCE="$PACKAGE_DIR/Shaders/SpectrumShaders.metal"
 
 swift build \
     --package-path "$PACKAGE_DIR" \
@@ -16,6 +17,7 @@ swift build \
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BUILD_DIR/.build/release/SystemAudioProcessor" "$MACOS_DIR/LowEnd Native Audio"
+cp "$SHADER_SOURCE" "$RESOURCES_DIR/SpectrumShaders.metal"
 
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

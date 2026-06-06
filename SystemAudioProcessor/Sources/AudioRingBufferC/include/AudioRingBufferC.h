@@ -10,6 +10,11 @@ extern "C" {
 
 typedef struct LCLockFreeRingBuffer LCLockFreeRingBuffer;
 typedef struct LCControlEventQueue LCControlEventQueue;
+typedef struct LCSpectrumSnapshot LCSpectrumSnapshot;
+
+enum {
+    LC_SPECTRUM_BIN_COUNT = 128
+};
 
 enum {
     LC_CONTROL_EVENT_DSP = 1,
@@ -89,6 +94,12 @@ void lc_control_event_queue_destroy(LCControlEventQueue *queue);
 uint32_t lc_control_event_queue_push(LCControlEventQueue *queue, const LCControlEvent *event);
 uint32_t lc_control_event_queue_pop(LCControlEventQueue *queue, LCControlEvent *event);
 uint32_t lc_control_event_queue_available(const LCControlEventQueue *queue);
+
+LCSpectrumSnapshot *lc_spectrum_snapshot_create(void);
+void lc_spectrum_snapshot_destroy(LCSpectrumSnapshot *snapshot);
+void lc_spectrum_snapshot_publish(LCSpectrumSnapshot *snapshot, const float *values, uint32_t count);
+uint32_t lc_spectrum_snapshot_copy(const LCSpectrumSnapshot *snapshot, float *destination, uint32_t count);
+void lc_spectrum_snapshot_clear(LCSpectrumSnapshot *snapshot);
 
 #ifdef __cplusplus
 }

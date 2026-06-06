@@ -40,7 +40,7 @@ Tidal `Use Exclusive Mode` and similar exclusive-output modes are not compatible
 
 The native processor also includes `HighExciter` as a separate selectable model. Its 11 kHz high-pass coefficients and drive/wet values are precomputed outside the audio callback, then delivered through the lock-free control queue.
 
-The small spectrum display next to the app-list refresh button is a UI-side FFT visualizer. The audio callback only copies final output samples into a lock-free visualizer ring buffer. A 60 Hz UI timer drains that buffer and runs Hann windowing plus real FFT analysis with Accelerate/vDSP.
+The `Analysis` tab contains a GPU-rendered FFT visualizer. The audio callback only copies final output samples into a lock-free visualizer ring buffer. A 60 Hz analysis timer drains that buffer and runs Hann windowing plus real FFT analysis with Accelerate/vDSP. The resulting fixed 128-bin snapshot is published through an atomic C bridge and rendered as one instanced MetalKit draw call at 30 fps, so spectrum updates do not invalidate the SwiftUI hierarchy.
 
 The small meter next to the spectrum display shows Peak, RMS, and Crest Factor. Peak and RMS are calculated with Accelerate/vDSP after the visualizer buffer is drained, then converted to dB and release-smoothed for readability. Crest Factor is `Peak dB - RMS dB`; lower values usually mean the signal is more compressed.
 
