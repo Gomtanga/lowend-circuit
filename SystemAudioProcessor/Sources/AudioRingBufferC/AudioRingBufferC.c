@@ -22,6 +22,7 @@ struct LCControlEventQueue {
 
 struct LCSpectrumSnapshot {
     atomic_uint_fast64_t sequence;
+    atomic_uint_fast32_t active;
     atomic_uint_fast32_t values[LC_SPECTRUM_BIN_COUNT];
 };
 
@@ -287,6 +288,7 @@ LCSpectrumSnapshot *lc_spectrum_snapshot_create(void) {
     }
 
     atomic_init(&snapshot->sequence, 0);
+    atomic_init(&snapshot->active, 0);
     for (uint32_t index = 0; index < LC_SPECTRUM_BIN_COUNT; ++index) {
         atomic_init(&snapshot->values[index], 0);
     }
@@ -314,6 +316,15 @@ void lc_spectrum_snapshot_publish(LCSpectrumSnapshot *snapshot, const float *val
 }
 
 uint32_t lc_spectrum_snapshot_copy(const LCSpectrumSnapshot *snapshot, float *destination, uint32_t count) {
+    uint64_t ignoredSequence = 0;
+    return lc_spectrum_snapshot_copy_if_new(snapshot, destination, count, UINT64_MAX, &ignoredSequence);
+}
+
+uint32_t lc_spectrum_snapshot_copy_if_new(const LCSpectrumSnapshot *snapshot,
+                                          float *destination,
+                                          uint32_t count,
+                                          uint64_t previousSequence,
+                                          uint64_t *newSequence) {
     if (snapshot == NULL || destination == NULL || count == 0) {
         return 0;
     }
@@ -324,6 +335,9 @@ uint32_t lc_spectrum_snapshot_copy(const LCSpectrumSnapshot *snapshot, float *de
         if ((before & 1U) != 0) {
             continue;
         }
+        if (before == previousSequence) {
+            return 0;
+        }
 
         for (uint32_t index = 0; index < writable; ++index) {
             const uint32_t bits = (uint32_t)atomic_load_explicit(&snapshot->values[index], memory_order_relaxed);
@@ -332,10 +346,27 @@ uint32_t lc_spectrum_snapshot_copy(const LCSpectrumSnapshot *snapshot, float *de
 
         const uint64_t after = atomic_load_explicit(&snapshot->sequence, memory_order_acquire);
         if (before == after) {
+            if (newSequence != NULL) {
+                *newSequence = after;
+            }
             return writable;
         }
     }
     return 0;
+}
+
+void lc_spectrum_snapshot_set_active(LCSpectrumSnapshot *snapshot, uint32_t active) {
+    if (snapshot == NULL) {
+        return;
+    }
+    atomic_store_explicit(&snapshot->active, active != 0, memory_order_release);
+}
+
+uint32_t lc_spectrum_snapshot_is_active(const LCSpectrumSnapshot *snapshot) {
+    if (snapshot == NULL) {
+        return 0;
+    }
+    return (uint32_t)atomic_load_explicit(&snapshot->active, memory_order_acquire);
 }
 
 void lc_spectrum_snapshot_clear(LCSpectrumSnapshot *snapshot) {

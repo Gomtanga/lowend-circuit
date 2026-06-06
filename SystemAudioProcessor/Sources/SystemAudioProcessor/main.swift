@@ -132,14 +132,16 @@ private enum AppError: Error, CustomStringConvertible {
 }
 
 private final class DynamicsMeterModel: ObservableObject {
-    @Published var currentPeak: Float = -100
-    @Published var currentRMS: Float = -100
-    @Published var currentCrestFactor: Float = 0
+    struct Levels {
+        var peak: Float
+        var rms: Float
+        var crestFactor: Float
+    }
+
+    @Published private(set) var levels = Levels(peak: -100, rms: -100, crestFactor: 0)
 
     func update(peak: Float, rms: Float, crestFactor: Float) {
-        currentPeak = peak
-        currentRMS = rms
-        currentCrestFactor = crestFactor
+        levels = Levels(peak: peak, rms: rms, crestFactor: crestFactor)
     }
 
     func reset() {
@@ -169,8 +171,27 @@ private final class SpectrumModel {
         }
     }
 
-    func copySnapshot(into destination: UnsafeMutablePointer<Float>) -> Bool {
-        lc_spectrum_snapshot_copy(snapshot, destination, UInt32(Self.binCount)) == UInt32(Self.binCount)
+    func copySnapshot(
+        into destination: UnsafeMutablePointer<Float>,
+        after previousSequence: UInt64
+    ) -> UInt64? {
+        var newSequence: UInt64 = previousSequence
+        let copied = lc_spectrum_snapshot_copy_if_new(
+            snapshot,
+            destination,
+            UInt32(Self.binCount),
+            previousSequence,
+            &newSequence
+        )
+        return copied == UInt32(Self.binCount) ? newSequence : nil
+    }
+
+    func setAnalysisActive(_ active: Bool) {
+        lc_spectrum_snapshot_set_active(snapshot, active ? 1 : 0)
+    }
+
+    var isAnalysisActive: Bool {
+        lc_spectrum_snapshot_is_active(snapshot) != 0
     }
 
     func reset() {
@@ -215,8 +236,8 @@ private struct DynamicsMeterView: View {
 
     private var compactBody: some View {
         VStack(spacing: 4) {
-            horizontalLevelBar(title: "Peak", db: model.currentPeak, color: Color(red: 0.96, green: 0.75, blue: 0.31), showValue: false)
-            horizontalLevelBar(title: "RMS", db: model.currentRMS, color: Color(red: 0.34, green: 0.80, blue: 0.92), showValue: false)
+            horizontalLevelBar(title: "Peak", db: model.levels.peak, color: Color(red: 0.96, green: 0.75, blue: 0.31), showValue: false)
+            horizontalLevelBar(title: "RMS", db: model.levels.rms, color: Color(red: 0.34, green: 0.80, blue: 0.92), showValue: false)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
@@ -235,15 +256,15 @@ private struct DynamicsMeterView: View {
                         .foregroundStyle(Color(red: 0.58, green: 0.62, blue: 0.68))
                 }
                 Spacer(minLength: 8)
-                Text(String(format: "%.1f dB", model.currentCrestFactor))
+                Text(String(format: "%.1f dB", model.levels.crestFactor))
                     .font(.system(size: 30, weight: .heavy, design: .monospaced))
                     .foregroundStyle(Color(red: 0.96, green: 0.75, blue: 0.31))
                     .minimumScaleFactor(0.72)
             }
 
             VStack(spacing: 9) {
-                horizontalLevelBar(title: "Peak", db: model.currentPeak, color: Color(red: 0.96, green: 0.75, blue: 0.31), showValue: true)
-                horizontalLevelBar(title: "RMS", db: model.currentRMS, color: Color(red: 0.34, green: 0.80, blue: 0.92), showValue: true)
+                horizontalLevelBar(title: "Peak", db: model.levels.peak, color: Color(red: 0.96, green: 0.75, blue: 0.31), showValue: true)
+                horizontalLevelBar(title: "RMS", db: model.levels.rms, color: Color(red: 0.34, green: 0.80, blue: 0.92), showValue: true)
             }
         }
         .padding(14)
@@ -295,6 +316,7 @@ private struct MetalSpectrumView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> MTKView {
         let view = MTKView(frame: .zero, device: context.coordinator.device)
+        model.setAnalysisActive(isActive)
         view.delegate = context.coordinator
         view.colorPixelFormat = .bgra8Unorm
         view.framebufferOnly = true
@@ -307,7 +329,14 @@ private struct MetalSpectrumView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: MTKView, context: Context) {
+        model.setAnalysisActive(isActive)
         nsView.isPaused = !isActive || !context.coordinator.isReady
+    }
+
+    static func dismantleNSView(_ nsView: MTKView, coordinator: Coordinator) {
+        coordinator.setAnalysisActive(false)
+        nsView.isPaused = true
+        nsView.delegate = nil
     }
 
     final class Coordinator: NSObject, MTKViewDelegate {
@@ -319,6 +348,7 @@ private struct MetalSpectrumView: NSViewRepresentable {
         private let uniformBuffers: [MTLBuffer]
         private var bufferIndex = 0
         private var drawableSize = SIMD2<Float>(0, 0)
+        private var lastSequence = UInt64.max
 
         var isReady: Bool {
             device != nil &&
@@ -357,6 +387,11 @@ private struct MetalSpectrumView: NSViewRepresentable {
 
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
             drawableSize = SIMD2(Float(size.width), Float(size.height))
+            lastSequence = UInt64.max
+        }
+
+        func setAnalysisActive(_ active: Bool) {
+            model.setAnalysisActive(active)
         }
 
         func draw(in view: MTKView) {
@@ -375,7 +410,11 @@ private struct MetalSpectrumView: NSViewRepresentable {
                 to: Float.self,
                 capacity: SpectrumModel.binCount
             )
-            guard model.copySnapshot(into: amplitudePointer) else { return }
+            guard let sequence = model.copySnapshot(
+                into: amplitudePointer,
+                after: lastSequence
+            ) else { return }
+            lastSequence = sequence
 
             let uniformBuffer = uniformBuffers[index]
             let uniformPointer = uniformBuffer.contents().bindMemory(
@@ -458,7 +497,7 @@ private struct RightPanelContainerView: View {
 
     @State private var selectedTab: PanelTab = .spatial
     @ObservedObject var spatialModel: SpatialControlModel
-    @ObservedObject var dynamicsModel: DynamicsMeterModel
+    let dynamicsModel: DynamicsMeterModel
     let spectrumModel: SpectrumModel
     let onSpatialChange: (SpatialSettings) -> Void
 
@@ -904,7 +943,6 @@ private final class AudioSpectrumAnalyzer: NSObject {
     private var timer: Timer?
     private var fftSetup: FFTSetup?
     private var drainBuffer = [Float](repeating: 0, count: 32_768)
-    private var absoluteDrainBuffer = [Float](repeating: 0, count: 32_768)
     private var history = [Float](repeating: 0, count: AudioSpectrumAnalyzer.fftSize)
     private var window = [Float](repeating: 0, count: AudioSpectrumAnalyzer.fftSize)
     private var windowed = [Float](repeating: 0, count: AudioSpectrumAnalyzer.fftSize)
@@ -918,8 +956,9 @@ private final class AudioSpectrumAnalyzer: NSObject {
     private var smoothedPeakDb: Float = -100
     private var smoothedRMSDb: Float = -100
     private var smoothedCrestDb: Float = 0
-    private let levelReleaseDbPerTick: Float = 0.55
-    private let crestReleaseDbPerTick: Float = 0.20
+    private var dynamicsPublishCounter = 0
+    private let levelReleaseDbPerTick: Float = 1.10
+    private let crestReleaseDbPerTick: Float = 0.40
 
     init(ringBuffer: LockFreeFloatRingBuffer,
          sampleRate: Float,
@@ -944,7 +983,16 @@ private final class AudioSpectrumAnalyzer: NSObject {
 
     func start() {
         stop()
-        timer = Timer.scheduledTimer(timeInterval: 1.0 / 60.0, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
+        let timer = Timer(
+            timeInterval: 1.0 / 30.0,
+            target: self,
+            selector: #selector(tick),
+            userInfo: nil,
+            repeats: true
+        )
+        timer.tolerance = 1.0 / 120.0
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     func stop() {
@@ -958,16 +1006,18 @@ private final class AudioSpectrumAnalyzer: NSObject {
     }
 
     @objc private func tick() {
-        drainAudio()
-        guard filledSamples > 0 else { return }
+        guard drainAudio(),
+              spectrumModel.isAnalysisActive,
+              filledSamples >= fftSize else { return }
         computeSpectrum()
         spectrumModel.publish(magnitudes)
     }
 
-    private func drainAudio() {
+    @discardableResult
+    private func drainAudio() -> Bool {
         let available = min(ringBuffer.availableSamples(), drainBuffer.count)
         let sampleCount = available - (available % 2)
-        guard sampleCount >= 2 else { return }
+        guard sampleCount >= 2 else { return false }
 
         drainBuffer.withUnsafeMutableBufferPointer { pointer in
             if let baseAddress = pointer.baseAddress {
@@ -979,23 +1029,53 @@ private final class AudioSpectrumAnalyzer: NSObject {
         let frameCount = sampleCount / 2
         if frameCount >= fftSize {
             let startFrame = frameCount - fftSize
-            for index in 0..<fftSize {
-                let sourceIndex = (startFrame + index) * 2
-                history[index] = (drainBuffer[sourceIndex] + drainBuffer[sourceIndex + 1]) * 0.5
-            }
+            downmixStereo(
+                sourceStartFrame: startFrame,
+                destinationStartFrame: 0,
+                frameCount: fftSize
+            )
             filledSamples = fftSize
-            return
+            return true
         }
 
         let keepCount = fftSize - frameCount
-        for index in 0..<keepCount {
-            history[index] = history[index + frameCount]
+        history.withUnsafeMutableBufferPointer { pointer in
+            guard let baseAddress = pointer.baseAddress else { return }
+            memmove(
+                baseAddress,
+                baseAddress.advanced(by: frameCount),
+                keepCount * MemoryLayout<Float>.stride
+            )
         }
-        for index in 0..<frameCount {
-            let sourceIndex = index * 2
-            history[keepCount + index] = (drainBuffer[sourceIndex] + drainBuffer[sourceIndex + 1]) * 0.5
-        }
+        downmixStereo(
+            sourceStartFrame: 0,
+            destinationStartFrame: keepCount,
+            frameCount: frameCount
+        )
         filledSamples = min(fftSize, filledSamples + frameCount)
+        return true
+    }
+
+    private func downmixStereo(
+        sourceStartFrame: Int,
+        destinationStartFrame: Int,
+        frameCount: Int
+    ) {
+        guard frameCount > 0 else { return }
+
+        drainBuffer.withUnsafeBufferPointer { sourcePointer in
+            history.withUnsafeMutableBufferPointer { destinationPointer in
+                guard let sourceBase = sourcePointer.baseAddress,
+                      let destinationBase = destinationPointer.baseAddress else { return }
+                let left = sourceBase.advanced(by: sourceStartFrame * 2)
+                let right = left.advanced(by: 1)
+                let destination = destinationBase.advanced(by: destinationStartFrame)
+                let count = vDSP_Length(frameCount)
+                var half: Float = 0.5
+                vDSP_vadd(left, 2, right, 2, destination, 1, count)
+                vDSP_vsmul(destination, 1, &half, destination, 1, count)
+            }
+        }
     }
 
     private func computeSpectrum() {
@@ -1056,14 +1136,10 @@ private final class AudioSpectrumAnalyzer: NSObject {
         var rms: Float = 0
 
         drainBuffer.withUnsafeBufferPointer { sourcePointer in
-            absoluteDrainBuffer.withUnsafeMutableBufferPointer { absolutePointer in
-                guard let sourceBase = sourcePointer.baseAddress,
-                      let absoluteBase = absolutePointer.baseAddress else { return }
-                let count = vDSP_Length(sampleCount)
-                vDSP_vabs(sourceBase, 1, absoluteBase, 1, count)
-                vDSP_maxv(absoluteBase, 1, &peak, count)
-                vDSP_rmsqv(sourceBase, 1, &rms, count)
-            }
+            guard let sourceBase = sourcePointer.baseAddress else { return }
+            let count = vDSP_Length(sampleCount)
+            vDSP_maxmgv(sourceBase, 1, &peak, count)
+            vDSP_rmsqv(sourceBase, 1, &rms, count)
         }
 
         let peakDb = amplitudeToDb(peak)
@@ -1074,7 +1150,11 @@ private final class AudioSpectrumAnalyzer: NSObject {
         smoothedRMSDb = releaseSmooth(current: smoothedRMSDb, target: rmsDb, step: levelReleaseDbPerTick)
         smoothedCrestDb = releaseSmooth(current: smoothedCrestDb, target: crestDb, step: crestReleaseDbPerTick)
 
-        dynamicsModel.update(peak: smoothedPeakDb, rms: smoothedRMSDb, crestFactor: smoothedCrestDb)
+        dynamicsPublishCounter += 1
+        if dynamicsPublishCounter >= 2 {
+            dynamicsPublishCounter = 0
+            dynamicsModel.update(peak: smoothedPeakDb, rms: smoothedRMSDb, crestFactor: smoothedCrestDb)
+        }
     }
 
     private func amplitudeToDb(_ value: Float) -> Float {

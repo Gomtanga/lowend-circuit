@@ -99,6 +99,13 @@ LCSpectrumSnapshot *lc_spectrum_snapshot_create(void);
 void lc_spectrum_snapshot_destroy(LCSpectrumSnapshot *snapshot);
 void lc_spectrum_snapshot_publish(LCSpectrumSnapshot *snapshot, const float *values, uint32_t count);
 uint32_t lc_spectrum_snapshot_copy(const LCSpectrumSnapshot *snapshot, float *destination, uint32_t count);
+uint32_t lc_spectrum_snapshot_copy_if_new(const LCSpectrumSnapshot *snapshot,
+                                          float *destination,
+                                          uint32_t count,
+                                          uint64_t previousSequence,
+                                          uint64_t *newSequence);
+void lc_spectrum_snapshot_set_active(LCSpectrumSnapshot *snapshot, uint32_t active);
+uint32_t lc_spectrum_snapshot_is_active(const LCSpectrumSnapshot *snapshot);
 void lc_spectrum_snapshot_clear(LCSpectrumSnapshot *snapshot);
 
 #ifdef __cplusplus
