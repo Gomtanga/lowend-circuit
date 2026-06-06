@@ -1951,8 +1951,8 @@ private enum DSPPrecompute {
                                 dspModel: Settings.DSPModel) -> LCDSPSettings {
         let normalIntensity = clamp(intensity / 100, 0, 1)
         let normalBody = clamp(body / 100, 0, 1)
-        let shelfDb = normalIntensity * 8.5
-        let shelfFreq = 72 + normalIntensity * 33
+        let shelfDb = normalIntensity * 6.5
+        let shelfFreq = 68 + normalIntensity * 24
         let outputGain = pow(10, outputDb / 20)
         let transformerShelfDb = 0.7 + normalIntensity * 2.2 + normalBody * 0.7
         let transformerShelfFreq = 78 + normalIntensity * 10 + normalBody * 24
@@ -1972,11 +1972,11 @@ private enum DSPPrecompute {
             dspModel: dspModel.controlID,
             shelf: makeLowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb),
             warmthAmount: 0.008 * normalIntensity + 0.004 * normalBody,
-            virtualFeedbackGain: 0.30 * normalIntensity,
-            bodyInjectionGain: (0.035 + 0.075 * normalIntensity) * normalBody,
-            circuitHeadroomGain: pow(10, (-1.8 * normalIntensity - 0.8 * normalBody) / 20),
+            virtualFeedbackGain: 0.16 * normalIntensity,
+            bodyInjectionGain: (0.46 + 0.06 * normalIntensity) * normalBody,
+            circuitHeadroomGain: pow(10, (-1.2 * normalIntensity - 0.4 * normalBody) / 20),
             drive: 1 + 0.10 * normalIntensity + 0.04 * normalBody,
-            wetMix: min(max(0.40 * normalIntensity + 0.10 * normalBody, 0), 0.58),
+            wetMix: min(max(0.32 * normalIntensity + 0.18 * normalBody, 0), 0.54),
             bassAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 72 + normalIntensity * 36),
             subAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 38 + normalBody * 26),
             transformerPreEmphasis: makeLowShelf(sampleRate: sampleRate, frequency: transformerShelfFreq, q: 0.72, gainDb: transformerShelfDb),
@@ -2227,6 +2227,7 @@ private final class VirtualCircuitBassDSP: BassProcessor {
     private final class Channel {
         private let bassPole: RcLowPass
         private let subPole: RcLowPass
+        private var bassShelf = Biquad()
         private var preEmphasis = Biquad()
         private var deEmphasis = Biquad()
         private var intensity: Float = 0
@@ -2265,6 +2266,7 @@ private final class VirtualCircuitBassDSP: BassProcessor {
             self.transformerAsymmetry = settings.transformerAsymmetry
             self.transformerBiasOffset = settings.transformerBiasOffset
             self.transformerMakeupGain = settings.transformerMakeupGain
+            bassShelf.update(settings.shelf)
             preEmphasis.update(settings.transformerPreEmphasis)
             deEmphasis.update(settings.transformerDeEmphasis)
             bassPole.update(alpha: settings.bassAlpha)
@@ -2272,6 +2274,7 @@ private final class VirtualCircuitBassDSP: BassProcessor {
         }
 
         func resetState() {
+            bassShelf.resetState()
             preEmphasis.resetState()
             deEmphasis.resetState()
             bassPole.resetState()
@@ -2283,13 +2286,15 @@ private final class VirtualCircuitBassDSP: BassProcessor {
                 return input * outputGain
             }
 
+            let bassShaped = bassShelf.process(input)
             let bassNode = bassPole.process(input)
             let subNode = subPole.process(input)
-            let circuitInput = (input + bassNode * virtualFeedbackGain + subNode * bodyInjectionGain) * headroomGain
+            let shaped = bassShaped + subNode * bodyInjectionGain
+            let circuitInput = (shaped + bassNode * virtualFeedbackGain) * headroomGain
             let emphasized = preEmphasis.process(circuitInput)
             let saturated = asymmetricSaturate(emphasized)
             let deEmphasized = deEmphasis.process(saturated)
-            let blended = input + (deEmphasized - input) * wetMix
+            let blended = shaped + (deEmphasized - shaped) * wetMix
             return fastClamp(blended * outputGain)
         }
 
