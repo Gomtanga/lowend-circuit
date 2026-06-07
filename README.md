@@ -35,6 +35,40 @@ The macOS release is ad-hoc signed, not Apple-notarized. If Gatekeeper blocks
 the first launch, right-click the app in Finder and choose **Open**. macOS will
 also request system-audio recording permission when capture starts.
 
+## System Requirements
+
+### LowEnd Native Audio for macOS
+
+Current `v0.2.0` release:
+
+- macOS 14.4 or newer
+- Apple Silicon Mac (`arm64`); M1 or newer
+- 8 GB memory
+- Metal-capable GPU
+- Core Audio output device, headphones, speakers, or external DAC
+- approximately 100 MB of free storage for extraction and normal use
+
+Recommended for 96/192 kHz processing with the Analysis tab:
+
+- Apple M2 or newer
+- 16 GB memory
+
+An Apple M5 test system kept Analysis-mode CPU use in the single-digit range
+after the FFT, Metal, and SwiftUI optimizations. This is a reference result,
+not a guaranteed benchmark for every device, sample rate, or audio workload.
+
+The downloadable macOS `v0.2.0` binary is arm64-only. Intel Macs are not
+supported by that archive.
+
+### Windows Standalone and VST3
+
+- Windows 10 or Windows 11, 64-bit
+- four-core x64 processor or better
+- 8 GB memory
+- compatible audio device or DAW/plugin host
+
+Windows builds do not include native whole-system or per-application capture.
+
 ## Quick Start: macOS Native App
 
 1. Extract `LowEnd-Native-Audio-macOS-v0.2.0.zip`.

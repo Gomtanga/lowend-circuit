@@ -36,6 +36,40 @@ macOS 릴리스는 임시 서명되어 있으며 Apple 공증을 받지 않았�
 차단되면 Finder에서 앱을 우클릭한 뒤 **열기**를 선택하세요. 오디오 캡처를
 시작할 때 macOS 시스템 오디오 녹음 권한도 허용해야 합니다.
 
+## 시스템 요구사항
+
+### macOS LowEnd Native Audio
+
+현재 `v0.2.0` 릴리스 최소 사양:
+
+- macOS 14.4 이상
+- Apple Silicon Mac (`arm64`), M1 이상
+- 메모리 8 GB
+- Metal 지원 GPU
+- Core Audio 출력 장치, 헤드폰, 스피커 또는 외장 DAC
+- 압축 해제와 일반 사용을 위한 약 100 MB의 여유 저장 공간
+
+96/192 kHz 처리와 Analysis 탭을 함께 사용할 때의 권장 사양:
+
+- Apple M2 이상
+- 메모리 16 GB
+
+Apple M5 테스트 환경에서는 FFT, Metal, SwiftUI 최적화 후 Analysis 모드의 CPU
+사용률이 한 자릿수 범위로 측정됐습니다. 이는 참고 결과이며 장치, 샘플레이트,
+재생 환경에 따라 동일한 성능을 보장하는 수치는 아닙니다.
+
+현재 배포 중인 macOS `v0.2.0` 바이너리는 arm64 전용입니다. 해당 ZIP은 Intel
+Mac을 지원하지 않습니다.
+
+### Windows Standalone 및 VST3
+
+- Windows 10 또는 Windows 11 64-bit
+- 4코어 x64 프로세서 이상
+- 메모리 8 GB
+- 호환 오디오 장치 또는 DAW/플러그인 호스트
+
+Windows 빌드에는 전체 시스템 및 특정 앱 Native 캡처 기능이 포함되지 않습니다.
+
 ## macOS Native 앱 빠른 시작
 
 1. `LowEnd-Native-Audio-macOS-v0.2.0.zip`의 압축을 풉니다.
