@@ -1,102 +1,150 @@
 // LowEnd Circuit — Windows Native Prototype
 //
-// Step 3: Core CircuitBass DSP integration.
-// Captures loopback audio → processes through Core::CircuitBass → (playback later).
+// Step 4: End-to-end pipeline.
+//   WASAPI loopback capture → Core CircuitBass DSP → WASAPI render playback
+//
+// Build & run (Windows):
+//   cmake -S WindowsNativePrototype -B build/win-proto -G "Visual Studio 17 2022" -A x64
+//   cmake --build build/win-proto --config Release
+//   build/win-proto/Release/LowEndWinPrototype.exe
 
 #ifdef _WIN32
 #include <windows.h>
 #include <stdio.h>
 #include "WasapiLoopbackCapture.h"
+#include "WasapiPlayback.h"
 
 // ─── Core DSP ─────────────────────────────────────────────────
 #include <Core/CircuitBass.h>
 #include <Core/Core.h>
 
-// Persistent DSP state (initialised in main, used from callback)
+// Shared DSP + playback state (set up in main, used from capture callback)
 static lowend::CircuitBass* g_circuitBass = nullptr;
-static float g_outputGain = 1.0f;
+static WasapiPlayback* g_playback = nullptr;
 
-// Audio processing callback — called from capture thread (realtime-safe)
+// Audio processing callback — capture thread, realtime-sensitive
 static void processAudio(float* samples, uint32_t frames, uint32_t channels,
                          uint32_t sampleRate, void* /*userData*/) {
     if (!g_circuitBass || channels < 1) return;
 
+    // Process through Core CircuitBass (in-place)
     for (uint32_t s = 0; s < frames; ++s) {
         if (channels >= 2) {
             float l = samples[s * 2];
             float r = samples[s * 2 + 1];
             g_circuitBass->process(l, r, l, r);
-            samples[s * 2]     = l * g_outputGain;
-            samples[s * 2 + 1] = r * g_outputGain;
+            samples[s * 2]     = l;
+            samples[s * 2 + 1] = r;
         } else {
             float m = samples[s];
             float _unused;
             g_circuitBass->process(m, m, m, _unused);
-            samples[s] = m * g_outputGain;
+            samples[s] = m;
         }
+    }
+
+    // Forward processed audio to playback
+    if (g_playback) {
+        g_playback->submitInterleaved(samples, frames);
     }
 }
 
 int main() {
     printf("LowEnd Circuit — Windows Native Prototype\n");
     printf("=========================================\n");
-    printf("Status: boot OK\n");
-    printf("Platform: Windows\n");
-    printf("Step 3: Core CircuitBass DSP\n");
+    printf("Version: Step 4 — End-to-End Pipeline\n");
+    printf("Pipeline: Loopback Capture → Core CircuitBass → Playback\n\n");
 
-    // ─── Initialise Core DSP ──────────────────────────────
-    printf("\n--- Initialising Core::CircuitBass ---\n");
+    // ─── 1. Initialise Core DSP ───────────────────────────
+    printf("[dsp] Initialising Core::CircuitBass...\n");
 
     lowend::CircuitBass circuitBass;
     g_circuitBass = &circuitBass;
 
-    // Configure with moderate Circuit model settings
     auto dspConfig = lowend::DSPPrecompute::makeDSPSettings(
-        48000.0f,   // sample rate (will be updated when capture starts)
-        55.0f,      // intensity
-        30.0f,      // body
-        -1.5f,      // output dB
-        1           // dspModel: Circuit
-    );
+        48000.0f, 55.0f, 30.0f, -1.5f, 1);
     circuitBass.update(dspConfig);
-    printf("CircuitBass initialised: intensity=55, body=30, output=-1.5 dB\n");
+    printf("[dsp] CircuitBass ready: intensity=55, body=30, output=-1.5 dB\n");
 
-    // ─── WASAPI Loopback Capture ──────────────────────────
-    printf("\n--- WASAPI Loopback Capture ---\n");
+    // ─── 2. Initialise WASAPI Playback ────────────────────
+    printf("\n[playback] Initialising WASAPI render...\n");
 
-    WasapiLoopbackCapture capture;
-    if (capture.initialize()) {
-        printf("Capture format: %lu Hz, %lu channels\n",
-               capture.sampleRate(), capture.channels());
+    WasapiPlayback playback;
+    if (!playback.initialize()) {
+        printf("[playback] FAILED — cannot continue without render device.\n");
+        printf("  Expected on CI VMs. Run on a Windows PC with audio hardware.\n");
+        g_circuitBass = nullptr;
+        printf("\nPrototype incomplete (no playback device).\n");
+        return 0;
+    }
+    g_playback = &playback;
+    printf("[playback] Ready: %lu Hz, %lu channels\n",
+           playback.sampleRate(), playback.channels());
 
-        // Update Core DSP to match actual sample rate
-        if (capture.sampleRate() != 48000) {
-            auto actualConfig = lowend::DSPPrecompute::makeDSPSettings(
-                static_cast<float>(capture.sampleRate()),
-                55.0f, 30.0f, -1.5f, 1);
-            circuitBass.update(actualConfig);
-            printf("DSP reconfigured for %lu Hz\n", capture.sampleRate());
-        }
-
-        // Wire up the processing callback
-        capture.setProcessCallback(processAudio, nullptr);
-        printf("Processing callback set: Core::CircuitBass\n");
-
-        printf("Starting capture + DSP for 3 seconds...\n");
-        capture.start();
-
-        // Run for 3 seconds
-        Sleep(3000);
-
-        capture.stop();
-        printf("Capture + DSP stopped.\n");
-    } else {
-        printf("Loopback capture not available (expected on CI without audio HW).\n");
-        printf("Core::CircuitBass initialisation confirmed.\n");
+    // Reconfigure DSP to match render format
+    if (playback.sampleRate() != 48000) {
+        auto actualConfig = lowend::DSPPrecompute::makeDSPSettings(
+            static_cast<float>(playback.sampleRate()),
+            55.0f, 30.0f, -1.5f, 1);
+        circuitBass.update(actualConfig);
+        printf("[dsp] Reconfigured for %lu Hz\n", playback.sampleRate());
     }
 
+    // ─── 3. Initialise WASAPI Capture ────────────────────
+    printf("\n[capture] Initialising WASAPI loopback capture...\n");
+
+    WasapiLoopbackCapture capture;
+    if (!capture.initialize()) {
+        printf("[capture] FAILED — loopback not available on this system.\n");
+        g_playback = nullptr;
+        g_circuitBass = nullptr;
+        playback.stop();
+        printf("\nPrototype incomplete (no capture device).\n");
+        return 0;
+    }
+
+    printf("[capture] Format: %lu Hz, %lu channels\n",
+           capture.sampleRate(), capture.channels());
+
+    // Wire DSP callback
+    capture.setProcessCallback(processAudio, nullptr);
+    printf("[capture] Processing callback set.\n");
+
+    // ─── 4. Start Pipeline ────────────────────────────────
+    printf("\n=== Starting pipeline ===\n");
+    printf("  Capture → Core CircuitBass → Playback\n");
+    printf("  Running for 5 seconds...\n\n");
+
+    if (!playback.start()) {
+        printf("[playback] Start failed.\n");
+        g_playback = nullptr;
+        g_circuitBass = nullptr;
+        return 1;
+    }
+
+    if (!capture.start()) {
+        printf("[capture] Start failed.\n");
+        g_playback = nullptr;
+        g_circuitBass = nullptr;
+        playback.stop();
+        return 1;
+    }
+
+    printf("[pipeline] ACTIVE — listening and processing...\n");
+
+    // Run pipeline for 5 seconds
+    Sleep(5000);
+
+    // ─── 5. Stop Pipeline ─────────────────────────────────
+    printf("\n=== Stopping pipeline ===\n");
+    capture.stop();
+    playback.stop();
+    g_playback = nullptr;
     g_circuitBass = nullptr;
-    printf("\nPrototype complete.\n");
+
+    printf("\n✅ Prototype complete.\n");
+    printf("   Pipeline ran for 5 seconds.\n");
+    printf("   If you heard processed audio, Core CircuitBass is working.\n");
     return 0;
 }
 

@@ -22,6 +22,8 @@ if(WIN32)
         main.cpp
         WasapiLoopbackCapture.h
         WasapiLoopbackCapture.cpp
+        WasapiPlayback.h
+        WasapiPlayback.cpp
     )
 
     target_link_libraries(LowEndWinPrototype PRIVATE
