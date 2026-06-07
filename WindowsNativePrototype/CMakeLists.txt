@@ -5,14 +5,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ─── Shared Core DSP library ──────────────────────────────────
-# Core.h + Core.cpp + CircuitBass provide the cross-platform DSP.
-# 참조: Source/Core/ (spike/cross-platform-core)
-#
-# WindowsNativePrototype is a standalone CMake project that can also
-# be built via add_subdirectory from the root CMakeLists.txt.
+# Source/Core/ provides Biquad, OnePole, CircuitBass, HighExciter, DSPPrecompute.
+# Built as a static library (lowend_core) and linked below.
+get_filename_component(CORE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../Source/Core" ABSOLUTE)
+get_filename_component(AUDIO_RING_BUFFER_INCLUDE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../SystemAudioProcessor/Sources/AudioRingBufferC/include"
+    ABSOLUTE)
 
 # ─── Platform-specific target ─────────────────────────────────
 if(WIN32)
+    add_subdirectory(${CORE_DIR} build/lowend_core)
+    # lowend_core target is now available
+
     add_executable(LowEndWinPrototype
         main.cpp
         WasapiLoopbackCapture.h
@@ -20,40 +25,37 @@ if(WIN32)
     )
 
     target_link_libraries(LowEndWinPrototype PRIVATE
+        lowend_core
         ole32.lib
         avrt.lib
+    )
+
+    target_include_directories(LowEndWinPrototype PRIVATE
+        ${CORE_DIR}/include
+        ${AUDIO_RING_BUFFER_INCLUDE}
     )
 
     target_compile_definitions(LowEndWinPrototype PRIVATE
         _CRT_SECURE_NO_WARNINGS
     )
 
-    # WASAPI headers are part of the Windows SDK — no extra include paths needed.
-    # Key headers used later:
-    #   <windows.h>
-    #   <mmdeviceapi.h>
-    #   <audioclient.h>
-    #   <functiondiscoverykeys_devpkey.h>
-
     set_target_properties(LowEndWinPrototype PROPERTIES
         WIN32_EXECUTABLE FALSE   # console app, not GUI
     )
 
-    message(STATUS "LowEndWinPrototype: Windows build configured")
+    message(STATUS "LowEndWinPrototype: Windows build configured (Core linked)")
 
 elseif(APPLE)
-    # macOS stub — Silly message to let the user know this only builds on Windows.
+    # macOS stub
     add_custom_target(LowEndWinPrototype
         COMMAND ${CMAKE_COMMAND} -E echo
             "LowEndWinPrototype is a Windows-only project. Build on Windows with MSVC."
     )
-
-    message(STATUS "LowEndWinPrototype: macOS — stub only (not a real target)")
+    message(STATUS "LowEndWinPrototype: macOS — stub only")
 
 else()
     add_custom_target(LowEndWinPrototype
         COMMAND ${CMAKE_COMMAND} -E echo
-            "LowEndWinPrototype requires Windows. Build with Visual Studio 2022."
+            "LowEndWinPrototype requires Windows."
     )
-
 endif()

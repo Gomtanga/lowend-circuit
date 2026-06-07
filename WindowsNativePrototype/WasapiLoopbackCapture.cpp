@@ -205,18 +205,24 @@ void WasapiLoopbackCapture::processCapturedData(uint64_t& totalFrames) {
         if (hr == AUDCLNT_S_BUFFER_EMPTY) break;
         if (FAILED(hr)) break;
 
-        // Count frames (actual DSP will be added in Step 3+)
         totalFrames += framesAvailable;
 
-        // For now, just log the first few buffers
+        // Invoke processing callback if set
+        if (processCb_ && framesAvailable > 0 && data != nullptr) {
+            processCb_(reinterpret_cast<float*>(data),
+                       framesAvailable, channels_, sampleRate_,
+                       processUserData_);
+        }
+
+        // Logging (first few buffers)
         static int logCount = 0;
         if (logCount < 5) {
-            fprintf(stderr, "[capture] %lu frames, flags=0x%08lx\n",
-                    framesAvailable, flags);
+            fprintf(stderr, "[capture] %lu frames, flags=0x%08lx, cb=%s\n",
+                    framesAvailable, flags,
+                    processCb_ ? "active" : "none");
             logCount++;
         }
 
-        // Release the buffer
         captureClient_->ReleaseBuffer(framesAvailable);
     }
 }

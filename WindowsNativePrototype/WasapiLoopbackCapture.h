@@ -42,6 +42,23 @@ private:
 
     static DWORD WINAPI captureThreadProc(LPVOID param);
     void processCapturedData(uint64_t& totalFrames);
+
+public:
+    /// Callback type: receives float samples from loopback capture.
+    /// Called from the capture thread. Keep it realtime-safe.
+    using ProcessCallback = void (*)(float* samples, uint32_t frameCount,
+                                     uint32_t channels, uint32_t sampleRate,
+                                     void* userData);
+
+    /// Set a processing callback (can be null for passthrough).
+    void setProcessCallback(ProcessCallback cb, void* userData) {
+        processCb_ = cb;
+        processUserData_ = userData;
+    }
+
+private:
+    ProcessCallback processCb_ = nullptr;
+    void* processUserData_ = nullptr;
 };
 
 #endif // _WIN32
