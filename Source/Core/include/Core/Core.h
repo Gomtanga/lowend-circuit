@@ -18,6 +18,10 @@
 // C ABI types — shared with AudioRingBufferC (C → Swift bridging)
 // AudioRingBufferC.h lives outside Core/ to avoid moving existing code.
 // The build system adds its include path via -I or target_include_directories.
+//
+// DSP class headers:
+//   CircuitBass.h    — VirtualCircuitBassDSP (full circuit bass model)
+//   (future) HighExciter.h, Spatializer.h
 // -----------------------------------------------------------------------
 #include "AudioRingBufferC.h"
 

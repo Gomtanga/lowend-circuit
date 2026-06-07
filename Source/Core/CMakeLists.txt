@@ -15,6 +15,7 @@ get_filename_component(AUDIO_RING_BUFFER_INCLUDE
 # ─── Core static library ────────────────────────────────────────────
 add_library(lowend_core STATIC
     src/Core.cpp
+    src/CircuitBass.cpp
 )
 
 target_include_directories(lowend_core
