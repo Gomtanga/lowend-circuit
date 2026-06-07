@@ -5,7 +5,8 @@
 #include "WasapiLoopbackCapture.h"
 #include <functiondiscoverykeys_devpkey.h>
 #include <avrt.h>
-#include <cstdio>
+#include <stdio.h>
+#include <cstdint>
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "avrt.lib")
