@@ -14,8 +14,9 @@ The repository contains two related applications:
 - **LowEnd Native Audio**: a macOS 14.4+ system-audio processor for the whole
   computer or selected applications, built with Core Audio, AVAudioEngine,
   Accelerate, MetalKit, AppKit, and SwiftUI.
-- **LowEnd Circuit JUCE targets**: Standalone, VST3, and macOS AU builds for
-  normal audio devices, DAWs, and plugin hosts.
+- **LowEnd Circuit JUCE targets**: Standalone and VST3 for Windows and macOS,
+  plus AU for macOS. These are normal desktop audio devices or DAW plugins
+  without the system-capture features of the Native app.
 
 This is an original DSP design. It is not affiliated with, endorsed by, or
 based on the proprietary circuit of any hardware or software manufacturer.
@@ -30,6 +31,12 @@ Get the latest binaries from
 | macOS 14.4+ | `LowEnd-Native-Audio-macOS-v0.2.1.zip` | Whole-system and per-app processing |
 | Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.1.zip` | Normal desktop audio application |
 | Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.1.zip` | DAW/plugin-host use |
+
+> **Windows Native System Audio Processor**: The system-wide and per-application
+> audio processing features available in the macOS Native app are not yet
+> available for Windows. Windows users receive the JUCE-based Standalone
+> (normal desktop audio app) and VST3 plugin. Native Windows system audio
+> capture is planned for a future release.
 
 The macOS release is ad-hoc signed, not Apple-notarized. If Gatekeeper blocks
 the first launch, right-click the app in Finder and choose **Open**. macOS will
@@ -81,6 +88,28 @@ Windows builds do not include native whole-system or per-application capture.
 
 For one application, enter its bundle ID and press **특정 앱 적용**. The app
 list at the bottom helps identify running bundle IDs.
+
+## Quick Start: Windows Standalone and VST3
+
+### Standalone
+
+1. Extract `LowEnd-Circuit-Standalone-Windows-v0.2.1.zip`.
+2. Run `LowEnd Circuit.exe` as a normal desktop audio application.
+3. Select your audio input and output device in the JUCE settings panel.
+4. Adjust `LowEnd`, `Body`, and `Output` sliders.
+5. The Standalone app does not capture system audio; it processes the
+   selected input device signal. It does not have the Spatial Stage,
+   Analysis spectrum, or per-application capture of the macOS Native app.
+
+### VST3
+
+1. Extract `LowEnd-Circuit-VST3-Windows-v0.2.1.zip`.
+2. Copy the `LowEnd Circuit.vst3` folder to your VST3 plugin directory,
+   usually:
+   ```
+   C:\Program Files\Common Files\VST3
+   ```
+3. Restart your DAW and load `LowEnd Circuit` as an audio effect.
 
 ## DSP Models
 
@@ -264,6 +293,10 @@ Targets:
 
 - all platforms: Standalone and VST3
 - macOS: Standalone, VST3, and AU
+
+On Windows, only the Standalone and VST3 targets are built. The native
+system-audio processor (`SystemAudioProcessor/`) is macOS-only and not
+available on Windows.
 
 The JUCE Standalone app uses normal input/output device routing. It does not
 provide the macOS Core Audio Process Tap system-capture path.

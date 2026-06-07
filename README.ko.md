@@ -14,8 +14,8 @@ LowEnd Circuit는 저역 보강, 배음 생성, 헤드폰 공간음향, 실시�
 - **LowEnd Native Audio**: Core Audio, AVAudioEngine, Accelerate, MetalKit,
   AppKit, SwiftUI로 만든 macOS 14.4 이상용 전체 시스템/특정 앱 오디오
   처리 프로그램
-- **LowEnd Circuit JUCE 타깃**: 일반 오디오 장치, DAW, 플러그인 호스트에서
-  사용하는 Standalone, VST3, macOS AU
+- **LowEnd Circuit JUCE 타깃**: Windows/macOS용 Standalone, VST3, macOS 전용 AU.
+  Native 앱의 시스템 캡처 기능 없이 일반 오디오 장치나 DAW에서 사용합니다.
 
 이 프로젝트는 독자적으로 설계한 DSP입니다. 특정 하드웨어나 소프트웨어
 제조사와 제휴·승인 관계가 없으며, 타사의 독점 회로를 복제한 제품이 아닙니다.
@@ -31,6 +31,12 @@ LowEnd Circuit는 저역 보강, 배음 생성, 헤드폰 공간음향, 실시�
 | macOS 14.4 이상 | `LowEnd-Native-Audio-macOS-v0.2.1.zip` | 전체 시스템 및 특정 앱 처리 |
 | Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.1.zip` | 일반 데스크톱 오디오 앱 |
 | Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.1.zip` | DAW/플러그인 호스트 |
+
+> **Windows Native System Audio Processor**: macOS Native 앱의 전체 시스템 및
+> 특정 앱 오디오 처리 기능은 Windows에서 아직 지원되지 않습니다. Windows
+> 사용자는 JUCE 기반 Standalone(일반 데스크톱 오디오 앱)과 VST3 플러그인을
+> 받을 수 있습니다. Windows Native 시스템 오디오 캡처는 추후 릴리즈에서
+> 지원 예정입니다.
 
 macOS 릴리스는 임시 서명되어 있으며 Apple 공증을 받지 않았습니다. 처음 실행이
 차단되면 Finder에서 앱을 우클릭한 뒤 **열기**를 선택하세요. 오디오 캡처를
@@ -82,6 +88,27 @@ Windows 빌드에는 전체 시스템 및 특정 앱 Native 캡처 기능이 포
 
 특정 앱에만 적용하려면 bundle ID를 입력하고 **특정 앱 적용**을 누르세요.
 하단 실행 앱 목록에서 bundle ID를 확인할 수 있습니다.
+
+## Windows Standalone 및 VST3 빠른 시작
+
+### Standalone
+
+1. `LowEnd-Circuit-Standalone-Windows-v0.2.1.zip`의 압축을 풉니다.
+2. `LowEnd Circuit.exe`를 일반 데스크톱 오디오 앱으로 실행합니다.
+3. JUCE 설정 패널에서 오디오 입력/출력 장치를 선택합니다.
+4. `LowEnd`, `Body`, `Output` 슬라이더를 조절합니다.
+5. Standalone 앱은 시스템 오디오를 캡처하지 않으며 선택한 입력 장치의
+   신호를 처리합니다. macOS Native 앱의 Spatial Stage, Analysis 스펙트럼,
+   특정 앱 캡처 기능은 포함되지 않습니다.
+
+### VST3
+
+1. `LowEnd-Circuit-VST3-Windows-v0.2.1.zip`의 압축을 풉니다.
+2. `LowEnd Circuit.vst3` 폴더를 VST3 플러그인 디렉터리에 복사합니다:
+   ```
+   C:\Program Files\Common Files\VST3
+   ```
+3. DAW를 다시 시작하고 `LowEnd Circuit`을 오디오 이펙트로 불러옵니다.
 
 ## DSP 모델
 
@@ -261,6 +288,10 @@ cmake --build build --config Release
 
 - 모든 플랫폼: Standalone, VST3
 - macOS: Standalone, VST3, AU
+
+Windows에서는 Standalone과 VST3만 빌드됩니다. Native 시스템
+오디오 프로세서(`SystemAudioProcessor/`)는 macOS 전용이며
+Windows에서는 사용할 수 없습니다.
 
 JUCE Standalone 앱은 일반 입력/출력 장치를 사용합니다. macOS Native 앱의 Core
 Audio Process Tap 기반 시스템 캡처 기능은 포함하지 않습니다.
