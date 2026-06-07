@@ -8,6 +8,7 @@ APP_DIR="$ROOT/build/LowEndCircuit_artefacts/Release/NativeSystemAudio/LowEnd Na
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 RESOURCES_DIR="$APP_DIR/Contents/Resources"
 SHADER_SOURCE="$PACKAGE_DIR/Shaders/SpectrumShaders.metal"
+ICON_SOURCE="$PACKAGE_DIR/Assets/LowEndNativeAudioIcon.icns"
 
 swift build \
     --package-path "$PACKAGE_DIR" \
@@ -18,6 +19,7 @@ rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BUILD_DIR/.build/release/SystemAudioProcessor" "$MACOS_DIR/LowEnd Native Audio"
 cp "$SHADER_SOURCE" "$RESOURCES_DIR/SpectrumShaders.metal"
+cp "$ICON_SOURCE" "$RESOURCES_DIR/LowEndNativeAudioIcon.icns"
 
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -33,12 +35,14 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
     <string>com.codexaudiolab.lowendcircuit.systemaudio</string>
     <key>CFBundleName</key>
     <string>LowEnd Native Audio</string>
+    <key>CFBundleIconFile</key>
+    <string>LowEndNativeAudioIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.4</string>
     <key>NSAudioCaptureUsageDescription</key>
