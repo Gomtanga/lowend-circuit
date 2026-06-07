@@ -21,7 +21,8 @@
 //
 // DSP class headers:
 //   CircuitBass.h    — VirtualCircuitBassDSP (full circuit bass model)
-//   (future) HighExciter.h, Spatializer.h
+//   HighExciter.h    — HighExciterDSP (high-frequency harmonic exciter)
+//   (future) Spatializer.h
 // -----------------------------------------------------------------------
 #include "AudioRingBufferC.h"
 

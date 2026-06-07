@@ -2,6 +2,7 @@ set(TEST_SOURCES
     test_biquad.cpp
     test_precompute.cpp
     test_circuit_bass.cpp
+    test_high_exciter.cpp
 )
 
 foreach(TEST_SRC ${TEST_SOURCES})
