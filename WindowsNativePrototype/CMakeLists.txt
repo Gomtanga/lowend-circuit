@@ -15,6 +15,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(WIN32)
     add_executable(LowEndWinPrototype
         main.cpp
+        WasapiLoopbackCapture.h
+        WasapiLoopbackCapture.cpp
     )
 
     target_link_libraries(LowEndWinPrototype PRIVATE
