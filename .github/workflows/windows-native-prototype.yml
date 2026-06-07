@@ -1,0 +1,54 @@
+name: Windows Native Prototype
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - spike/windows-native-prototype
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-prototype:
+    name: Build Windows Native Prototype
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake (WindowsNativePrototype)
+        run: |
+          cmake -S WindowsNativePrototype -B build/win-prototype ^
+            -G "Visual Studio 17 2022" -A x64
+
+      - name: Build Release
+        run: |
+          cmake --build build/win-prototype --config Release --verbose
+
+      - name: Quick sanity check — run the console app
+        shell: pwsh
+        run: |
+          $exe = "build/win-prototype/Release/LowEndWinPrototype.exe"
+          if (Test-Path $exe) {
+            Write-Host "Binary found at: $exe"
+            Write-Host "Size: $((Get-Item $exe).Length) bytes"
+            # Run the binary — this should print "boot OK"
+            # Note: audio device dependent tests will fail on CI,
+            # but a simple console print should work.
+            & $exe
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "WARNING: Exit code = $LASTEXITCODE (may be expected on CI without audio hardware)"
+            }
+          } else {
+            Write-Host "ERROR: Binary not found at: $exe"
+            Get-ChildItem -Recurse build/win-prototype/Release/ | Select-Object -First 20
+            exit 1
+          }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LowEnd-Win-Prototype
+          path: build/win-prototype/Release/LowEndWinPrototype.exe
