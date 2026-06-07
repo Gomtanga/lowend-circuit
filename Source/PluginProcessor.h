@@ -58,6 +58,10 @@ private:
     lowend::CircuitBass circuitBass;
     LCDSPSettings currentCoreSettings_{};
 
+    /// Set to true to use Core::CircuitBass for processing instead of JUCE IIR.
+    /// Default: false (keeps existing JUCE sound for DAW session compatibility).
+    static constexpr bool kUseSharedCoreCircuitBass = false;
+
     double currentSampleRate = 44100.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LowEndCircuitAudioProcessor)

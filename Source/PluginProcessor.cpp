@@ -97,40 +97,85 @@ void LowEndCircuitAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
 
     dryBuffer.makeCopyOf (buffer, true);
 
-    updateFilters();
-    intensitySmoothed.setTargetValue (apvts.getRawParameterValue (intensityId)->load() / 100.0f);
-    bodySmoothed.setTargetValue (apvts.getRawParameterValue (bodyId)->load() / 100.0f);
-    mixSmoothed.setTargetValue (apvts.getRawParameterValue (mixId)->load() / 100.0f);
+    if constexpr (kUseSharedCoreCircuitBass) {
+        // ─── Shared Core CircuitBass path ─────────────────
+        // Sync Core settings with current plugin parameters.
+        updateCoreSettings();
 
-    juce::dsp::AudioBlock<float> block (buffer);
-    juce::dsp::ProcessContextReplacing<float> context (block);
-    lowShelf.process (context);
+        const auto mixTarget = apvts.getRawParameterValue (mixId)->load() / 100.0f;
+        const auto outputGain = juce::Decibels::decibelsToGain (
+            apvts.getRawParameterValue (outputId)->load());
 
-    subBuffer.makeCopyOf (dryBuffer, true);
-    juce::dsp::AudioBlock<float> subBlock (subBuffer);
-    juce::dsp::ProcessContextReplacing<float> subContext (subBlock);
-    lowPass.process (subContext);
+        mixSmoothed.setTargetValue (mixTarget);
 
-    const auto outputGain = dbToLinear (apvts.getRawParameterValue (outputId)->load());
-
-    for (int sample = 0; sample < numSamples; ++sample)
-    {
-        const auto intensity = intensitySmoothed.getNextValue();
-        const auto body = bodySmoothed.getNextValue();
-        const auto mix = mixSmoothed.getNextValue();
-        const auto headroom = dbToLinear (juce::jmap (intensity, 0.0f, 1.0f, 0.0f, -3.0f));
-
-        for (int channel = 0; channel < numChannels; ++channel)
+        for (int sample = 0; sample < numSamples; ++sample)
         {
-            auto* wet = buffer.getWritePointer (channel);
-            const auto* dry = dryBuffer.getReadPointer (channel);
-            const auto* sub = subBuffer.getReadPointer (channel);
+            const auto mix = mixSmoothed.getNextValue();
+            if (numChannels >= 2) {
+                float leftOut, rightOut;
+                circuitBass.process(
+                    dryBuffer.getSample(0, sample),
+                    dryBuffer.getSample(1, sample),
+                    leftOut, rightOut);
 
-            const auto subHarmonic = std::tanh (sub[sample] * 2.4f) * 0.18f * body;
-            const auto enhanced = (wet[sample] + subHarmonic) * headroom;
-            const auto blended = dry[sample] + (enhanced - dry[sample]) * mix;
+                // Post-blend with JUCE mix parameter (dry/wet)
+                leftOut = dryBuffer.getSample(0, sample)
+                        + (leftOut - dryBuffer.getSample(0, sample)) * mix;
+                rightOut = dryBuffer.getSample(1, sample)
+                        + (rightOut - dryBuffer.getSample(1, sample)) * mix;
 
-            wet[sample] = std::tanh (blended * outputGain * 1.05f) / 1.05f;
+                buffer.setSample(0, sample, leftOut * outputGain);
+                buffer.setSample(1, sample, rightOut * outputGain);
+            } else {
+                float monoOut, _unused;
+                circuitBass.process(
+                    dryBuffer.getSample(0, sample),
+                    dryBuffer.getSample(0, sample),
+                    monoOut, _unused);
+
+                monoOut = dryBuffer.getSample(0, sample)
+                        + (monoOut - dryBuffer.getSample(0, sample)) * mix;
+
+                buffer.setSample(0, sample, monoOut * outputGain);
+            }
+        }
+    } else {
+        // ─── Original JUCE IIR path (default, unchanged) ───
+        updateFilters();
+        intensitySmoothed.setTargetValue (apvts.getRawParameterValue (intensityId)->load() / 100.0f);
+        bodySmoothed.setTargetValue (apvts.getRawParameterValue (bodyId)->load() / 100.0f);
+        mixSmoothed.setTargetValue (apvts.getRawParameterValue (mixId)->load() / 100.0f);
+
+        juce::dsp::AudioBlock<float> block (buffer);
+        juce::dsp::ProcessContextReplacing<float> context (block);
+        lowShelf.process (context);
+
+        subBuffer.makeCopyOf (dryBuffer, true);
+        juce::dsp::AudioBlock<float> subBlock (subBuffer);
+        juce::dsp::ProcessContextReplacing<float> subContext (subBlock);
+        lowPass.process (subContext);
+
+        const auto outputGain = dbToLinear (apvts.getRawParameterValue (outputId)->load());
+
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const auto intensity = intensitySmoothed.getNextValue();
+            const auto body = bodySmoothed.getNextValue();
+            const auto mix = mixSmoothed.getNextValue();
+            const auto headroom = dbToLinear (juce::jmap (intensity, 0.0f, 1.0f, 0.0f, -3.0f));
+
+            for (int channel = 0; channel < numChannels; ++channel)
+            {
+                auto* wet = buffer.getWritePointer (channel);
+                const auto* dry = dryBuffer.getReadPointer (channel);
+                const auto* sub = subBuffer.getReadPointer (channel);
+
+                const auto subHarmonic = std::tanh (sub[sample] * 2.4f) * 0.18f * body;
+                const auto enhanced = (wet[sample] + subHarmonic) * headroom;
+                const auto blended = dry[sample] + (enhanced - dry[sample]) * mix;
+
+                wet[sample] = std::tanh (blended * outputGain * 1.05f) / 1.05f;
+            }
         }
     }
 }
