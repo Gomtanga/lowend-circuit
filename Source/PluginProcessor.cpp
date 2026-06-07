@@ -62,6 +62,20 @@ void LowEndCircuitAudioProcessor::prepareToPlay (double sampleRate, int samplesP
     mixSmoothed.reset (sampleRate, 0.025);
 
     updateFilters();
+    updateCoreSettings();
+}
+
+void LowEndCircuitAudioProcessor::updateCoreSettings() {
+    const auto intensity = apvts.getRawParameterValue (intensityId)->load();
+    const auto body = apvts.getRawParameterValue (bodyId)->load();
+    const auto output = apvts.getRawParameterValue (outputId)->load();
+
+    currentCoreSettings_ = lowend::DSPPrecompute::makeDSPSettings(
+        static_cast<float>(currentSampleRate),
+        intensity, body, output,
+        1  // dspModel=1 (Circuit) — HighExciter not yet in plugin
+    );
+    circuitBass.update(currentCoreSettings_);
 }
 
 void LowEndCircuitAudioProcessor::updateFilters()

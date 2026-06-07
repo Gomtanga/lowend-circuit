@@ -2,6 +2,10 @@
 
 #include <JuceHeader.h>
 
+// ─── Shared DSP Core ────────────────────────────────────
+#include <Core/CircuitBass.h>
+#include <Core/Core.h>
+
 class LowEndCircuitAudioProcessor final : public juce::AudioProcessor
 {
 public:
@@ -36,10 +40,12 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     void updateFilters();
+    void updateCoreSettings();
 
     using Filter = juce::dsp::IIR::Filter<float>;
     using Coefficients = juce::dsp::IIR::Coefficients<float>;
 
+    // ─── JUCE DSP (existing, will be replaced by Core) ───
     juce::AudioBuffer<float> dryBuffer;
     juce::AudioBuffer<float> subBuffer;
     juce::dsp::ProcessorDuplicator<Filter, Coefficients> lowShelf;
@@ -47,6 +53,10 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> intensitySmoothed;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> bodySmoothed;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> mixSmoothed;
+
+    // ─── Core DSP (shared cross-platform) ─────────────────
+    lowend::CircuitBass circuitBass;
+    LCDSPSettings currentCoreSettings_{};
 
     double currentSampleRate = 44100.0;
 

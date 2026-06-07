@@ -37,6 +37,9 @@ juce_add_plugin(LowEndCircuit
 
 juce_generate_juce_header(LowEndCircuit)
 
+# ─── Shared DSP Core ──────────────────────────────────────
+add_subdirectory(Source/Core)
+
 target_sources(LowEndCircuit
     PRIVATE
         Source/PluginEditor.cpp
@@ -54,6 +57,7 @@ target_link_libraries(LowEndCircuit
     PRIVATE
         juce::juce_audio_utils
         juce::juce_dsp
+        lowend_core
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
