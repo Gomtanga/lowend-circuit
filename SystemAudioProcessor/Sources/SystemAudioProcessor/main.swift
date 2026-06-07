@@ -1215,6 +1215,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var bodyValueLabel: NSTextField!
     private var outputValueLabel: NSTextField!
     private var modelPopup: NSPopUpButton!
+    private var presetButtons: [NSButton] = []
     private var spatialEnabledButton: NSButton!
     private var spatialStageView: SpatialStageView!
     private var listenerXField: NSTextField!
@@ -1426,28 +1427,21 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
 
     private func makePresetSection() -> NSView {
         let view = NSView(frame: .zero)
-        let buttons = [
+        presetButtons = [
             makeButton("IEM", action: #selector(applyIEMPreset)),
             makeButton("Gentle", action: #selector(applyGentlePreset)),
             makeButton("LowEnd", action: #selector(applyLowEndPreset)),
             makeButton("Deep", action: #selector(applyDeepPreset)),
             makeButton("Clear", action: #selector(applyClearPreset))
         ]
-        let tooltips = [
-            "민감한 이어폰용입니다. 낮은 포화와 충분한 헤드룸을 둡니다.",
-            "가볍게 저역만 보강합니다.",
-            "일반적인 추천 시작점입니다.",
-            "저역을 더 밀지만 IEM에서도 덜 거칠게 조정했습니다.",
-            "처리를 거의 끈 기준점입니다."
-        ]
 
         let gap: CGFloat = 10
         let width = (680.0 - gap * 4) / 5
-        for index in 0..<buttons.count {
-            buttons[index].frame = NSRect(x: CGFloat(index) * (width + gap), y: 0, width: width, height: 36)
-            buttons[index].toolTip = tooltips[index]
-            view.addSubview(buttons[index])
+        for index in 0..<presetButtons.count {
+            presetButtons[index].frame = NSRect(x: CGFloat(index) * (width + gap), y: 0, width: width, height: 36)
+            view.addSubview(presetButtons[index])
         }
+        configurePresetButtons()
 
         return view
     }
@@ -1649,7 +1643,69 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             outputSlider.toolTip = "HighExciter 모델은 dry 신호 보존을 위해 출력 게인을 적용하지 않습니다."
         }
 
+        configurePresetButtons()
         updateSliderLabels()
+    }
+
+    private struct ModelPreset {
+        let name: String
+        let primary: Double
+        let secondary: Double
+        let outputDb: Double?
+        let toolTip: String
+    }
+
+    private func presets(for model: Settings.DSPModel) -> [ModelPreset] {
+        switch model {
+        case .clean:
+            return []
+        case .circuit:
+            return [
+                ModelPreset(name: "IEM", primary: 30, secondary: 8, outputDb: -2.0,
+                            toolTip: "민감한 이어폰용입니다. 낮은 포화와 충분한 헤드룸을 둡니다."),
+                ModelPreset(name: "Gentle", primary: 22, secondary: 8, outputDb: -1.0,
+                            toolTip: "가볍게 저역만 보강합니다."),
+                ModelPreset(name: "LowEnd", primary: 42, secondary: 18, outputDb: -1.8,
+                            toolTip: "일반적인 저역 보강 시작점입니다."),
+                ModelPreset(name: "Deep", primary: 54, secondary: 22, outputDb: -2.8,
+                            toolTip: "서브 저역을 더 강조하고 출력 헤드룸을 확보합니다."),
+                ModelPreset(name: "Clear", primary: 0, secondary: 0, outputDb: 0,
+                            toolTip: "Circuit 파라미터를 0으로 되돌리는 기준점입니다.")
+            ]
+        case .highExciter:
+            return [
+                ModelPreset(name: "Soft", primary: 12, secondary: 4, outputDb: nil,
+                            toolTip: "고역 배음을 아주 약하게 더합니다."),
+                ModelPreset(name: "Air", primary: 22, secondary: 7, outputDb: nil,
+                            toolTip: "공기감과 초고역의 개방감을 가볍게 더합니다."),
+                ModelPreset(name: "Detail", primary: 35, secondary: 11, outputDb: nil,
+                            toolTip: "보컬과 악기의 미세한 고역 디테일을 강조합니다."),
+                ModelPreset(name: "Shimmer", primary: 50, secondary: 16, outputDb: nil,
+                            toolTip: "고역 배음 효과를 더 분명하게 들려줍니다."),
+                ModelPreset(name: "Off", primary: 0, secondary: 0, outputDb: nil,
+                            toolTip: "HighExciter 배음 처리를 끕니다.")
+            ]
+        }
+    }
+
+    private func configurePresetButtons() {
+        guard !presetButtons.isEmpty else { return }
+
+        let model = selectedDSPModel()
+        let modelPresets = presets(for: model)
+        for index in 0..<presetButtons.count {
+            let button = presetButtons[index]
+            guard index < modelPresets.count else {
+                button.title = "-"
+                button.isEnabled = false
+                button.toolTip = "Clean 모델은 완전한 bypass이므로 프리셋을 적용하지 않습니다."
+                continue
+            }
+
+            button.title = modelPresets[index].name
+            button.isEnabled = true
+            button.toolTip = modelPresets[index].toolTip
+        }
     }
 
     private func updateSliderLabels() {
@@ -1689,34 +1745,38 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     @objc private func applyIEMPreset() {
-        applyPreset(name: "IEM", intensity: 30, body: 8, outputDb: -2.0)
+        applyPreset(at: 0)
     }
 
     @objc private func applyGentlePreset() {
-        applyPreset(name: "Gentle", intensity: 22, body: 8, outputDb: -1.0)
+        applyPreset(at: 1)
     }
 
     @objc private func applyLowEndPreset() {
-        applyPreset(name: "LowEnd", intensity: 42, body: 18, outputDb: -1.8)
+        applyPreset(at: 2)
     }
 
     @objc private func applyDeepPreset() {
-        applyPreset(name: "Deep", intensity: 54, body: 22, outputDb: -2.8)
+        applyPreset(at: 3)
     }
 
     @objc private func applyClearPreset() {
-        applyPreset(name: "Clear", intensity: 0, body: 0, outputDb: 0)
+        applyPreset(at: 4)
     }
 
-    private func applyPreset(name: String,
-                             intensity: Double,
-                             body: Double,
-                             outputDb: Double) {
-        intensitySlider.doubleValue = intensity
-        bodySlider.doubleValue = body
-        outputSlider.doubleValue = outputDb
+    private func applyPreset(at index: Int) {
+        let model = selectedDSPModel()
+        let modelPresets = presets(for: model)
+        guard model != .clean, index >= 0, index < modelPresets.count else { return }
+
+        let preset = modelPresets[index]
+        intensitySlider.doubleValue = preset.primary
+        bodySlider.doubleValue = preset.secondary
+        if model == .circuit, let outputDb = preset.outputDb {
+            outputSlider.doubleValue = outputDb
+        }
         sliderChanged()
-        statusLabel.stringValue = "프리셋 적용: \(name)"
+        statusLabel.stringValue = "\(model.displayName) 프리셋 적용: \(preset.name)"
     }
 
     @objc private func startAllAudio() {

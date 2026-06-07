@@ -75,7 +75,7 @@ Windows builds do not include native whole-system or per-application capture.
 2. Move `LowEnd Native Audio.app` to Applications.
 3. Open the app and allow system-audio recording when macOS asks.
 4. Select `Circuit`, `HighExciter`, or `Clean`.
-5. Start with the `IEM` or `Gentle` preset.
+5. For Circuit, start with `IEM` or `Gentle`. For HighExciter, start with `Soft` or `Air`.
 6. Press **전체 시스템 적용** to process most system output.
 7. Press **중지** before changing audio hardware if output becomes silent.
 
@@ -113,7 +113,7 @@ An independent high-frequency harmonic model:
 - preserves the original dry signal
 - maps the two main sliders to `Exciter Drive` and `Wet Mix`
 
-## Presets
+## Circuit Presets
 
 | Preset | LowEnd | Body | Output |
 | --- | ---: | ---: | ---: |
@@ -127,6 +127,20 @@ Output trim is reduced on stronger presets to preserve headroom after bass
 boosting. These presets are **not loudness-matched**, so compare tonal changes
 carefully; apparent differences include both DSP and playback level. Presets
 do not change Spatial Stage settings.
+
+## HighExciter Presets
+
+| Preset | Exciter Drive | Wet Mix |
+| --- | ---: | ---: |
+| Soft | 0.12 | 0.04 |
+| Air | 0.22 | 0.07 |
+| Detail | 0.35 | 0.11 |
+| Shimmer | 0.50 | 0.16 |
+| Off | 0.00 | 0.00 |
+
+HighExciter presets only change `Exciter Drive` and `Wet Mix`. They never move
+or apply the Circuit `Output` control. The preset row is disabled in `Clean`
+because that model is a complete bypass.
 
 ## Spatial Stage
 

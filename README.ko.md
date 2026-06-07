@@ -76,7 +76,7 @@ Windows 빌드에는 전체 시스템 및 특정 앱 Native 캡처 기능이 포
 2. `LowEnd Native Audio.app`을 응용 프로그램 폴더로 옮깁니다.
 3. 앱을 실행하고 macOS가 요청하는 시스템 오디오 녹음 권한을 허용합니다.
 4. `Circuit`, `HighExciter`, `Clean` 중 모델을 선택합니다.
-5. 처음에는 `IEM` 또는 `Gentle` 프리셋을 권장합니다.
+5. Circuit은 `IEM` 또는 `Gentle`, HighExciter는 `Soft` 또는 `Air`부터 권장합니다.
 6. **전체 시스템 적용**을 눌러 대부분의 시스템 출력에 적용합니다.
 7. 출력 장치를 바꾸거나 소리가 나오지 않으면 먼저 **중지**를 누릅니다.
 
@@ -112,7 +112,7 @@ Circuit과 독립적인 고역 배음 모델입니다.
 - 원본 Dry 신호 유지
 - 두 메인 슬라이더를 `Exciter Drive`, `Wet Mix`로 전환
 
-## 프리셋
+## Circuit 프리셋
 
 | 프리셋 | LowEnd | Body | Output |
 | --- | ---: | ---: | ---: |
@@ -126,6 +126,20 @@ Circuit과 독립적인 고역 배음 모델입니다.
 현재 프리셋은 **동일 음량으로 보정된 비교가 아닙니다**. 프리셋을 비교할 때는
 DSP 차이와 재생 음량 차이가 함께 들릴 수 있다는 점에 주의하세요. 프리셋은
 Spatial Stage 설정을 변경하지 않습니다.
+
+## HighExciter 프리셋
+
+| 프리셋 | Exciter Drive | Wet Mix |
+| --- | ---: | ---: |
+| Soft | 0.12 | 0.04 |
+| Air | 0.22 | 0.07 |
+| Detail | 0.35 | 0.11 |
+| Shimmer | 0.50 | 0.16 |
+| Off | 0.00 | 0.00 |
+
+HighExciter 프리셋은 `Exciter Drive`와 `Wet Mix`만 변경합니다. Circuit의
+`Output` 슬라이더는 이동시키거나 적용하지 않습니다. `Clean`은 완전한 bypass
+모델이므로 프리셋 버튼이 비활성화됩니다.
 
 ## Spatial Stage
 
