@@ -21,6 +21,7 @@ WasapiPlayback::WasapiPlayback() {
 WasapiPlayback::~WasapiPlayback() {
     stop();
     if (dataReadyEvent_) CloseHandle(dataReadyEvent_);
+    if (renderEvent_) CloseHandle(renderEvent_);
     DeleteCriticalSection(&bufferLock_);
     delete[] ringBuffer_;
 }
@@ -74,6 +75,10 @@ bool WasapiPlayback::initialize() {
     hr = audioClient_->GetService(IID_PPV_ARGS(&renderClient_));
     if (FAILED(hr)) { fprintf(stderr, "GetService(IAudioRenderClient) failed: 0x%08lx\n", hr); return false; }
 
+    // Create event for render client buffer-ready notifications
+    renderEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!renderEvent_) { fprintf(stderr, "CreateEvent for render failed\n"); return false; }
+
     hr = audioClient_->SetEventHandle(renderEvent_);
     if (FAILED(hr)) { fprintf(stderr, "SetEventHandle failed: 0x%08lx\n", hr); return false; }
 
@@ -124,6 +129,7 @@ void WasapiPlayback::stop() {
     if (audioClient_)  { audioClient_->Release();  audioClient_ = nullptr; }
     if (device_)       { device_->Release();       device_ = nullptr; }
     if (enumerator_)   { enumerator_->Release();   enumerator_ = nullptr; }
+    if (renderEvent_)  { CloseHandle(renderEvent_);  renderEvent_ = nullptr; }
     if (comInitialized_) { CoUninitialize(); comInitialized_ = false; }
     initialized_ = false;
     fprintf(stderr, "[playback] Stopped.\n");
