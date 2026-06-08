@@ -51,8 +51,12 @@ bool WasapiPlayback::initialize() {
     fprintf(stderr, "[playback] Mix format: %lu Hz, %lu channels, %hu bits\n",
             sampleRate_, channels_, mixFormat->wBitsPerSample);
 
-    // Shared mode, polling-based (no EVENTCALLBACK for reliable cross-system compat)
-    hr = audioClient_->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 0, 0, mixFormat, nullptr);
+    // Shared mode, polling-based — use device's default period
+    REFERENCE_TIME defaultPeriod = 0;
+    if (FAILED(audioClient_->GetDevicePeriod(&defaultPeriod, nullptr))) {
+        defaultPeriod = 100000; // fallback: 10ms
+    }
+    hr = audioClient_->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, defaultPeriod, 0, mixFormat, nullptr);
     CoTaskMemFree(mixFormat);
 
     if (FAILED(hr)) { fprintf(stderr, "[playback] IAudioClient Init failed: 0x%08lx\n", hr); return false; }
