@@ -59,11 +59,10 @@ bool WasapiPlayback::initialize() {
     fprintf(stderr, "[playback] Mix format: %lu Hz, %lu channels, %hu bits\n",
             sampleRate_, channels_, mixFormat->wBitsPerSample);
 
-    // Event-driven shared mode, 100 ms buffer
-    REFERENCE_TIME bufferDuration = 100 * 10000;
+    // Event-driven shared mode — use 0 buffer duration (system decides)
     hr = audioClient_->Initialize(AUDCLNT_SHAREMODE_SHARED,
                                   AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                                  bufferDuration, 0, mixFormat, nullptr);
+                                  0, 0, mixFormat, nullptr);
     CoTaskMemFree(mixFormat);
 
     if (FAILED(hr)) { fprintf(stderr, "IAudioClient Init (render) failed: 0x%08lx\n", hr); return false; }

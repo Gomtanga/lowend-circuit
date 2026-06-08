@@ -75,13 +75,11 @@ bool WasapiLoopbackCapture::initialize() {
     fprintf(stderr, "Mix format: %lu Hz, %lu channels, %hu bits\n",
             sampleRate_, channels_, mixFormat->wBitsPerSample);
 
-    // 6. Open the audio client in loopback mode
-    // Use a buffer duration of 100 ms.
-    REFERENCE_TIME bufferDuration = 100 * 10000;  // 100 ms in 100-ns units
+    // 6. Open the audio client in loopback mode (shared — 0 buffer duration)
     hr = audioClient_->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_LOOPBACK,
-        bufferDuration, 0, mixFormat, nullptr);
+        0, 0, mixFormat, nullptr);
     CoTaskMemFree(mixFormat);
     mixFormat = nullptr;
 
