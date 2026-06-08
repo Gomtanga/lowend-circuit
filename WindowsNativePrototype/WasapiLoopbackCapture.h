@@ -36,7 +36,6 @@ private:
     uint32_t sampleRate_ = 0;
     uint32_t channels_ = 0;
 
-    HANDLE captureEvent_ = nullptr;
     HANDLE captureThread_ = nullptr;
     volatile bool running_ = false;
 

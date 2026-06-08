@@ -98,19 +98,7 @@ bool WasapiLoopbackCapture::initialize() {
         return false;
     }
 
-    // 8. Create the capture-ready event
-    captureEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!captureEvent_) {
-        fprintf(stderr, "CreateEvent failed\n");
-        return false;
-    }
-
-    hr = audioClient_->SetEventHandle(captureEvent_);
-    if (FAILED(hr)) {
-        fprintf(stderr, "SetEventHandle failed: 0x%08lx\n", hr);
-        return false;
-    }
-
+    // 8. Start capture thread (polling-based — no event-driven mode for loopback)
     initialized_ = true;
     fprintf(stderr, "WASAPI loopback capture initialised successfully.\n");
     return true;
@@ -147,7 +135,6 @@ bool WasapiLoopbackCapture::start() {
 void WasapiLoopbackCapture::stop() {
     if (running_) {
         running_ = false;
-        if (captureEvent_) SetEvent(captureEvent_);  // wake up thread to exit
         if (captureThread_) {
             WaitForSingleObject(captureThread_, 3000);
             CloseHandle(captureThread_);
@@ -157,7 +144,6 @@ void WasapiLoopbackCapture::stop() {
 
     if (audioClient_) audioClient_->Stop();
 
-    if (captureEvent_) { CloseHandle(captureEvent_); captureEvent_ = nullptr; }
     if (captureClient_) { captureClient_->Release(); captureClient_ = nullptr; }
     if (audioClient_)  { audioClient_->Release();  audioClient_ = nullptr; }
     if (device_)       { device_->Release();       device_ = nullptr; }
@@ -173,20 +159,16 @@ void WasapiLoopbackCapture::stop() {
 DWORD WINAPI WasapiLoopbackCapture::captureThreadProc(LPVOID param) {
     WasapiLoopbackCapture* self = static_cast<WasapiLoopbackCapture*>(param);
 
-    // Use MMCSS to reduce glitching on the capture thread
     DWORD mmcssTaskIndex = 0;
     HANDLE mmcssHandle = AvSetMmThreadCharacteristicsW(L"Audio", &mmcssTaskIndex);
 
     uint64_t totalFrames = 0;
 
+    // Poll for data every 10ms (no event-driven mode — loopback capture
+    // doesn't reliably support SetEventHandle with AUDCLNT_STREAMFLAGS_LOOPBACK).
     while (self->running_) {
-        // Wait for buffer ready (100 ms timeout for graceful exit)
-        DWORD waitResult = WaitForSingleObject(self->captureEvent_, 100);
-        if (!self->running_) break;
-        if (waitResult != WAIT_OBJECT_0) continue;
-
-        // Process all available packets
         self->processCapturedData(totalFrames);
+        Sleep(10);
     }
 
     if (mmcssHandle) AvRevertMmThreadCharacteristics(mmcssHandle);
