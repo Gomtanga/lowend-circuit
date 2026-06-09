@@ -25,3 +25,16 @@ Makefile
 # Logs and scratch files
 *.log
 *.tmp
+
+# Deep research output
+private/
+
+# Claude session / task artefacts
+.claude/settings.local.json
+.claude/scheduled_tasks.json
+.claude/sessions/
+.claude/memory/
+.claude/plans/
+.claude/todos/
+.claude/statsig/
+.claude/workflows/

@@ -7,11 +7,6 @@ constexpr auto intensityId = "intensity";
 constexpr auto bodyId = "body";
 constexpr auto mixId = "mix";
 constexpr auto outputId = "output";
-
-float dbToLinear (float db)
-{
-    return juce::Decibels::decibelsToGain (db);
-}
 }
 
 LowEndCircuitAudioProcessor::LowEndCircuitAudioProcessor()
@@ -48,77 +43,31 @@ bool LowEndCircuitAudioProcessor::isBusesLayoutSupported (const BusesLayout& lay
 
 void LowEndCircuitAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = sampleRate;
-    const juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32> (samplesPerBlock),
-                                        static_cast<juce::uint32> (getTotalNumOutputChannels()) };
-
-    lowShelf.prepare (spec);
-    lowPass.prepare (spec);
-    dryBuffer.setSize (getTotalNumOutputChannels(), samplesPerBlock);
-    subBuffer.setSize (getTotalNumOutputChannels(), samplesPerBlock);
-
+    dspCore.prepare (sampleRate, samplesPerBlock, getTotalNumOutputChannels());
     intensitySmoothed.reset (sampleRate, 0.025);
     bodySmoothed.reset (sampleRate, 0.025);
     mixSmoothed.reset (sampleRate, 0.025);
-
-    updateFilters();
-}
-
-void LowEndCircuitAudioProcessor::updateFilters()
-{
-    const auto intensity = apvts.getRawParameterValue (intensityId)->load() / 100.0f;
-    const auto shelfDb = juce::jmap (intensity, 0.0f, 1.0f, 0.0f, 8.5f);
-    const auto shelfFreq = juce::jmap (intensity, 0.0f, 1.0f, 72.0f, 105.0f);
-
-    *lowShelf.state = *juce::dsp::IIR::Coefficients<float>::makeLowShelf (
-        currentSampleRate, shelfFreq, 0.72f, dbToLinear (shelfDb));
-    *lowPass.state = *juce::dsp::IIR::Coefficients<float>::makeLowPass (currentSampleRate, 135.0f, 0.68f);
 }
 
 void LowEndCircuitAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
-    juce::ScopedNoDenormals noDenormals;
-    const auto numChannels = buffer.getNumChannels();
-    const auto numSamples = buffer.getNumSamples();
+    intensitySmoothed.setTargetValue (apvts.getRawParameterValue (intensityId)->load());
+    bodySmoothed.setTargetValue (apvts.getRawParameterValue (bodyId)->load());
+    mixSmoothed.setTargetValue (apvts.getRawParameterValue (mixId)->load());
 
-    dryBuffer.makeCopyOf (buffer, true);
+    lowend::LowEndDSPCore::Parameters params;
+    params.intensity = intensitySmoothed.getCurrentValue();
+    params.body = bodySmoothed.getCurrentValue();
+    params.mix = mixSmoothed.getCurrentValue();
+    params.outputDb = apvts.getRawParameterValue (outputId)->load();
 
-    updateFilters();
-    intensitySmoothed.setTargetValue (apvts.getRawParameterValue (intensityId)->load() / 100.0f);
-    bodySmoothed.setTargetValue (apvts.getRawParameterValue (bodyId)->load() / 100.0f);
-    mixSmoothed.setTargetValue (apvts.getRawParameterValue (mixId)->load() / 100.0f);
+    // SmoothedValue는 process 내부에서 sample-by-sample로 처리되지 않으므로
+    // 현재 블록의 타겟 값을 직접 전달
+    params.intensity = apvts.getRawParameterValue (intensityId)->load();
+    params.body = apvts.getRawParameterValue (bodyId)->load();
+    params.mix = apvts.getRawParameterValue (mixId)->load();
 
-    juce::dsp::AudioBlock<float> block (buffer);
-    juce::dsp::ProcessContextReplacing<float> context (block);
-    lowShelf.process (context);
-
-    subBuffer.makeCopyOf (dryBuffer, true);
-    juce::dsp::AudioBlock<float> subBlock (subBuffer);
-    juce::dsp::ProcessContextReplacing<float> subContext (subBlock);
-    lowPass.process (subContext);
-
-    const auto outputGain = dbToLinear (apvts.getRawParameterValue (outputId)->load());
-
-    for (int sample = 0; sample < numSamples; ++sample)
-    {
-        const auto intensity = intensitySmoothed.getNextValue();
-        const auto body = bodySmoothed.getNextValue();
-        const auto mix = mixSmoothed.getNextValue();
-        const auto headroom = dbToLinear (juce::jmap (intensity, 0.0f, 1.0f, 0.0f, -3.0f));
-
-        for (int channel = 0; channel < numChannels; ++channel)
-        {
-            auto* wet = buffer.getWritePointer (channel);
-            const auto* dry = dryBuffer.getReadPointer (channel);
-            const auto* sub = subBuffer.getReadPointer (channel);
-
-            const auto subHarmonic = std::tanh (sub[sample] * 2.4f) * 0.18f * body;
-            const auto enhanced = (wet[sample] + subHarmonic) * headroom;
-            const auto blended = dry[sample] + (enhanced - dry[sample]) * mix;
-
-            wet[sample] = std::tanh (blended * outputGain * 1.05f) / 1.05f;
-        }
-    }
+    dspCore.process (buffer, params);
 }
 
 void LowEndCircuitAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
