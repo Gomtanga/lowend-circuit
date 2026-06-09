@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
+# ── JUCE ──────────────────────────────────────────────────────────────────────
 set(JUCE_GIT_TAG 8.0.13 CACHE STRING "JUCE git tag to use")
 FetchContent_Declare(
     JUCE
@@ -16,6 +17,33 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(JUCE)
 
+# ── CLI11 ─────────────────────────────────────────────────────────────────────
+set(CLI11_GIT_TAG v2.6.2 CACHE STRING "CLI11 git tag to use")
+FetchContent_Declare(
+    CLI11
+    GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+    GIT_TAG ${CLI11_GIT_TAG}
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(CLI11)
+
+# ── Shared DSP core ───────────────────────────────────────────────────────────
+add_library(lowend_dsp_core STATIC
+    Source/DSP/LowEndDSPCore.cpp
+)
+target_include_directories(lowend_dsp_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Source)
+target_link_libraries(lowend_dsp_core
+    PUBLIC
+        juce::juce_dsp
+)
+target_compile_definitions(lowend_dsp_core
+    PUBLIC
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0
+)
+
+# ── Plugin (VST3 / AU / Standalone) ──────────────────────────────────────────
 set(LOWEND_FORMATS VST3 Standalone)
 if(APPLE)
     list(APPEND LOWEND_FORMATS AU)
@@ -43,19 +71,42 @@ target_sources(LowEndCircuit
         Source/PluginProcessor.cpp
 )
 
-target_compile_definitions(LowEndCircuit
-    PUBLIC
-        JUCE_WEB_BROWSER=0
-        JUCE_USE_CURL=0
-        JUCE_VST3_CAN_REPLACE_VST2=0
-)
-
 target_link_libraries(LowEndCircuit
     PRIVATE
+        lowend_dsp_core
         juce::juce_audio_utils
-        juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
+)
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+juce_add_console_app(LowEndCircuitCLI
+    COMPANY_NAME "Codex Audio Lab"
+    PRODUCT_NAME "lowend-circuit"
+)
+
+target_sources(LowEndCircuitCLI
+    PRIVATE
+        Source/CLI/Main.cpp
+        Source/CLI/CLICommands.cpp
+)
+
+target_link_libraries(LowEndCircuitCLI
+    PRIVATE
+        lowend_dsp_core
+        CLI11::CLI11
+        juce::juce_audio_utils
+    PUBLIC
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_lto_flags
+        juce::juce_recommended_warning_flags
+)
+
+target_compile_definitions(LowEndCircuitCLI
+    PUBLIC
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0
 )

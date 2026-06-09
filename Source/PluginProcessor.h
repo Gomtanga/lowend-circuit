@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "DSP/LowEndDSPCore.h"
 
 class LowEndCircuitAudioProcessor final : public juce::AudioProcessor
 {
@@ -35,20 +36,11 @@ public:
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
-    void updateFilters();
 
-    using Filter = juce::dsp::IIR::Filter<float>;
-    using Coefficients = juce::dsp::IIR::Coefficients<float>;
-
-    juce::AudioBuffer<float> dryBuffer;
-    juce::AudioBuffer<float> subBuffer;
-    juce::dsp::ProcessorDuplicator<Filter, Coefficients> lowShelf;
-    juce::dsp::ProcessorDuplicator<Filter, Coefficients> lowPass;
+    lowend::LowEndDSPCore dspCore;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> intensitySmoothed;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> bodySmoothed;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> mixSmoothed;
-
-    double currentSampleRate = 44100.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LowEndCircuitAudioProcessor)
 };
