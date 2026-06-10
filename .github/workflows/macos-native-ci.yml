@@ -16,7 +16,18 @@ jobs:
         run: swift run --package-path SystemAudioProcessor LowEndSupportChecks
 
       - name: Run Swift and C++ DSP parity checks
-        run: swift run --package-path SystemAudioProcessor SystemAudioProcessor --self-test
+        shell: bash
+        run: |
+          set +e
+          output="$(swift run --package-path SystemAudioProcessor SystemAudioProcessor --self-test 2>&1)"
+          status=$?
+          printf '%s\n' "$output"
+          if [[ $status -ne 0 ]]; then
+            message="${output//$'\n'/%0A}"
+            message="${message//$'\r'/%0D}"
+            echo "::error title=DSP parity checks failed::$message"
+            exit "$status"
+          fi
 
       - name: Build Native app in Debug
         run: swift build --package-path SystemAudioProcessor -c debug
