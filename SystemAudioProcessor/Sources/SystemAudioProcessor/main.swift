@@ -1202,6 +1202,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var window: NSWindow!
     private var statusLabel: NSTextField!
     private var formatLabel: NSTextField!
+    private var oversamplingLabel: NSTextField!
     private var rightPanelView: NSHostingView<AnyView>!
     private var bundleField: NSTextField!
     private var appsView: NSTextView!
@@ -1228,6 +1229,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private let dynamicsMeterModel = DynamicsMeterModel()
     private let spectrumModel = SpectrumModel()
     private let spatialControlModel = SpatialControlModel()
+    private var currentProcessingSampleRate: Double?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NotificationCenter.default.addObserver(
@@ -1283,6 +1285,13 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         formatLabel.frame = NSRect(x: 740, y: 704, width: 430, height: 24)
         formatLabel.toolTip = "앱 내부 처리 포맷입니다. 재생 중인 음원의 원본 bit depth나 파일 샘플레이트를 표시하는 값은 아닙니다."
         content.addSubview(formatLabel)
+
+        oversamplingLabel = makeLabel("", size: 12, weight: .semibold)
+        oversamplingLabel.alignment = .right
+        oversamplingLabel.frame = NSRect(x: 740, y: 680, width: 430, height: 20)
+        oversamplingLabel.toolTip = "전체 음원을 업스케일링하는 기능이 아니라 HighExciter의 비선형 배음 생성 구간에만 적용되는 내부 오버샘플링 상태입니다."
+        oversamplingLabel.isHidden = true
+        content.addSubview(oversamplingLabel)
 
         rightPanelView = NSHostingView(rootView: AnyView(
             RightPanelContainerView(
@@ -1563,6 +1572,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
 
     @objc private func sliderChanged() {
         updateSliderLabels()
+        updateOversamplingIndicator()
         processor?.updateDSP(intensity: Float(intensitySlider.doubleValue),
                              body: Float(bodySlider.doubleValue),
                              outputDb: Float(outputSlider.doubleValue),
@@ -1725,6 +1735,38 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         }
     }
 
+    private func updateOversamplingIndicator() {
+        guard oversamplingLabel != nil else { return }
+        guard selectedDSPModel() == .highExciter else {
+            oversamplingLabel.isHidden = true
+            return
+        }
+
+        oversamplingLabel.isHidden = false
+        let driveActive = intensitySlider.doubleValue >= 0.01
+        let wetActive = bodySlider.doubleValue >= 0.01
+        guard driveActive && wetActive else {
+            oversamplingLabel.stringValue = "HighExciter | Oversampling idle"
+            oversamplingLabel.textColor = NSColor(calibratedRed: 0.55, green: 0.58, blue: 0.63, alpha: 1)
+            return
+        }
+
+        guard let sampleRate = currentProcessingSampleRate else {
+            oversamplingLabel.stringValue = "HighExciter | Oversampling format waiting"
+            oversamplingLabel.textColor = NSColor(calibratedRed: 0.55, green: 0.74, blue: 0.82, alpha: 1)
+            return
+        }
+
+        let factor = DSPPrecompute.makeExciterOversampleFactor(sampleRate: Float(sampleRate))
+        let internalRate = sampleRate * Double(factor)
+        oversamplingLabel.stringValue = String(
+            format: "HighExciter | %ux OS | %.1f kHz internal",
+            factor,
+            internalRate / 1000
+        )
+        oversamplingLabel.textColor = NSColor(calibratedRed: 0.31, green: 0.78, blue: 0.94, alpha: 1)
+    }
+
     private func spatialSettingsFromControls() -> SpatialSettings {
         spatialControlModel.settings
     }
@@ -1847,6 +1889,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         if formatLabel != nil {
             formatLabel.stringValue = "처리 포맷 대기 중"
         }
+        currentProcessingSampleRate = nil
+        updateOversamplingIndicator()
     }
 
     @objc private func refreshApps() {
@@ -1867,8 +1911,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         formatLabel?.stringValue = text
 
         if let sampleRate = notification.userInfo?[AudioFormatNotifications.processingSampleRateKey] as? Double {
+            currentProcessingSampleRate = sampleRate
             spectrumAnalyzer?.updateSampleRate(Float(sampleRate))
         }
+        updateOversamplingIndicator()
     }
 
 }
@@ -2553,7 +2599,7 @@ private final class HighExciterDSP {
 
         func process(_ input: Float) -> Float {
             let dry = input.isFinite ? input : 0
-            if wetMix < 0.0001 {
+            if wetMix < 0.0001 || drive < 0.0001 {
                 return dry
             }
 

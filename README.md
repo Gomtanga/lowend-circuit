@@ -142,6 +142,8 @@ An independent high-frequency harmonic model:
   2x for 88.2/96 kHz, and 1x for 176.4/192 kHz or higher
 - applies fourth-order anti-imaging and anti-aliasing filters around the
   nonlinear stage
+- shows the active oversampling factor and internal nonlinear processing rate
+  below the format indicator
 - applies a fast polynomial harmonic generator
 - preserves the original dry signal
 - maps the two main sliders to `Exciter Drive` and `Wet Mix`
