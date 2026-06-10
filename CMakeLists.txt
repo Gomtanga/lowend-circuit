@@ -27,6 +27,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(CLI11)
 
+# ── Portable shared DSP core ─────────────────────────────────────────────────
+option(LOWEND_JUCE_SHARED_CORE "Use the portable Core Circuit path in JUCE" OFF)
+add_subdirectory(Source/Core)
+
 # ── Shared DSP core ───────────────────────────────────────────────────────────
 add_library(lowend_dsp_core STATIC
     Source/DSP/LowEndDSPCore.cpp
@@ -74,6 +78,7 @@ target_sources(LowEndCircuit
 target_link_libraries(LowEndCircuit
     PRIVATE
         lowend_dsp_core
+        lowend_core
         juce::juce_audio_utils
     PUBLIC
         juce::juce_recommended_config_flags
@@ -81,9 +86,15 @@ target_link_libraries(LowEndCircuit
         juce::juce_recommended_warning_flags
 )
 
+target_compile_definitions(LowEndCircuit
+    PRIVATE
+        LOWEND_JUCE_SHARED_CORE=$<BOOL:${LOWEND_JUCE_SHARED_CORE}>
+)
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 juce_add_console_app(LowEndCircuitCLI
     COMPANY_NAME "Codex Audio Lab"
+    BUNDLE_ID "com.codexaudiolab.lowendcircuit.cli"
     PRODUCT_NAME "lowend-circuit"
 )
 

@@ -1,4 +1,4 @@
-#include <Core/CircuitBass.h>
+#include "../include/Core/CircuitBass.h"
 
 namespace lowend {
 

@@ -13,115 +13,7 @@ import MetalKit
 import SceneKit
 import SwiftUI
 
-private struct SpatialSettings {
-    var enabled: Bool = true
-    var listenerX: Float = 0.0
-    var listenerZ: Float = 0.0
-    var speakerWidth: Float = 1.65
-    var amount: Float = 35.0
-}
-
-private enum DSPModelID {
-    static let clean: UInt32 = 0
-    static let circuit: UInt32 = 1
-    static let highExciter: UInt32 = 2
-}
-
-private struct Settings {
-    var mode: Mode = .all
-    var intensity: Float = 55.0
-    var body: Float = 30.0
-    var outputDb: Float = -1.5
-    var dspModel: DSPModel = .circuit
-    var spatial: SpatialSettings = SpatialSettings()
-
-    enum Mode {
-        case all
-        case bundleIDs([String])
-        case listApps
-    }
-
-    enum DSPModel: String {
-        case clean
-        case circuit
-        case highExciter = "highexciter"
-
-        var controlID: UInt32 {
-            switch self {
-            case .clean:
-                return DSPModelID.clean
-            case .circuit:
-                return DSPModelID.circuit
-            case .highExciter:
-                return DSPModelID.highExciter
-            }
-        }
-
-        var displayName: String {
-            switch self {
-            case .clean:
-                return "Clean"
-            case .circuit:
-                return "Circuit"
-            case .highExciter:
-                return "HighExciter"
-            }
-        }
-
-        static func fromArgument(_ value: String) -> DSPModel? {
-            let normalized = value
-                .lowercased()
-                .replacingOccurrences(of: "-", with: "")
-                .replacingOccurrences(of: "_", with: "")
-                .replacingOccurrences(of: " ", with: "")
-            switch normalized {
-            case "clean":
-                return .clean
-            case "circuit":
-                return .circuit
-            case "highexciter", "exciter":
-                return .highExciter
-            default:
-                return nil
-            }
-        }
-    }
-}
-
-private struct AudioFormatStatus {
-    let sampleRate: Double
-    let tapSampleRate: Double
-    let processingSampleRate: Double
-    let sampleFormat: String
-    let isSampleRateMatched: Bool
-
-    var indicatorText: String {
-        let tapMatchesEngine = abs(tapSampleRate - processingSampleRate) <= 0.5
-        if isSampleRateMatched && tapMatchesEngine {
-            return "Shared Tap/Engine/DAC \(Self.rateText(processingSampleRate)) / \(sampleFormat)"
-        }
-        return "Tap \(Self.rateText(tapSampleRate)) / Engine \(Self.rateText(processingSampleRate)) / DAC \(Self.rateText(sampleRate))"
-    }
-
-    private static func rateText(_ sampleRate: Double) -> String {
-        if sampleRate >= 1000 {
-            return String(format: "%.1f kHz", sampleRate / 1000)
-        }
-        return String(format: "%.0f Hz", sampleRate)
-    }
-}
-
-private enum AudioFormatNotifications {
-    static let didChange = Notification.Name("LowEndAudioHardwareFormatDidChange")
-    static let sampleRateKey = "sampleRate"
-    static let tapSampleRateKey = "tapSampleRate"
-    static let processingSampleRateKey = "processingSampleRate"
-    static let sampleFormatKey = "sampleFormat"
-    static let isSampleRateMatchedKey = "isSampleRateMatched"
-    static let indicatorTextKey = "indicatorText"
-}
-
-private enum AppError: Error, CustomStringConvertible {
+enum AppError: Error, CustomStringConvertible {
     case message(String)
     case osStatus(String, OSStatus)
 
@@ -738,6 +630,8 @@ private func parseArguments() throws -> Settings {
             settings.spatial.amount = number
         case "--list-apps":
             settings.mode = .listApps
+        case "--self-test":
+            settings.mode = .selfTest
         case "--help", "-h":
             printUsageAndExit()
         default:
@@ -1995,6 +1889,7 @@ private func printUsageAndExit() -> Never {
       SystemAudioProcessor --all
       SystemAudioProcessor --bundle-id com.spotify.client
       SystemAudioProcessor --list-apps
+      SystemAudioProcessor --self-test
 
     Options:
       --intensity 0...100
@@ -2121,7 +2016,7 @@ private final class LockFreeControlEventQueue {
     }
 }
 
-private enum DSPPrecompute {
+enum DSPPrecompute {
     static func makeDSPSettings(sampleRate: Float,
                                 intensity: Float,
                                 body: Float,
@@ -2477,7 +2372,7 @@ private final class RcLowPass {
     }
 }
 
-private final class VirtualCircuitBassDSP: BassProcessor {
+final class VirtualCircuitBassDSP: BassProcessor {
     private final class Channel {
         private let bassPole: RcLowPass
         private let subPole: RcLowPass
@@ -2605,7 +2500,7 @@ private final class VirtualCircuitBassDSP: BassProcessor {
     }
 }
 
-private final class HighExciterDSP {
+final class HighExciterDSP {
     private final class Channel {
         private var highPass = Biquad()
         private var stage1 = Oversampling2xStage()
@@ -3444,6 +3339,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 .joined(separator: ", ")
         case .listApps:
             throw AppError.message("Cannot start capture while listing apps.")
+        case .selfTest:
+            throw AppError.message("Cannot start capture while running self-tests.")
         }
 
         description.name = "LowEnd Native System Tap"
@@ -3813,6 +3710,10 @@ do {
 
     if case .listApps = settings.mode {
         listRunningApps()
+        exit(0)
+    }
+    if case .selfTest = settings.mode {
+        try runDSPParityChecks()
         exit(0)
     }
 

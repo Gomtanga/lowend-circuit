@@ -29,12 +29,38 @@ public:
     void reset();
 
 private:
+    struct OversamplingLowPass {
+        Biquad section1;
+        Biquad section2;
+
+        void update(const LCBiquadCoefficients& first,
+                    const LCBiquadCoefficients& second);
+        float process(float input);
+        void reset();
+    };
+
+    struct Oversampling2xStage {
+        OversamplingLowPass interpolationFilter;
+        OversamplingLowPass decimationFilter;
+
+        void update(const LCBiquadCoefficients& first,
+                    const LCBiquadCoefficients& second);
+        void upsample(float input, float& first, float& second);
+        float downsample(float first, float second);
+        void reset();
+    };
+
     struct Channel {
         Biquad highPass;       // ~11 kHz high-pass
+        Oversampling2xStage stage1;
+        Oversampling2xStage stage2;
         float drive = 0.0f;   // exciter drive gain
         float wetMix = 0.0f;  // wet blend amount (0 = bypass)
+        uint32_t oversampleFactor = 1;
 
         float processSample(float input);
+        float makeHarmonic(float input) const;
+        void reset();
         static float fastClamp(float value);
     };
 

@@ -17,6 +17,7 @@ add_library(lowend_core STATIC
     src/Core.cpp
     src/CircuitBass.cpp
     src/HighExciter.cpp
+    src/Processor.cpp
 )
 
 target_include_directories(lowend_core
@@ -28,9 +29,9 @@ target_include_directories(lowend_core
 target_compile_features(lowend_core PUBLIC cxx_std_17)
 
 # ─── Tests (optional) ───────────────────────────────────────────────
-option(BUILD_TESTING "Build Core tests" OFF)
+option(LOWEND_CORE_BUILD_TESTING "Build Core tests" OFF)
 
-if(BUILD_TESTING)
+if(LOWEND_CORE_BUILD_TESTING)
     enable_testing()
     add_subdirectory(test)
 endif()

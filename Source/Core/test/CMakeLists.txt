@@ -3,6 +3,7 @@ set(TEST_SOURCES
     test_precompute.cpp
     test_circuit_bass.cpp
     test_high_exciter.cpp
+    test_processor.cpp
 )
 
 foreach(TEST_SRC ${TEST_SOURCES})

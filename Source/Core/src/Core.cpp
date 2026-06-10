@@ -1,4 +1,4 @@
-#include <Core/Core.h>
+#include "../include/Core/Core.h"
 
 // ─────────────────────────────────────────────
 // Biquad — Direct Form I
@@ -126,9 +126,17 @@ LCDSPSettings DSPPrecompute::makeDSPSettings(float sampleRate,
     float transformerAsymmetry = 0.002f + normalIntensity * 0.008f + normalBody * 0.004f;
     float transformerBiasOffset = makePolynomialSoftClip(transformerAsymmetry);
     float transformerMakeupGain = 1.0f / std::fmax(1.0f + (transformerDrive - 1.0f) * 0.35f, 0.001f);
-    float exciterFrequency = std::fmin(std::fmax(11000.0f, sampleRate * 0.20f), sampleRate * 0.45f);
+    float exciterFrequency = std::fmin(11000.0f, sampleRate * 0.45f);
     float exciterDrive = (dspModel == 2) ? normalIntensity : 0.0f;   // 2 = HighExciter
     float exciterWetMix = (dspModel == 2) ? normalBody : 0.0f;
+    uint32_t exciterOversampleFactor = sampleRate <= 48000.5f ? 4u
+                                            : sampleRate <= 96000.5f ? 2u
+                                                                    : 1u;
+    float exciterLowPassFrequency = std::fmin(20000.0f, sampleRate * 0.40f);
+    float exciterStage1Rate = sampleRate * 2.0f;
+    float exciterStage2Rate = sampleRate * 4.0f;
+    constexpr float butterworthQ1 = 0.5411961f;
+    constexpr float butterworthQ2 = 1.306563f;
 
     LCDSPSettings s{};
     s.intensity = normalIntensity;
@@ -154,6 +162,15 @@ LCDSPSettings DSPPrecompute::makeDSPSettings(float sampleRate,
     s.exciterHighPass = Biquad::makeHighPass(sampleRate, exciterFrequency, 0.707f);
     s.exciterDrive = exciterDrive;
     s.exciterWetMix = exciterWetMix;
+    s.exciterOversampleFactor = exciterOversampleFactor;
+    s.exciterStage1LowPass1 = Biquad::makeLowPass(
+        exciterStage1Rate, exciterLowPassFrequency, butterworthQ1);
+    s.exciterStage1LowPass2 = Biquad::makeLowPass(
+        exciterStage1Rate, exciterLowPassFrequency, butterworthQ2);
+    s.exciterStage2LowPass1 = Biquad::makeLowPass(
+        exciterStage2Rate, exciterLowPassFrequency, butterworthQ1);
+    s.exciterStage2LowPass2 = Biquad::makeLowPass(
+        exciterStage2Rate, exciterLowPassFrequency, butterworthQ2);
     return s;
 }
 

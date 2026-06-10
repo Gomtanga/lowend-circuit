@@ -506,7 +506,7 @@ Core Phase 1의 가장 중요한 산출물 중 하나는 테스트입니다. 테
 
 ```bash
 # macOS or Windows from Core/
-cmake -S . -B build -DBUILD_TESTING=ON
+cmake -S Source/Core -B build/core -DLOWEND_CORE_BUILD_TESTING=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```

@@ -39,6 +39,14 @@
 
 namespace lowend {
 
+enum class DSPModel : uint32_t {
+    clean = 0,
+    circuit = 1,
+    highExciter = 2
+};
+
+using DSPSettings = LCDSPSettings;
+
 // ======================================================================
 // Biquad — Direct Form I biquad filter
 //

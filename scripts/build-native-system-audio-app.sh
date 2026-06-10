@@ -15,6 +15,16 @@ swift build \
     -c release \
     --scratch-path "$BUILD_DIR/.build"
 
+swift run \
+    --package-path "$PACKAGE_DIR" \
+    --scratch-path "$BUILD_DIR/.build" \
+    LowEndSupportChecks
+
+swift run \
+    --package-path "$PACKAGE_DIR" \
+    --scratch-path "$BUILD_DIR/.build" \
+    SystemAudioProcessor --self-test
+
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BUILD_DIR/.build/release/SystemAudioProcessor" "$MACOS_DIR/LowEnd Native Audio"
@@ -40,9 +50,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.2.2</string>
+    <string>0.2.3</string>
     <key>CFBundleVersion</key>
-    <string>4</string>
+    <string>5</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.4</string>
     <key>NSAudioCaptureUsageDescription</key>

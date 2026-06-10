@@ -15,9 +15,15 @@ let package = Package(
             name: "AudioRingBufferC",
             path: "Sources/AudioRingBufferC"
         ),
+        .target(
+            name: "LowEndDSPCoreC",
+            dependencies: ["AudioRingBufferC"],
+            path: "Sources/LowEndDSPCoreC",
+            publicHeadersPath: "include"
+        ),
         .executableTarget(
             name: "SystemAudioProcessor",
-            dependencies: ["AudioRingBufferC", "LowEndSupport"],
+            dependencies: ["AudioRingBufferC", "LowEndDSPCoreC", "LowEndSupport"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),
@@ -29,7 +35,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "LowEndSupportChecks",
-            dependencies: ["LowEndSupport"],
+            dependencies: ["AudioRingBufferC", "LowEndDSPCoreC", "LowEndSupport"],
             path: "Tests/LowEndSupportChecks"
         )
     ]

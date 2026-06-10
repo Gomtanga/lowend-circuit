@@ -203,26 +203,33 @@ static void test_stability() {
 }
 
 // ============================================================
-// 9. Sample rate dependence
+// 9. Adaptive oversampling policy
 // ============================================================
 static void test_sample_rate_dependence() {
     auto s44 = lowend::DSPPrecompute::makeDSPSettings(
         44100.0f, 100.0f, 100.0f, 0.0f, 2);
     auto s96 = lowend::DSPPrecompute::makeDSPSettings(
         96000.0f, 100.0f, 100.0f, 0.0f, 2);
+    auto s192 = lowend::DSPPrecompute::makeDSPSettings(
+        192000.0f, 100.0f, 100.0f, 0.0f, 2);
 
-    lowend::HighExciter he44, he96;
+    TEST("44.1k uses 4x oversampling", s44.exciterOversampleFactor == 4);
+    TEST("96k uses 2x oversampling", s96.exciterOversampleFactor == 2);
+    TEST("192k uses 1x oversampling", s192.exciterOversampleFactor == 1);
+
+    lowend::HighExciter he44, he96, he192;
     he44.update(s44);
     he96.update(s96);
+    he192.update(s192);
 
-    // Compare peak output after one impulse (not settled state)
-    float l44, r44, l96, r96;
+    float l44, r44, l96, r96, l192, r192;
     he44.process(0.5f, 0.5f, l44, r44);
     he96.process(0.5f, 0.5f, l96, r96);
+    he192.process(0.5f, 0.5f, l192, r192);
 
-    // HP cutoffs differ (11kHz vs 19.2kHz), so impulse response differs
-    TEST("44.1k vs 96k impulse differ",
-         std::fabs(l44 - l96) > 0.001f);
+    TEST("44.1k impulse finite", std::isfinite(l44) && std::isfinite(r44));
+    TEST("96k impulse finite", std::isfinite(l96) && std::isfinite(r96));
+    TEST("192k impulse finite", std::isfinite(l192) && std::isfinite(r192));
 }
 
 // ============================================================
