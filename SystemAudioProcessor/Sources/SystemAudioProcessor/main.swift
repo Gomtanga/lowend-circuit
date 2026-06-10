@@ -3331,9 +3331,11 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             description = CATapDescription(
                 stereoMixdownOfProcesses: processes.map(\.objectID)
             )
+#if compiler(>=6.2)
             if #available(macOS 26.0, *) {
                 description.isProcessRestoreEnabled = true
             }
+#endif
             currentCaptureTargetSummary = processes
                 .map { "\($0.bundleID) (pid \($0.pid))" }
                 .joined(separator: ", ")
