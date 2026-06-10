@@ -17,7 +17,7 @@ permissions:
 jobs:
   build-windows:
     name: Build Windows Standalone and VST3
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - name: Check out repository
