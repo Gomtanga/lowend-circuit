@@ -217,13 +217,18 @@ rate-limited to avoid unnecessary SwiftUI layout work.
 
 ## Audio Format and Exclusive Mode
 
-The format label reports the **current internal processing format**, for
-example `Processing 96.0 kHz / 32-bit Float`. It does not report the original
-bit depth or sample rate of a music file.
+The format label reports the Core Audio `Tap`, DSP `Engine`, and output `DAC`
+rates. When all three match it appears as
+`Shared Tap/Engine/DAC 96.0 kHz / 32-bit Float`.
 
-The app tracks default-output-device and nominal-sample-rate changes, stops and
-reconfigures AVAudioEngine, clears ring buffers, resets filter state, and
-recomputes sample-rate-dependent coefficients outside the audio callback.
+It does not report the original bit depth or sample rate of a music file. In
+shared/non-exclusive playback, Core Audio converts application streams to the
+shared output format and doesn't expose the streaming service's source-file
+rate through the Process Tap.
+
+The app tracks Process Tap format, default-output-device, and nominal-sample-rate
+changes. It reports format changes immediately and safely reconfigures the
+engine when the output processing rate changes.
 
 DSP output is not bit-perfect because the signal is intentionally modified.
 Player-exclusive modes such as Tidal **Use Exclusive Mode** can bypass or starve

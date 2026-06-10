@@ -89,15 +89,17 @@ private struct Settings {
 
 private struct AudioFormatStatus {
     let sampleRate: Double
+    let tapSampleRate: Double
     let processingSampleRate: Double
     let sampleFormat: String
     let isSampleRateMatched: Bool
 
     var indicatorText: String {
-        if isSampleRateMatched {
-            return "Processing \(Self.rateText(processingSampleRate)) / \(sampleFormat)"
+        let tapMatchesEngine = abs(tapSampleRate - processingSampleRate) <= 0.5
+        if isSampleRateMatched && tapMatchesEngine {
+            return "Shared Tap/Engine/DAC \(Self.rateText(processingSampleRate)) / \(sampleFormat)"
         }
-        return "DAC \(Self.rateText(sampleRate)) / Engine \(Self.rateText(processingSampleRate))"
+        return "Tap \(Self.rateText(tapSampleRate)) / Engine \(Self.rateText(processingSampleRate)) / DAC \(Self.rateText(sampleRate))"
     }
 
     private static func rateText(_ sampleRate: Double) -> String {
@@ -111,6 +113,7 @@ private struct AudioFormatStatus {
 private enum AudioFormatNotifications {
     static let didChange = Notification.Name("LowEndAudioHardwareFormatDidChange")
     static let sampleRateKey = "sampleRate"
+    static let tapSampleRateKey = "tapSampleRate"
     static let processingSampleRateKey = "processingSampleRate"
     static let sampleFormatKey = "sampleFormat"
     static let isSampleRateMatchedKey = "isSampleRateMatched"
@@ -1283,13 +1286,13 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         formatLabel = makeLabel("처리 포맷 대기 중", size: 13, weight: .semibold)
         formatLabel.alignment = .right
         formatLabel.frame = NSRect(x: 740, y: 704, width: 430, height: 24)
-        formatLabel.toolTip = "앱 내부 처리 포맷입니다. 재생 중인 음원의 원본 bit depth나 파일 샘플레이트를 표시하는 값은 아닙니다."
+        formatLabel.toolTip = "Tap은 Core Audio 공유 믹서에서 캡처한 PCM, Engine은 DSP 처리율, DAC는 출력 장치 레이트입니다. Tidal 비독점 모드에서는 원본 파일 레이트가 제공되지 않습니다."
         content.addSubview(formatLabel)
 
         oversamplingLabel = makeLabel("", size: 12, weight: .semibold)
         oversamplingLabel.alignment = .right
         oversamplingLabel.frame = NSRect(x: 740, y: 680, width: 430, height: 20)
-        oversamplingLabel.toolTip = "전체 음원을 업스케일링하는 기능이 아니라 HighExciter의 비선형 배음 생성 구간에만 적용되는 내부 오버샘플링 상태입니다."
+        oversamplingLabel.toolTip = "전체 음원을 업스케일링하는 기능이 아니라 HighExciter의 비선형 배음 생성 구간에만 적용되는 내부 오버샘플링 상태입니다. Source rate는 공유 시스템 탭에서 알 수 없습니다."
         oversamplingLabel.isHidden = true
         content.addSubview(oversamplingLabel)
 
@@ -1760,7 +1763,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         let factor = DSPPrecompute.makeExciterOversampleFactor(sampleRate: Float(sampleRate))
         let internalRate = sampleRate * Double(factor)
         oversamplingLabel.stringValue = String(
-            format: "HighExciter | %ux OS | %.1f kHz internal",
+            format: "Source n/a | HighExciter %ux OS | %.1f kHz internal",
             factor,
             internalRate / 1000
         )
@@ -2968,8 +2971,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private let engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
     private var hardwareTracker: HardwareSampleRateTracker?
+    private var tapFormatListener: AudioObjectPropertyListenerBlock?
     private var currentOutputDeviceID: AudioObjectID
     private var currentHardwareSampleRate: Double
+    private var currentTapSampleRate: Double
     private var currentSampleRate: Double
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
@@ -2993,6 +2998,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         self.settings = settings
         self.currentOutputDeviceID = outputDeviceID
         self.currentHardwareSampleRate = sampleRate
+        self.currentTapSampleRate = sampleRate
         self.currentSampleRate = sampleRate
         self.currentIntensity = settings.intensity
         self.currentBody = settings.body
@@ -3031,6 +3037,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             isStarted = true
             try createProcessTapAndAggregateDevice()
             currentSampleRate = syncAggregateSampleRate(preferredSampleRate: currentHardwareSampleRate)
+            refreshTapSampleRate()
             controlQueue.updateSampleRate(Float(currentSampleRate))
             applyCurrentSettingsDirectly()
             try startOutput(sampleRate: currentSampleRate)
@@ -3041,6 +3048,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             try hardwareTracker?.start()
             publishFormatStatus()
         }
+        print("Audio format: \(managerQueue.sync { makeFormatStatus().indicatorText })")
         print("LowEnd system audio processing is running. Press Ctrl-C to stop.")
     }
 
@@ -3173,6 +3181,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         currentOutputDeviceID = deviceID
         currentHardwareSampleRate = hardwareSampleRate
         currentSampleRate = syncAggregateSampleRate(preferredSampleRate: hardwareSampleRate)
+        refreshTapSampleRate()
         controlQueue.updateSampleRate(Float(currentSampleRate))
         applyCurrentSettingsDirectly()
 
@@ -3233,6 +3242,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
 
     private func destroyProcessTap() {
         guard tapID != kAudioObjectUnknown else { return }
+        removeTapFormatListener()
         AudioHardwareDestroyProcessTap(tapID)
         tapID = AudioObjectID(kAudioObjectUnknown)
     }
@@ -3266,6 +3276,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 object: nil,
                 userInfo: [
                     AudioFormatNotifications.sampleRateKey: status.sampleRate,
+                    AudioFormatNotifications.tapSampleRateKey: status.tapSampleRate,
                     AudioFormatNotifications.processingSampleRateKey: status.processingSampleRate,
                     AudioFormatNotifications.sampleFormatKey: status.sampleFormat,
                     AudioFormatNotifications.isSampleRateMatchedKey: status.isSampleRateMatched,
@@ -3278,6 +3289,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private func makeFormatStatus() -> AudioFormatStatus {
         AudioFormatStatus(
             sampleRate: currentHardwareSampleRate,
+            tapSampleRate: currentTapSampleRate,
             processingSampleRate: currentSampleRate,
             sampleFormat: "32-bit Float",
             isSampleRateMatched: abs(currentHardwareSampleRate - currentSampleRate) <= 0.5
@@ -3287,6 +3299,62 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private static func validSampleRate(_ sampleRate: Double) -> Double {
         guard sampleRate.isFinite, sampleRate >= 8_000 else { return 48_000 }
         return sampleRate
+    }
+
+    private func refreshTapSampleRate() {
+        guard tapID != kAudioObjectUnknown else { return }
+        do {
+            currentTapSampleRate = Self.validSampleRate(try Self.tapFormat(for: tapID).mSampleRate)
+        } catch {
+            fputs("Tap format read failed: \(error)\n", stderr)
+        }
+    }
+
+    private func installTapFormatListener() throws {
+        guard tapID != kAudioObjectUnknown, tapFormatListener == nil else { return }
+
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            refreshTapSampleRate()
+            publishFormatStatus()
+        }
+        tapFormatListener = listener
+        var address = Self.tapFormatAddress()
+        do {
+            try check(
+                AudioObjectAddPropertyListenerBlock(tapID, &address, managerQueue, listener),
+                "AudioObjectAddPropertyListenerBlock TapFormat"
+            )
+        } catch {
+            tapFormatListener = nil
+            throw error
+        }
+    }
+
+    private func removeTapFormatListener() {
+        guard tapID != kAudioObjectUnknown, let tapFormatListener else { return }
+        var address = Self.tapFormatAddress()
+        AudioObjectRemovePropertyListenerBlock(tapID, &address, managerQueue, tapFormatListener)
+        self.tapFormatListener = nil
+    }
+
+    private static func tapFormat(for tapID: AudioObjectID) throws -> AudioStreamBasicDescription {
+        var format = AudioStreamBasicDescription()
+        var dataSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var address = tapFormatAddress()
+        try check(
+            AudioObjectGetPropertyData(tapID, &address, 0, nil, &dataSize, &format),
+            "AudioObjectGetPropertyData TapFormat"
+        )
+        return format
+    }
+
+    private static func tapFormatAddress() -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
     }
 
     private func makeTapDescription() throws -> CATapDescription {
@@ -3351,6 +3419,12 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private func createProcessTapAndAggregateDevice() throws {
         let tapDescription = try makeTapDescription()
         try check(AudioHardwareCreateProcessTap(tapDescription, &tapID), "AudioHardwareCreateProcessTap")
+        refreshTapSampleRate()
+        do {
+            try installTapFormatListener()
+        } catch {
+            fputs("Tap format listener unavailable: \(error)\n", stderr)
+        }
 
         let tapUID = tapDescription.uuid.uuidString
         let aggregateUID = "com.codexaudiolab.lowendcircuit.aggregate.\(UUID().uuidString)"

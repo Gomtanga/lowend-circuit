@@ -211,13 +211,17 @@ Analysis 탭은 다음 기능을 제공합니다.
 
 ## 오디오 포맷과 독점 모드
 
-상단 포맷 표시는 `Processing 96.0 kHz / 32-bit Float`처럼 **현재 앱 내부 처리
-포맷**을 나타냅니다. 음악 파일 원본의 bit depth나 sample rate를 표시하는 값은
-아닙니다.
+상단 포맷 표시는 Core Audio `Tap`, DSP `Engine`, 출력 `DAC` 레이트를
+구분합니다. 세 값이 같으면
+`Shared Tap/Engine/DAC 96.0 kHz / 32-bit Float`처럼 나타납니다.
 
-앱은 기본 출력 장치와 Nominal Sample Rate 변경을 감지합니다. 변경 시
-AVAudioEngine을 정지·재설정하고, 링 버퍼를 비우고, 필터 상태를 초기화한 뒤,
-새 샘플레이트 기준 계수를 오디오 스레드 밖에서 다시 계산합니다.
+음악 파일 원본의 bit depth나 sample rate를 표시하는 값은 아닙니다. 공유/비독점
+재생에서는 Core Audio가 앱의 출력을 공유 장치 포맷으로 변환하며, 스트리밍
+서비스의 원본 파일 레이트는 Process Tap에 제공되지 않습니다.
+
+앱은 Process Tap 포맷, 기본 출력 장치, Nominal Sample Rate 변경을 감지합니다.
+포맷 변경은 즉시 표시하고 출력 처리율이 바뀌면 AVAudioEngine과 DSP 상태를
+안전하게 재설정합니다.
 
 DSP가 신호를 변경하므로 출력은 엄밀한 의미의 Bit-Perfect가 아닙니다. Tidal
 **Use Exclusive Mode** 같은 독점 출력은 Core Audio Process Tap을 우회하거나
