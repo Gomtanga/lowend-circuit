@@ -2047,9 +2047,15 @@ private enum DSPPrecompute {
         let transformerAsymmetry = 0.002 + normalIntensity * 0.008 + normalBody * 0.004
         let transformerBiasOffset = makePolynomialSoftClip(transformerAsymmetry)
         let transformerMakeupGain: Float = 1 / max(1 + (transformerDrive - 1) * 0.35, 0.001)
-        let exciterFrequency = min(max(Float(11_000), sampleRate * 0.20), sampleRate * 0.45)
+        let exciterFrequency = min(Float(11_000), sampleRate * 0.45)
         let exciterDrive = dspModel == .highExciter ? normalIntensity : 0
         let exciterWetMix = dspModel == .highExciter ? normalBody : 0
+        let exciterOversampleFactor = makeExciterOversampleFactor(sampleRate: sampleRate)
+        let exciterLowPassFrequency = min(Float(20_000), sampleRate * 0.40)
+        let exciterStage1Rate = sampleRate * 2
+        let exciterStage2Rate = sampleRate * 4
+        let butterworthQ1: Float = 0.5411961
+        let butterworthQ2: Float = 1.306563
 
         return LCDSPSettings(
             intensity: normalIntensity,
@@ -2074,8 +2080,39 @@ private enum DSPPrecompute {
             transformerMakeupGain: transformerMakeupGain,
             exciterHighPass: makeHighPass(sampleRate: sampleRate, frequency: exciterFrequency, q: 0.707),
             exciterDrive: exciterDrive,
-            exciterWetMix: exciterWetMix
+            exciterWetMix: exciterWetMix,
+            exciterOversampleFactor: exciterOversampleFactor,
+            exciterStage1LowPass1: makeLowPass(
+                sampleRate: exciterStage1Rate,
+                frequency: exciterLowPassFrequency,
+                q: butterworthQ1
+            ),
+            exciterStage1LowPass2: makeLowPass(
+                sampleRate: exciterStage1Rate,
+                frequency: exciterLowPassFrequency,
+                q: butterworthQ2
+            ),
+            exciterStage2LowPass1: makeLowPass(
+                sampleRate: exciterStage2Rate,
+                frequency: exciterLowPassFrequency,
+                q: butterworthQ1
+            ),
+            exciterStage2LowPass2: makeLowPass(
+                sampleRate: exciterStage2Rate,
+                frequency: exciterLowPassFrequency,
+                q: butterworthQ2
+            )
         )
+    }
+
+    static func makeExciterOversampleFactor(sampleRate: Float) -> UInt32 {
+        if sampleRate <= 48_000.5 {
+            return 4
+        }
+        if sampleRate <= 96_000.5 {
+            return 2
+        }
+        return 1
     }
 
     static func makeSpatialSettings(sampleRate: Float, settings: SpatialSettings) -> LCSpatialSettings {
@@ -2232,6 +2269,51 @@ private struct Biquad {
         var biquad = Biquad()
         biquad.update(DSPPrecompute.makeLowShelf(sampleRate: sampleRate, frequency: frequency, q: q, gainDb: gainDb))
         return biquad
+    }
+}
+
+private struct OversamplingLowPass {
+    private var section1 = Biquad()
+    private var section2 = Biquad()
+
+    mutating func update(_ first: LCBiquadCoefficients, _ second: LCBiquadCoefficients) {
+        section1.update(first)
+        section2.update(second)
+    }
+
+    mutating func resetState() {
+        section1.resetState()
+        section2.resetState()
+    }
+
+    mutating func process(_ input: Float) -> Float {
+        section2.process(section1.process(input))
+    }
+}
+
+private struct Oversampling2xStage {
+    private var interpolationFilter = OversamplingLowPass()
+    private var decimationFilter = OversamplingLowPass()
+
+    mutating func update(_ first: LCBiquadCoefficients, _ second: LCBiquadCoefficients) {
+        interpolationFilter.update(first, second)
+        decimationFilter.update(first, second)
+    }
+
+    mutating func resetState() {
+        interpolationFilter.resetState()
+        decimationFilter.resetState()
+    }
+
+    mutating func upsample(_ input: Float, first: inout Float, second: inout Float) {
+        first = interpolationFilter.process(input * 2)
+        second = interpolationFilter.process(0)
+    }
+
+    mutating func downsample(_ first: Float, _ second: Float) -> Float {
+        let output = decimationFilter.process(first)
+        _ = decimationFilter.process(second)
+        return output
     }
 }
 
@@ -2441,17 +2523,32 @@ private final class VirtualCircuitBassDSP: BassProcessor {
 private final class HighExciterDSP {
     private final class Channel {
         private var highPass = Biquad()
+        private var stage1 = Oversampling2xStage()
+        private var stage2 = Oversampling2xStage()
         private var drive: Float = 0
         private var wetMix: Float = 0
+        private var oversampleFactor: UInt32 = 1
 
         func update(_ settings: LCDSPSettings) {
             highPass.update(settings.exciterHighPass)
+            stage1.update(settings.exciterStage1LowPass1, settings.exciterStage1LowPass2)
+            stage2.update(settings.exciterStage2LowPass1, settings.exciterStage2LowPass2)
             drive = settings.exciterDrive
             wetMix = settings.exciterWetMix
+            switch settings.exciterOversampleFactor {
+            case 4:
+                oversampleFactor = 4
+            case 2:
+                oversampleFactor = 2
+            default:
+                oversampleFactor = 1
+            }
         }
 
         func resetState() {
             highPass.resetState()
+            stage1.resetState()
+            stage2.resetState()
         }
 
         func process(_ input: Float) -> Float {
@@ -2461,10 +2558,46 @@ private final class HighExciterDSP {
             }
 
             let high = highPass.process(dry)
-            let driven = high * drive
-            let driven2 = driven * driven
-            let harmonic = driven2 + driven2 * driven * 0.5
+            let harmonic: Float
+
+            switch oversampleFactor {
+            case 4:
+                var stage1First: Float = 0
+                var stage1Second: Float = 0
+                stage1.upsample(high, first: &stage1First, second: &stage1Second)
+
+                var sample0: Float = 0
+                var sample1: Float = 0
+                var sample2: Float = 0
+                var sample3: Float = 0
+                stage2.upsample(stage1First, first: &sample0, second: &sample1)
+                stage2.upsample(stage1Second, first: &sample2, second: &sample3)
+
+                let downsampled0 = stage2.downsample(
+                    makeHarmonic(sample0),
+                    makeHarmonic(sample1)
+                )
+                let downsampled1 = stage2.downsample(
+                    makeHarmonic(sample2),
+                    makeHarmonic(sample3)
+                )
+                harmonic = stage1.downsample(downsampled0, downsampled1)
+            case 2:
+                var first: Float = 0
+                var second: Float = 0
+                stage1.upsample(high, first: &first, second: &second)
+                harmonic = stage1.downsample(makeHarmonic(first), makeHarmonic(second))
+            default:
+                harmonic = makeHarmonic(high)
+            }
+
             return fastClamp(dry + harmonic * wetMix)
+        }
+
+        private func makeHarmonic(_ input: Float) -> Float {
+            let driven = input * drive
+            let driven2 = driven * driven
+            return driven2 + driven2 * driven * 0.5
         }
 
         private func fastClamp(_ input: Float) -> Float {

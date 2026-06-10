@@ -53,6 +53,11 @@ typedef struct {
     LCBiquadCoefficients exciterHighPass;
     float exciterDrive;
     float exciterWetMix;
+    uint32_t exciterOversampleFactor;
+    LCBiquadCoefficients exciterStage1LowPass1;
+    LCBiquadCoefficients exciterStage1LowPass2;
+    LCBiquadCoefficients exciterStage2LowPass1;
+    LCBiquadCoefficients exciterStage2LowPass2;
 } LCDSPSettings;
 
 typedef struct {
