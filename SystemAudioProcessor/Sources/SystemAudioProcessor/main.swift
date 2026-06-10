@@ -1871,7 +1871,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             )
             analyzer.start()
             self.spectrumAnalyzer = analyzer
-            statusLabel.stringValue = "처리 중입니다. 소리가 안 나면 중지를 눌러 원래 출력으로 복구하세요."
+            statusLabel.stringValue = "처리 중: \(processor.captureTargetSummary)"
         } catch {
             statusLabel.stringValue = "실행 실패: \(error)"
             self.processor = nil
@@ -2961,6 +2961,13 @@ private final class HardwareSampleRateTracker {
 
 @available(macOS 14.4, *)
 private final class SystemAudioProcessor: @unchecked Sendable {
+    private struct AudioProcessInfo {
+        let objectID: AudioObjectID
+        let pid: pid_t
+        let bundleID: String
+        let isRunningOutput: Bool
+    }
+
     private let settings: Settings
     private let ringBuffer: LockFreeFloatRingBuffer
     private let visualizerRingBuffer: LockFreeFloatRingBuffer
@@ -2988,7 +2995,12 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private var currentOutputDb: Float
     private var currentDSPModel: Settings.DSPModel
     private var currentSpatialSettings: SpatialSettings
+    private var currentCaptureTargetSummary = "전체 시스템"
     private var isStarted = false
+
+    var captureTargetSummary: String {
+        managerQueue.sync { currentCaptureTargetSummary }
+    }
 
     init(settings: Settings) throws {
         let outputDeviceID = try HardwareSampleRateTracker.defaultOutputDevice()
@@ -3049,6 +3061,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             publishFormatStatus()
         }
         print("Audio format: \(managerQueue.sync { makeFormatStatus().indicatorText })")
+        print("Capture target: \(captureTargetSummary)")
         print("LowEnd system audio processing is running. Press Ctrl-C to stop.")
     }
 
@@ -3364,15 +3377,18 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         case .all:
             let ownProcess = try audioProcessObjectID(for: getpid())
             description = CATapDescription(stereoGlobalTapButExcludeProcesses: [ownProcess])
+            currentCaptureTargetSummary = "전체 시스템"
         case .bundleIDs(let bundleIDs):
+            let processes = try resolveAudioProcesses(for: bundleIDs)
+            description = CATapDescription(
+                stereoMixdownOfProcesses: processes.map(\.objectID)
+            )
             if #available(macOS 26.0, *) {
-                description = CATapDescription()
-                description.bundleIDs = bundleIDs
-                description.isExclusive = false
                 description.isProcessRestoreEnabled = true
-            } else {
-                throw AppError.message("Bundle-ID app selection requires macOS 26.0 or newer.")
             }
+            currentCaptureTargetSummary = processes
+                .map { "\($0.bundleID) (pid \($0.pid))" }
+                .joined(separator: ", ")
         case .listApps:
             throw AppError.message("Cannot start capture while listing apps.")
         }
@@ -3383,6 +3399,130 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         description.isMono = false
         description.muteBehavior = .mutedWhenTapped
         return description
+    }
+
+    private func resolveAudioProcesses(for requestedBundleIDs: [String]) throws -> [AudioProcessInfo] {
+        let requested = requestedBundleIDs
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        guard !requested.isEmpty else {
+            throw AppError.message("특정 앱 bundle ID가 비어 있습니다.")
+        }
+
+        let connected = try Self.audioProcessInfos()
+        let matches = connected.filter { process in
+            let candidate = process.bundleID.lowercased()
+            return requested.contains { bundleID in
+                candidate == bundleID || candidate.hasPrefix(bundleID + ".")
+            }
+        }
+        let activeMatches = matches.filter(\.isRunningOutput)
+        let selected = activeMatches.isEmpty ? matches : activeMatches
+        guard !selected.isEmpty else {
+            throw AppError.message(
+                "Core Audio에서 \(requestedBundleIDs.joined(separator: ", ")) 또는 하위 오디오 프로세스를 찾지 못했습니다. 앱에서 재생을 시작한 뒤 다시 적용하세요."
+            )
+        }
+
+        var seen = Set<AudioObjectID>()
+        return selected.filter { seen.insert($0.objectID).inserted }
+    }
+
+    private static func audioProcessInfos() throws -> [AudioProcessInfo] {
+        let objectIDs = try audioProcessObjectIDs()
+        return objectIDs.compactMap { objectID in
+            guard let bundleID = try? processBundleID(for: objectID), !bundleID.isEmpty else {
+                return nil
+            }
+            let pid = (try? processPID(for: objectID)) ?? 0
+            let isRunningOutput = (try? processIsRunningOutput(for: objectID)) ?? false
+            return AudioProcessInfo(
+                objectID: objectID,
+                pid: pid,
+                bundleID: bundleID,
+                isRunningOutput: isRunningOutput
+            )
+        }
+    }
+
+    private static func audioProcessObjectIDs() throws -> [AudioObjectID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        try check(
+            AudioObjectGetPropertyDataSize(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                0,
+                nil,
+                &dataSize
+            ),
+            "AudioObjectGetPropertyDataSize ProcessObjectList"
+        )
+
+        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        guard count > 0 else { return [] }
+        var objectIDs = Array(repeating: AudioObjectID(kAudioObjectUnknown), count: count)
+        let status = objectIDs.withUnsafeMutableBytes { storage in
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                0,
+                nil,
+                &dataSize,
+                storage.baseAddress!
+            )
+        }
+        try check(status, "AudioObjectGetPropertyData ProcessObjectList")
+        return objectIDs.filter { $0 != kAudioObjectUnknown }
+    }
+
+    private static func processBundleID(for objectID: AudioObjectID) throws -> String {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyBundleID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var bundleID: Unmanaged<CFString>?
+        var dataSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        try check(
+            AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &bundleID),
+            "AudioObjectGetPropertyData ProcessBundleID"
+        )
+        return bundleID?.takeRetainedValue() as String? ?? ""
+    }
+
+    private static func processPID(for objectID: AudioObjectID) throws -> pid_t {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyPID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var pid: pid_t = 0
+        var dataSize = UInt32(MemoryLayout<pid_t>.size)
+        try check(
+            AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &pid),
+            "AudioObjectGetPropertyData ProcessPID"
+        )
+        return pid
+    }
+
+    private static func processIsRunningOutput(for objectID: AudioObjectID) throws -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyIsRunningOutput,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: UInt32 = 0
+        var dataSize = UInt32(MemoryLayout<UInt32>.size)
+        try check(
+            AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &value),
+            "AudioObjectGetPropertyData ProcessIsRunningOutput"
+        )
+        return value != 0
     }
 
     private func audioProcessObjectID(for pid: pid_t) throws -> AudioObjectID {

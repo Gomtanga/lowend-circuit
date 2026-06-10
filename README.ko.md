@@ -86,8 +86,12 @@ Windows 빌드에는 전체 시스템 및 특정 앱 Native 캡처 기능이 포
 6. **전체 시스템 적용**을 눌러 대부분의 시스템 출력에 적용합니다.
 7. 출력 장치를 바꾸거나 소리가 나오지 않으면 먼저 **중지**를 누릅니다.
 
-특정 앱에만 적용하려면 bundle ID를 입력하고 **특정 앱 적용**을 누르세요.
-하단 실행 앱 목록에서 bundle ID를 확인할 수 있습니다.
+특정 앱에만 적용하려면 먼저 음악을 재생하고, 앱의 기본 bundle ID를 입력한 뒤
+**특정 앱 적용**을 누르세요. 현재 출력 중인 하위 오디오 프로세스도 자동으로
+찾으므로 `com.tidal.desktop`을 입력하면 TIDAL의
+`com.tidal.desktop.player`까지 함께 추적합니다. 하단 실행 앱 목록에서 bundle
+ID를 확인할 수 있습니다. 일치하는 Core Audio 프로세스를 찾지 못하면 재생을
+시작한 상태에서 다시 적용하세요.
 
 ## Windows Standalone 및 VST3 빠른 시작
 
@@ -309,8 +313,8 @@ Audio Process Tap 기반 시스템 캡처 기능은 포함하지 않습니다.
 - 전체 시스템/특정 앱 Native 캡처는 macOS에서만 지원합니다.
 - Windows 릴리스는 현재 Standalone과 VST3만 제공합니다.
 - 플레이어 독점 출력 모드는 Process Tap 캡처와 호환되지 않습니다.
-- 일부 앱은 별도 Helper Process에서 소리를 출력하므로 다른 bundle ID를
-  선택해야 할 수 있습니다.
+- 특정 앱 캡처는 활성 하위 오디오 프로세스를 자동으로 찾지만, 캡처를 시작할
+  때 해당 앱의 Core Audio 출력 프로세스가 실행 중이어야 합니다.
 - macOS 릴리스는 Developer ID 서명 및 Apple 공증을 받지 않았습니다.
 - Spatial Stage는 기하학 기반 Stereo Processor이며 개인화 HRTF가 아닙니다.
 

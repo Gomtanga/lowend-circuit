@@ -86,8 +86,12 @@ Windows builds do not include native whole-system or per-application capture.
 6. Press **전체 시스템 적용** to process most system output.
 7. Press **중지** before changing audio hardware if output becomes silent.
 
-For one application, enter its bundle ID and press **특정 앱 적용**. The app
-list at the bottom helps identify running bundle IDs.
+For one application, start playback, enter its main bundle ID, and press
+**특정 앱 적용**. The app resolves active child audio processes automatically,
+so entering `com.tidal.desktop` also captures TIDAL's
+`com.tidal.desktop.player` process. The app list at the bottom helps identify
+running bundle IDs. If no matching Core Audio process is active, start playback
+and apply the target again.
 
 ## Quick Start: Windows Standalone and VST3
 
@@ -317,8 +321,8 @@ provide the macOS Core Audio Process Tap system-capture path.
 - Native whole-system/per-app capture is macOS-only.
 - Windows releases currently contain Standalone and VST3 builds only.
 - Exclusive-output player modes are incompatible with process-tap capture.
-- Some applications play audio through helper processes with different bundle
-  IDs.
+- Per-app capture resolves active child audio processes, but the application
+  must have an active Core Audio process when capture starts.
 - The macOS release is not Developer ID signed or notarized.
 - Spatial Stage is a geometric stereo processor, not individualized HRTF.
 
