@@ -28,9 +28,9 @@ Get the latest binaries from
 
 | Platform | Download | Purpose |
 | --- | --- | --- |
-| macOS 14.4+ | `LowEnd-Native-Audio-macOS-v0.2.1.zip` | Whole-system and per-app processing |
-| Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.1.zip` | Normal desktop audio application |
-| Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.1.zip` | DAW/plugin-host use |
+| macOS 14.4+ | `LowEnd-Native-Audio-macOS-v0.2.2.zip` | Whole-system and per-app processing |
+| Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.2.zip` | Normal desktop audio application |
+| Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.2.zip` | DAW/plugin-host use |
 
 > **Windows Native System Audio Processor**: The system-wide and per-application
 > audio processing features available in the macOS Native app are not yet
@@ -46,7 +46,7 @@ also request system-audio recording permission when capture starts.
 
 ### LowEnd Native Audio for macOS
 
-Current `v0.2.1` release:
+Current `v0.2.2` release:
 
 - macOS 14.4 or newer
 - Apple Silicon Mac (`arm64`); M1 or newer
@@ -64,7 +64,7 @@ An Apple M5 test system kept Analysis-mode CPU use in the single-digit range
 after the FFT, Metal, and SwiftUI optimizations. This is a reference result,
 not a guaranteed benchmark for every device, sample rate, or audio workload.
 
-The downloadable macOS `v0.2.1` binary is arm64-only. Intel Macs are not
+The downloadable macOS `v0.2.2` binary is arm64-only. Intel Macs are not
 supported by that archive.
 
 ### Windows Standalone and VST3
@@ -78,7 +78,7 @@ Windows builds do not include native whole-system or per-application capture.
 
 ## Quick Start: macOS Native App
 
-1. Extract `LowEnd-Native-Audio-macOS-v0.2.1.zip`.
+1. Extract `LowEnd-Native-Audio-macOS-v0.2.2.zip`.
 2. Move `LowEnd Native Audio.app` to Applications.
 3. Open the app and allow system-audio recording when macOS asks.
 4. Select `Circuit`, `HighExciter`, or `Clean`.
@@ -97,7 +97,7 @@ and apply the target again.
 
 ### Standalone
 
-1. Extract `LowEnd-Circuit-Standalone-Windows-v0.2.1.zip`.
+1. Extract `LowEnd-Circuit-Standalone-Windows-v0.2.2.zip`.
 2. Run `LowEnd Circuit.exe` as a normal desktop audio application.
 3. Select your audio input and output device in the JUCE settings panel.
 4. Adjust `LowEnd`, `Body`, and `Output` sliders.
@@ -107,7 +107,7 @@ and apply the target again.
 
 ### VST3
 
-1. Extract `LowEnd-Circuit-VST3-Windows-v0.2.1.zip`.
+1. Extract `LowEnd-Circuit-VST3-Windows-v0.2.2.zip`.
 2. Copy the `LowEnd Circuit.vst3` folder to your VST3 plugin directory,
    usually:
    ```
