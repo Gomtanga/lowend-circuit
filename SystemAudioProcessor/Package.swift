@@ -6,16 +6,18 @@ let package = Package(
     name: "SystemAudioProcessor",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "SystemAudioProcessor", targets: ["SystemAudioProcessor"])
+        .executable(name: "SystemAudioProcessor", targets: ["SystemAudioProcessor"]),
+        .library(name: "LowEndSupport", targets: ["LowEndSupport"])
     ],
     targets: [
+        .target(name: "LowEndSupport"),
         .target(
             name: "AudioRingBufferC",
             path: "Sources/AudioRingBufferC"
         ),
         .executableTarget(
             name: "SystemAudioProcessor",
-            dependencies: ["AudioRingBufferC"],
+            dependencies: ["AudioRingBufferC", "LowEndSupport"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),
@@ -24,6 +26,11 @@ let package = Package(
                 .linkedFramework("MetalKit"),
                 .linkedFramework("SceneKit")
             ]
+        ),
+        .executableTarget(
+            name: "LowEndSupportChecks",
+            dependencies: ["LowEndSupport"],
+            path: "Tests/LowEndSupportChecks"
         )
     ]
 )
