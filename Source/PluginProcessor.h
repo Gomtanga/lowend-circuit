@@ -1,13 +1,18 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <Core/CircuitBass.h>
 #include "DSP/LowEndDSPCore.h"
 
-class LowEndCircuitAudioProcessor final : public juce::AudioProcessor
+#include <array>
+#include <atomic>
+
+class LowEndCircuitAudioProcessor final : public juce::AudioProcessor,
+                                          private juce::HighResolutionTimer
 {
 public:
     LowEndCircuitAudioProcessor();
-    ~LowEndCircuitAudioProcessor() override = default;
+    ~LowEndCircuitAudioProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -36,8 +41,20 @@ public:
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    void hiResTimerCallback() override;
+    void publishCoreSettings();
 
     lowend::LowEndDSPCore dspCore;
+    lowend::CircuitBass sharedCoreCircuit;
+    juce::AudioBuffer<float> sharedCoreDryBuffer;
+    std::array<LCDSPSettings, 3> sharedCoreSettings {};
+    std::atomic<uint32_t> publishedCoreSettingsSlot { 0 };
+    std::atomic<uint32_t> consumedCoreSettingsSlot { 3 };
+    std::atomic<double> sharedCoreSampleRate { 44100.0 };
+    double lastPublishedSampleRate = 0.0;
+    float lastPublishedIntensity = -1.0f;
+    float lastPublishedBody = -1.0f;
+    float lastPublishedOutputDb = 1000.0f;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> intensitySmoothed;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> bodySmoothed;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> mixSmoothed;

@@ -247,6 +247,25 @@ Lock-free SPSC 제어 큐로 전달되고, 콜백은 최신 패킷을 꺼내 필
 채 필드 대입만 수행합니다. 오디오 출력과 비주얼라이저는 서로 분리된 Lock-free
 링 버퍼를 사용합니다.
 
+### v0.2.2 이후 개발 상태
+
+다음 개발 라인은 기존 Native 앱의 음색을 바꾸지 않는 `v0.2.3` 안정화 작업입니다.
+
+- Native UI에서 링 버퍼 underrun, drop sample, 엔진 재시작 횟수, 실제 캡처
+  프로세스를 확인할 수 있습니다.
+- HighExciter 표시는 `Source n/a` 대신 Tap 입력부터 내부 처리율까지의 실제
+  경로를 보여줍니다.
+- bundle ID 매칭과 44.1/48/96/192/768 kHz 정책을 실행형 Swift 회귀 검사로
+  검증합니다.
+- `Source/Core`에 적응형 오버샘플링과 Swift C ABI를 갖춘 무할당
+  Circuit/HighExciter 공통 코어를 추가했습니다.
+- JUCE는 `-DLOWEND_JUCE_SHARED_CORE=ON`으로 기존 경로와 공통 Core A/B 빌드를
+  선택할 수 있습니다.
+
+macOS Native 콜백의 기본 DSP는 아직 검증된 Swift 구현입니다. 오프라인 수치
+비교와 청음에서 프리셋 및 게인 구조가 유지됨을 확인한 뒤 공통 Core를 기본값으로
+전환합니다.
+
 ## macOS Native 앱 빌드
 
 요구사항:
@@ -322,6 +341,7 @@ Audio Process Tap 기반 시스템 캡처 기능은 포함하지 않습니다.
 
 ```text
 Source/                         JUCE 플러그인 및 Standalone 소스
+Source/Core/                    테스트 가능한 공통 Circuit/HighExciter DSP
 SystemAudioProcessor/           macOS Native Swift/C 엔진
 SystemAudioProcessor/Shaders/   Metal Spectrum Shader
 SystemAudioProcessor/Assets/    Native 앱 아이콘

@@ -1,0 +1,57 @@
+name: macOS Native and Core CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+jobs:
+  native-and-core:
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run Swift regression checks
+        run: swift run --package-path SystemAudioProcessor LowEndSupportChecks
+
+      - name: Run Swift and C++ DSP parity checks
+        shell: bash
+        run: |
+          set +e
+          output="$(swift run --package-path SystemAudioProcessor SystemAudioProcessor --self-test 2>&1)"
+          status=$?
+          printf '%s\n' "$output"
+          if [[ $status -ne 0 ]]; then
+            message="${output//$'\n'/%0A}"
+            message="${message//$'\r'/%0D}"
+            echo "::error title=DSP parity checks failed::$message"
+            exit "$status"
+          fi
+
+      - name: Build Native app in Debug
+        run: swift build --package-path SystemAudioProcessor -c debug
+
+      - name: Build Native app in Release
+        run: ./scripts/build-native-system-audio-app.sh
+
+      - name: Configure portable Core tests
+        run: cmake -S Source/Core -B build/core-tests -DLOWEND_CORE_BUILD_TESTING=ON
+
+      - name: Build portable Core tests
+        run: cmake --build build/core-tests --parallel
+
+      - name: Run portable Core tests
+        run: ctest --test-dir build/core-tests --output-on-failure
+
+      - name: Configure JUCE legacy path
+        run: cmake -S . -B build/juce-legacy -DCMAKE_BUILD_TYPE=Release -DLOWEND_JUCE_SHARED_CORE=OFF
+
+      - name: Build JUCE legacy path
+        run: cmake --build build/juce-legacy --target LowEndCircuit_Standalone --config Release --parallel
+
+      - name: Configure JUCE shared Core path
+        run: cmake -S . -B build/juce-core -DCMAKE_BUILD_TYPE=Release -DLOWEND_JUCE_SHARED_CORE=ON
+
+      - name: Build JUCE shared Core path
+        run: cmake --build build/juce-core --target LowEndCircuit_Standalone --config Release --parallel

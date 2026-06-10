@@ -255,6 +255,26 @@ drains the latest packet and performs assignment-only DSP updates while
 preserving filter state. Audio and visualizer samples use separate lock-free
 ring buffers.
 
+### Development Status After v0.2.2
+
+The next development line prepares `v0.2.3` without changing the released
+Native app's sound:
+
+- the Native UI reports ring-buffer underruns, dropped samples, engine
+  restarts, and the resolved capture process
+- the HighExciter indicator describes the actual Tap-to-internal processing
+  path instead of showing `Source n/a`
+- bundle matching and 44.1/48/96/192/768 kHz policies have executable Swift
+  regression checks
+- `Source/Core` provides a portable allocation-free Circuit/HighExciter engine
+  with adaptive oversampling and a Swift C ABI
+- JUCE can build the legacy or shared Core path with
+  `-DLOWEND_JUCE_SHARED_CORE=ON`
+
+The macOS Native callback still uses the established Swift DSP by default.
+Shared Core becomes the default only after numeric and listening tests confirm
+that presets and gain staging have not changed.
+
 ## Build the Native macOS App
 
 Requirements:
@@ -330,6 +350,7 @@ provide the macOS Core Audio Process Tap system-capture path.
 
 ```text
 Source/                         JUCE plugin and Standalone sources
+Source/Core/                    Portable tested Circuit/HighExciter DSP core
 SystemAudioProcessor/           Native macOS Swift/C engine
 SystemAudioProcessor/Shaders/   Metal spectrum shader
 SystemAudioProcessor/Assets/    Native app icon assets

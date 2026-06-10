@@ -92,6 +92,9 @@ uint32_t lc_ring_buffer_pop_deinterleaved_stereo(LCLockFreeRingBuffer *ringBuffe
                                                  float *left,
                                                  float *right,
                                                  uint32_t frameCount);
+uint64_t lc_ring_buffer_dropped_write_samples(const LCLockFreeRingBuffer *ringBuffer);
+uint64_t lc_ring_buffer_underrun_samples(const LCLockFreeRingBuffer *ringBuffer);
+void lc_ring_buffer_reset_diagnostics(LCLockFreeRingBuffer *ringBuffer);
 void lc_ring_buffer_clear(LCLockFreeRingBuffer *ringBuffer);
 
 LCControlEventQueue *lc_control_event_queue_create(uint32_t requestedCapacityEvents);

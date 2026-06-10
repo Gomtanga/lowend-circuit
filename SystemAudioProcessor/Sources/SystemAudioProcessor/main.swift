@@ -7,120 +7,13 @@ import Combine
 import CoreAudio
 import Darwin
 import Foundation
+import LowEndSupport
 import Metal
 import MetalKit
 import SceneKit
 import SwiftUI
 
-private struct SpatialSettings {
-    var enabled: Bool = true
-    var listenerX: Float = 0.0
-    var listenerZ: Float = 0.0
-    var speakerWidth: Float = 1.65
-    var amount: Float = 35.0
-}
-
-private enum DSPModelID {
-    static let clean: UInt32 = 0
-    static let circuit: UInt32 = 1
-    static let highExciter: UInt32 = 2
-}
-
-private struct Settings {
-    var mode: Mode = .all
-    var intensity: Float = 55.0
-    var body: Float = 30.0
-    var outputDb: Float = -1.5
-    var dspModel: DSPModel = .circuit
-    var spatial: SpatialSettings = SpatialSettings()
-
-    enum Mode {
-        case all
-        case bundleIDs([String])
-        case listApps
-    }
-
-    enum DSPModel: String {
-        case clean
-        case circuit
-        case highExciter = "highexciter"
-
-        var controlID: UInt32 {
-            switch self {
-            case .clean:
-                return DSPModelID.clean
-            case .circuit:
-                return DSPModelID.circuit
-            case .highExciter:
-                return DSPModelID.highExciter
-            }
-        }
-
-        var displayName: String {
-            switch self {
-            case .clean:
-                return "Clean"
-            case .circuit:
-                return "Circuit"
-            case .highExciter:
-                return "HighExciter"
-            }
-        }
-
-        static func fromArgument(_ value: String) -> DSPModel? {
-            let normalized = value
-                .lowercased()
-                .replacingOccurrences(of: "-", with: "")
-                .replacingOccurrences(of: "_", with: "")
-                .replacingOccurrences(of: " ", with: "")
-            switch normalized {
-            case "clean":
-                return .clean
-            case "circuit":
-                return .circuit
-            case "highexciter", "exciter":
-                return .highExciter
-            default:
-                return nil
-            }
-        }
-    }
-}
-
-private struct AudioFormatStatus {
-    let sampleRate: Double
-    let tapSampleRate: Double
-    let processingSampleRate: Double
-    let sampleFormat: String
-    let isSampleRateMatched: Bool
-
-    var indicatorText: String {
-        let tapMatchesEngine = abs(tapSampleRate - processingSampleRate) <= 0.5
-        if isSampleRateMatched && tapMatchesEngine {
-            return "Shared Tap/Engine/DAC \(Self.rateText(processingSampleRate)) / \(sampleFormat)"
-        }
-        return "Tap \(Self.rateText(tapSampleRate)) / Engine \(Self.rateText(processingSampleRate)) / DAC \(Self.rateText(sampleRate))"
-    }
-
-    private static func rateText(_ sampleRate: Double) -> String {
-        if sampleRate >= 1000 {
-            return String(format: "%.1f kHz", sampleRate / 1000)
-        }
-        return String(format: "%.0f Hz", sampleRate)
-    }
-}
-
-private enum AudioFormatNotifications {
-    static let didChange = Notification.Name("LowEndAudioHardwareFormatDidChange")
-    static let sampleRateKey = "sampleRate"
-    static let tapSampleRateKey = "tapSampleRate"
-    static let processingSampleRateKey = "processingSampleRate"
-    static let sampleFormatKey = "sampleFormat"
-    static let isSampleRateMatchedKey = "isSampleRateMatched"
-    static let indicatorTextKey = "indicatorText"
-}
-
-private enum AppError: Error, CustomStringConvertible {
+enum AppError: Error, CustomStringConvertible {
     case message(String)
     case osStatus(String, OSStatus)
 
@@ -737,6 +630,8 @@ private func parseArguments() throws -> Settings {
             settings.spatial.amount = number
         case "--list-apps":
             settings.mode = .listApps
+        case "--self-test":
+            settings.mode = .selfTest
         case "--help", "-h":
             printUsageAndExit()
         default:
@@ -1206,6 +1101,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var statusLabel: NSTextField!
     private var formatLabel: NSTextField!
     private var oversamplingLabel: NSTextField!
+    private var diagnosticsLabel: NSTextField!
     private var rightPanelView: NSHostingView<AnyView>!
     private var bundleField: NSTextField!
     private var appsView: NSTextView!
@@ -1229,6 +1125,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var spatialAmountValueLabel: NSTextField!
     private var processor: SystemAudioProcessor?
     private var spectrumAnalyzer: AudioSpectrumAnalyzer?
+    private var diagnosticsTimer: Timer?
     private let dynamicsMeterModel = DynamicsMeterModel()
     private let spectrumModel = SpectrumModel()
     private let spatialControlModel = SpatialControlModel()
@@ -1292,7 +1189,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         oversamplingLabel = makeLabel("", size: 12, weight: .semibold)
         oversamplingLabel.alignment = .right
         oversamplingLabel.frame = NSRect(x: 740, y: 680, width: 430, height: 20)
-        oversamplingLabel.toolTip = "전체 음원을 업스케일링하는 기능이 아니라 HighExciter의 비선형 배음 생성 구간에만 적용되는 내부 오버샘플링 상태입니다. Source rate는 공유 시스템 탭에서 알 수 없습니다."
+        oversamplingLabel.toolTip = "전체 음원을 업스케일링하는 기능이 아니라 HighExciter의 비선형 배음 생성 구간에만 적용되는 내부 오버샘플링 상태입니다. Tap 값은 공유 시스템 PCM 처리율입니다."
         oversamplingLabel.isHidden = true
         content.addSubview(oversamplingLabel)
 
@@ -1315,6 +1212,13 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         statusLabel.textColor = .white
         statusLabel.frame = NSRect(x: 30, y: 638, width: 440, height: 26)
         content.addSubview(statusLabel)
+
+        diagnosticsLabel = makeLabel("XRuns 대기 중", size: 10, weight: .regular)
+        diagnosticsLabel.textColor = NSColor(calibratedRed: 0.55, green: 0.60, blue: 0.67, alpha: 1)
+        diagnosticsLabel.frame = NSRect(x: 30, y: 620, width: 680, height: 16)
+        diagnosticsLabel.lineBreakMode = .byTruncatingMiddle
+        diagnosticsLabel.toolTip = "출력 underrun, 출력/분석 버퍼 drop, 엔진 재시작 횟수와 실제 캡처 프로세스를 표시합니다."
+        content.addSubview(diagnosticsLabel)
 
         let modelLabel = makeLabel("Model", size: 13, weight: .semibold)
         modelLabel.frame = NSRect(x: 498, y: 638, width: 52, height: 26)
@@ -1760,12 +1664,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             return
         }
 
-        let factor = DSPPrecompute.makeExciterOversampleFactor(sampleRate: Float(sampleRate))
-        let internalRate = sampleRate * Double(factor)
-        oversamplingLabel.stringValue = String(
-            format: "Source n/a | HighExciter %ux OS | %.1f kHz internal",
-            factor,
-            internalRate / 1000
+        let factor = ExciterOversamplingPolicy.factor(for: sampleRate)
+        oversamplingLabel.stringValue = ExciterOversamplingPolicy.indicator(
+            processingSampleRate: sampleRate,
+            factor: factor
         )
         oversamplingLabel.textColor = NSColor(calibratedRed: 0.31, green: 0.78, blue: 0.94, alpha: 1)
     }
@@ -1872,6 +1774,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             analyzer.start()
             self.spectrumAnalyzer = analyzer
             statusLabel.stringValue = "처리 중: \(processor.captureTargetSummary)"
+            startDiagnosticsTimer()
         } catch {
             statusLabel.stringValue = "실행 실패: \(error)"
             self.processor = nil
@@ -1880,6 +1783,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     @objc private func stopAudio() {
+        diagnosticsTimer?.invalidate()
+        diagnosticsTimer = nil
         spectrumAnalyzer?.stop()
         spectrumAnalyzer = nil
         dynamicsMeterModel.reset()
@@ -1892,8 +1797,27 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         if formatLabel != nil {
             formatLabel.stringValue = "처리 포맷 대기 중"
         }
+        diagnosticsLabel?.stringValue = "XRuns 대기 중"
         currentProcessingSampleRate = nil
         updateOversamplingIndicator()
+    }
+
+    private func startDiagnosticsTimer() {
+        diagnosticsTimer?.invalidate()
+        diagnosticsTimer = Timer.scheduledTimer(
+            timeInterval: 1.0,
+            target: self,
+            selector: #selector(updateDiagnostics),
+            userInfo: nil,
+            repeats: true
+        )
+    }
+
+    @objc private func updateDiagnostics() {
+        guard let processor else { return }
+        let snapshot = processor.diagnosticsSnapshot()
+        diagnosticsLabel.stringValue = snapshot.displayText
+        diagnosticsLabel.toolTip = snapshot.displayText
     }
 
     @objc private func refreshApps() {
@@ -1965,6 +1889,7 @@ private func printUsageAndExit() -> Never {
       SystemAudioProcessor --all
       SystemAudioProcessor --bundle-id com.spotify.client
       SystemAudioProcessor --list-apps
+      SystemAudioProcessor --self-test
 
     Options:
       --intensity 0...100
@@ -2010,6 +1935,18 @@ private final class LockFreeFloatRingBuffer {
 
     func push(_ samples: UnsafePointer<Float>, count: Int) {
         _ = lc_ring_buffer_push(handle, samples, UInt32(max(count, 0)))
+    }
+
+    func droppedWriteSamples() -> UInt64 {
+        lc_ring_buffer_dropped_write_samples(handle)
+    }
+
+    func underrunSamples() -> UInt64 {
+        lc_ring_buffer_underrun_samples(handle)
+    }
+
+    func resetDiagnostics() {
+        lc_ring_buffer_reset_diagnostics(handle)
     }
 
     func availableSamples() -> Int {
@@ -2079,7 +2016,7 @@ private final class LockFreeControlEventQueue {
     }
 }
 
-private enum DSPPrecompute {
+enum DSPPrecompute {
     static func makeDSPSettings(sampleRate: Float,
                                 intensity: Float,
                                 body: Float,
@@ -2155,13 +2092,7 @@ private enum DSPPrecompute {
     }
 
     static func makeExciterOversampleFactor(sampleRate: Float) -> UInt32 {
-        if sampleRate <= 48_000.5 {
-            return 4
-        }
-        if sampleRate <= 96_000.5 {
-            return 2
-        }
-        return 1
+        ExciterOversamplingPolicy.factor(for: Double(sampleRate))
     }
 
     static func makeSpatialSettings(sampleRate: Float, settings: SpatialSettings) -> LCSpatialSettings {
@@ -2441,7 +2372,7 @@ private final class RcLowPass {
     }
 }
 
-private final class VirtualCircuitBassDSP: BassProcessor {
+final class VirtualCircuitBassDSP: BassProcessor {
     private final class Channel {
         private let bassPole: RcLowPass
         private let subPole: RcLowPass
@@ -2569,7 +2500,7 @@ private final class VirtualCircuitBassDSP: BassProcessor {
     }
 }
 
-private final class HighExciterDSP {
+final class HighExciterDSP {
     private final class Channel {
         private var highPass = Biquad()
         private var stage1 = Oversampling2xStage()
@@ -2996,10 +2927,24 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private var currentDSPModel: Settings.DSPModel
     private var currentSpatialSettings: SpatialSettings
     private var currentCaptureTargetSummary = "전체 시스템"
+    private var engineRestartCount: UInt64 = 0
     private var isStarted = false
 
     var captureTargetSummary: String {
         managerQueue.sync { currentCaptureTargetSummary }
+    }
+
+    func diagnosticsSnapshot() -> AudioDiagnosticsSnapshot {
+        let managerState = managerQueue.sync {
+            (engineRestartCount, currentCaptureTargetSummary)
+        }
+        return AudioDiagnosticsSnapshot(
+            outputUnderrunSamples: ringBuffer.underrunSamples(),
+            outputDroppedSamples: ringBuffer.droppedWriteSamples(),
+            visualizerDroppedSamples: visualizerRingBuffer.droppedWriteSamples(),
+            engineRestartCount: managerState.0,
+            captureTarget: managerState.1
+        )
     }
 
     init(settings: Settings) throws {
@@ -3114,6 +3059,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             }
             ringBuffer.clear()
             visualizerRingBuffer.clear()
+            ringBuffer.resetDiagnostics()
+            visualizerRingBuffer.resetDiagnostics()
             isStarted = false
         }
     }
@@ -3190,6 +3137,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         ringBuffer.clear()
         controlQueue.drain()
         resetDSPState()
+        engineRestartCount &+= 1
 
         currentOutputDeviceID = deviceID
         currentHardwareSampleRate = hardwareSampleRate
@@ -3383,14 +3331,18 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             description = CATapDescription(
                 stereoMixdownOfProcesses: processes.map(\.objectID)
             )
+#if compiler(>=6.2)
             if #available(macOS 26.0, *) {
                 description.isProcessRestoreEnabled = true
             }
+#endif
             currentCaptureTargetSummary = processes
                 .map { "\($0.bundleID) (pid \($0.pid))" }
                 .joined(separator: ", ")
         case .listApps:
             throw AppError.message("Cannot start capture while listing apps.")
+        case .selfTest:
+            throw AppError.message("Cannot start capture while running self-tests.")
         }
 
         description.name = "LowEnd Native System Tap"
@@ -3410,14 +3362,20 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
 
         let connected = try Self.audioProcessInfos()
-        let matches = connected.filter { process in
-            let candidate = process.bundleID.lowercased()
-            return requested.contains { bundleID in
-                candidate == bundleID || candidate.hasPrefix(bundleID + ".")
-            }
+        let descriptors = connected.map {
+            AudioProcessDescriptor(
+                objectID: $0.objectID,
+                pid: $0.pid,
+                bundleID: $0.bundleID,
+                isRunningOutput: $0.isRunningOutput
+            )
         }
-        let activeMatches = matches.filter(\.isRunningOutput)
-        let selected = activeMatches.isEmpty ? matches : activeMatches
+        let resolved = AudioProcessMatcher.resolve(
+            requestedBundleIDs: requestedBundleIDs,
+            from: descriptors
+        )
+        let resolvedIDs = Set(resolved.map(\.objectID))
+        let selected = connected.filter { resolvedIDs.contains($0.objectID) }
         guard !selected.isEmpty else {
             throw AppError.message(
                 "Core Audio에서 \(requestedBundleIDs.joined(separator: ", ")) 또는 하위 오디오 프로세스를 찾지 못했습니다. 앱에서 재생을 시작한 뒤 다시 적용하세요."
@@ -3754,6 +3712,10 @@ do {
 
     if case .listApps = settings.mode {
         listRunningApps()
+        exit(0)
+    }
+    if case .selfTest = settings.mode {
+        try runDSPParityChecks()
         exit(0)
     }
 
