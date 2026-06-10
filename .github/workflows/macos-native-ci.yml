@@ -48,10 +48,10 @@ jobs:
         run: cmake -S . -B build/juce-legacy -DCMAKE_BUILD_TYPE=Release -DLOWEND_JUCE_SHARED_CORE=OFF
 
       - name: Build JUCE legacy path
-        run: cmake --build build/juce-legacy --config Release --parallel
+        run: cmake --build build/juce-legacy --target LowEndCircuit_Standalone --config Release --parallel
 
       - name: Configure JUCE shared Core path
         run: cmake -S . -B build/juce-core -DCMAKE_BUILD_TYPE=Release -DLOWEND_JUCE_SHARED_CORE=ON
 
       - name: Build JUCE shared Core path
-        run: cmake --build build/juce-core --config Release --parallel
+        run: cmake --build build/juce-core --target LowEndCircuit_Standalone --config Release --parallel
