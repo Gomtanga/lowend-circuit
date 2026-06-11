@@ -29,7 +29,6 @@ final class SourceFormatTracker: @unchecked Sendable {
     private var cachedFormats: [SourcePlayer: SourceAudioFormat] = [:]
     private let cacheLifetime: TimeInterval = 15
     private lazy var logStore: OSLogStore? = try? OSLogStore.local()
-    private let logger = Logger(subsystem: "com.codexaudiolab.lowendcircuit", category: "SourceFormat")
     private let tidalPlayerLogURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs/TIDAL/player.log")
     private var lastAppleMusicPersistentID: String?
@@ -72,37 +71,16 @@ final class SourceFormatTracker: @unchecked Sendable {
         if activePlayers.contains(.appleMusic) {
             let logEntries = readUnifiedLogEntries(player: .appleMusic)
             let scriptContext = readAppleMusicScriptContext(observedAt: now)
-            let logFormat = SourceFormatParser.parseAppleMusic(entries: logEntries)
             let resolvedFormat = SourceFormatParser.resolveAppleMusicFormat(
                 logEntries: logEntries,
                 scriptContext: scriptContext
             )
 
-            let resolutionPath: String
-            if !scriptContext.isPlaying {
-                resolutionPath = "not-playing"
-            } else if let scriptRate = scriptContext.sampleRate, scriptRate.isFinite, scriptRate >= 8_000 {
-                if let logFormat {
-                    if logFormat.hasUsableSampleRate, abs(logFormat.sampleRate! - scriptRate) <= 1 {
-                        resolutionPath = "cross-validated(rates-agree)"
-                    } else {
-                        resolutionPath = "disagreement(script-wins)"
-                    }
-                } else {
-                    resolutionPath = "script-only(no-log-match)"
-                }
-            } else if logFormat != nil {
-                resolutionPath = "log-only(scriptRate=nil)"
-            } else {
-                resolutionPath = "nil(both-sources-empty)"
-            }
-
-            if resolvedFormat != nil {
-                let rate = resolvedFormat!.sampleRate.map { "\($0 / 1000)kHz" } ?? "nil"
-                let depth = resolvedFormat!.bitDepth.map { "\($0)-bit" } ?? "no-bit-depth"
-                logger.info("[AM] detected: \(rate, privacy: .public) \(depth, privacy: .public) (\(resolvedFormat!.confidence == .detected ? "Detected" : "Inferred", privacy: .public)) via \(resolutionPath, privacy: .public)")
-            } else {
-                logger.debug("[AM] unresolved: state=\(scriptContext.state.rawValue, privacy: .public) path=\(resolutionPath, privacy: .public)")
+            if let resolvedFormat {
+                let rate = resolvedFormat.sampleRate.map { "\($0 / 1000)kHz" } ?? "nil"
+                let depth = resolvedFormat.bitDepth.map { "\($0)-bit" } ?? "no-bit-depth"
+                let conf = resolvedFormat.confidence == .detected ? "Detected" : "Inferred"
+                print("[AM] \(rate) \(depth) (\(conf))")
             }
 
             if let resolvedFormat {
@@ -177,7 +155,6 @@ final class SourceFormatTracker: @unchecked Sendable {
     private func readUnifiedLogEntries(player: SourcePlayer) -> [SourceFormatLogEntry] {
         do {
             guard let store = logStore else {
-                logger.warning("[AM] OSLogStore.local() returned nil — log access unavailable")
                 return []
             }
             let position = store.position(timeIntervalSinceEnd: -30)
@@ -205,20 +182,17 @@ final class SourceFormatTracker: @unchecked Sendable {
                     return SourceFormatLogEntry(date: log.date, message: log.composedMessage)
                 }
 
-            if player == .appleMusic {
-                if entries.isEmpty {
-                    logger.debug("[AM] OSLogStore: 0 entries for Music process in last 30s")
-                } else {
-                    logger.debug("[AM] OSLogStore: \(entries.count) entries for Music process in last 30s")
-                    for entry in entries where entry.message.contains("Hz") || entry.message.contains("rate") || entry.message.contains("format") || entry.message.contains("decoder") || entry.message.contains("bit") {
-                        logger.debug("[AM] log candidate: \(entry.message, privacy: .public)")
+            if player == .appleMusic && !entries.isEmpty {
+                for entry in entries {
+                    let msg = entry.message.lowercased()
+                    if msg.contains("hz") || msg.contains("rate") || msg.contains("format") || msg.contains("decoder") || msg.contains("bit") {
+                        print("[AM] log candidate: \(entry.message)")
                     }
                 }
             }
 
             return entries
         } catch {
-            logger.error("[AM] OSLogStore query failed: \(error.localizedDescription, privacy: .public)")
             return []
         }
     }
@@ -280,7 +254,6 @@ final class SourceFormatTracker: @unchecked Sendable {
         end tell
         """
         guard let script = NSAppleScript(source: source) else {
-            logger.error("[AM] NSAppleScript init failed — source compilation error")
             return AppleMusicPlaybackContext(
                 state: .notRunning, persistentID: nil, sampleRate: nil, observedAt: observedAt
             )
@@ -291,14 +264,12 @@ final class SourceFormatTracker: @unchecked Sendable {
             if let error {
                 let number = error["AppleScriptErrorNumber"] as? Int ?? 0
                 let message = error["AppleScriptErrorMessage"] as? String ?? "unknown"
-                logger.warning("[AM] AppleScript error \(number): \(message, privacy: .public)")
+                print("[AM] AppleScript error \(number): \(message)")
             }
             return AppleMusicPlaybackContext(
                 state: .notRunning, persistentID: nil, sampleRate: nil, observedAt: observedAt
             )
         }
-
-        logger.debug("[AM] AppleScript result: \(result, privacy: .public)")
 
         let parts = result.split(separator: "|", omittingEmptySubsequences: false)
         guard parts.count >= 3 else {
