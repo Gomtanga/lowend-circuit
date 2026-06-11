@@ -114,7 +114,8 @@ LCDSPSettings DSPPrecompute::makeDSPSettings(float sampleRate,
                                               float intensity,
                                               float body,
                                               float outputDb,
-                                              uint32_t dspModel) {
+                                              uint32_t dspModel,
+                                              uint32_t exciterOversamplingMode) {
     float normalIntensity = clamp(intensity / 100.0f, 0.0f, 1.0f);
     float normalBody = clamp(body / 100.0f, 0.0f, 1.0f);
     float shelfDb = normalIntensity * 6.5f;
@@ -129,9 +130,17 @@ LCDSPSettings DSPPrecompute::makeDSPSettings(float sampleRate,
     float exciterFrequency = std::fmin(11000.0f, sampleRate * 0.45f);
     float exciterDrive = (dspModel == 2) ? normalIntensity : 0.0f;   // 2 = HighExciter
     float exciterWetMix = (dspModel == 2) ? normalBody : 0.0f;
-    uint32_t exciterOversampleFactor = sampleRate <= 48000.5f ? 4u
-                                            : sampleRate <= 96000.5f ? 2u
-                                                                    : 1u;
+    uint32_t exciterOversampleFactor = exciterOversamplingMode == 1u
+        || exciterOversamplingMode == 2u
+        || exciterOversamplingMode == 4u
+        ? exciterOversamplingMode
+        : sampleRate <= 48000.5f ? 4u
+            : sampleRate <= 96000.5f ? 2u
+                                    : 1u;
+    while (exciterOversampleFactor > 1u
+           && sampleRate * static_cast<float>(exciterOversampleFactor) > 384000.5f) {
+        exciterOversampleFactor /= 2u;
+    }
     float exciterLowPassFrequency = std::fmin(20000.0f, sampleRate * 0.40f);
     float exciterStage1Rate = sampleRate * 2.0f;
     float exciterStage2Rate = sampleRate * 4.0f;

@@ -1,4 +1,5 @@
 import Foundation
+import LowEndSupport
 
 struct SpatialSettings {
     var enabled: Bool = true
@@ -20,6 +21,7 @@ struct Settings {
     var body: Float = 30.0
     var outputDb: Float = -1.5
     var dspModel: DSPModel = .circuit
+    var exciterOversamplingMode: ExciterOversamplingMode = .auto
     var spatial: SpatialSettings = SpatialSettings()
 
     enum Mode {

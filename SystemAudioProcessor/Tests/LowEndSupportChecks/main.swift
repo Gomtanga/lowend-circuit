@@ -46,8 +46,29 @@ require(ExciterOversamplingPolicy.factor(for: 192_000) == 1, "192 kHz must use 1
 require(ExciterOversamplingPolicy.factor(for: 768_000) == 1, "768 kHz must use 1x")
 require(
     ExciterOversamplingPolicy.indicator(processingSampleRate: 96_000, factor: 2)
-        == "Tap 96.0 kHz -> HighExciter 2x -> 192.0 kHz internal",
+        == "Engine 96.0 kHz -> HighExciter 2x -> 192.0 kHz internal",
     "oversampling indicator must describe the processing path"
+)
+let manualFourAt96 = ExciterOversamplingPolicy.resolve(
+    processingSampleRate: 96_000,
+    mode: .four
+)
+require(manualFourAt96.effectiveFactor == 4, "96 kHz manual 4x must remain below 384 kHz")
+let manualFourAt192 = ExciterOversamplingPolicy.resolve(
+    processingSampleRate: 192_000,
+    mode: .four
+)
+require(manualFourAt192.effectiveFactor == 2, "192 kHz manual 4x must clamp to 2x")
+require(manualFourAt192.isSafetyLimited, "clamped manual mode must report the safety limit")
+let manualFourAt768 = ExciterOversamplingPolicy.resolve(
+    processingSampleRate: 768_000,
+    mode: .four
+)
+require(manualFourAt768.effectiveFactor == 1, "768 kHz manual 4x must clamp to 1x")
+require(
+    ExciterOversamplingPolicy.indicator(manualFourAt768)
+        == "Engine 768.0 kHz -> HighExciter 1x -> 768.0 kHz internal | 4x requested / 1x safety limit",
+    "limited oversampling indicator must expose requested and effective factors"
 )
 
 let now = Date()

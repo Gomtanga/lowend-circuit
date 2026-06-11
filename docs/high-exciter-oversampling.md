@@ -38,6 +38,27 @@ Dry 신호는 oversampling 경로를 통과하지 않는다. 따라서 Wet Mix�
 내부 처리율을 대체로 176.4~192 kHz에 맞춰 품질과 CPU 사용량의 상한을 함께
 관리한다.
 
+## 사용자 배율 선택
+
+macOS Native 앱에서는 `Auto`, `1x`, `2x`, `4x`를 선택할 수 있다. 기본값은
+`Auto`이며 실제 Engine 처리율을 기준으로 위 표의 배율을 선택한다. Source
+메타데이터는 표시 및 Rate Matching 판단에만 사용하고 DSP 배율을 직접 결정하지
+않는다.
+
+수동 선택은 oversampling으로 내부 처리율을 `384 kHz`보다 높이지 않는 범위에서
+적용된다. Engine 자체가 이미 384 kHz를 넘는 경우에는 추가 oversampling 없이
+1배로 처리한다. 요청한 배율이 한도를 넘으면 설정값은 유지하되 실제 배율은
+안전한 값으로 낮아진다.
+
+| Engine | 요청 | 실제 |
+| ---: | ---: | ---: |
+| 96 kHz | 4x | 4x |
+| 192 kHz | 4x | 2x |
+| 768 kHz | 4x | 1x |
+
+배율 변경 시 interpolation/decimation 필터 상태를 초기화하고 256 sample 동안
+wet 신호를 올리는 ramp를 적용해 전환 팝을 줄인다.
+
 ## 2x Stage
 
 각 2x 단계는 서로 독립적인 interpolation 및 decimation 필터 상태를 가진다.

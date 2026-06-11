@@ -36,6 +36,10 @@ int main() {
 
     auto highRate = lowend::DSPPrecompute::makeDSPSettings(768000.0f, 100, 100, 0, 2);
     check(highRate.exciterOversampleFactor == 1, "768 kHz must use 1x");
+    auto limitedManual = lowend::DSPPrecompute::makeDSPSettings(
+        192000.0f, 100, 100, 0, 2, 4);
+    check(limitedManual.exciterOversampleFactor == 2,
+          "192 kHz manual 4x must respect the 384 kHz limit");
 
     const float sampleRates[] = { 44100.0f, 48000.0f, 96000.0f, 192000.0f, 768000.0f };
     for (float sampleRate : sampleRates) {

@@ -57,6 +57,7 @@ private:
         float drive = 0.0f;   // exciter drive gain
         float wetMix = 0.0f;  // wet blend amount (0 = bypass)
         uint32_t oversampleFactor = 1;
+        uint32_t transitionSamplesRemaining = 0;
 
         float processSample(float input);
         float makeHarmonic(float input) const;

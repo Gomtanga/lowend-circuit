@@ -144,6 +144,8 @@ An independent high-frequency harmonic model:
 - extracts content above approximately 11 kHz with a high-pass biquad
 - oversamples only the nonlinear harmonic stage at 4x for 44.1/48 kHz,
   2x for 88.2/96 kHz, and 1x for 176.4/192 kHz or higher
+- offers Auto/1x/2x/4x control in the Native app; manual choices never add
+  oversampling above a 384 kHz Engine rate
 - applies fourth-order anti-imaging and anti-aliasing filters around the
   nonlinear stage
 - shows the active oversampling factor and internal nonlinear processing rate

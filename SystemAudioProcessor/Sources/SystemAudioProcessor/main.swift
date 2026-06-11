@@ -603,6 +603,18 @@ private func parseArguments() throws -> Settings {
                 throw AppError.message("--model needs clean, circuit, or highexciter")
             }
             settings.dspModel = model
+        case "--exciter-os":
+            guard let value = iterator.next() else {
+                throw AppError.message("--exciter-os needs auto, 1x, 2x, or 4x")
+            }
+            switch value.lowercased() {
+            case "auto": settings.exciterOversamplingMode = .auto
+            case "1", "1x": settings.exciterOversamplingMode = .one
+            case "2", "2x": settings.exciterOversamplingMode = .two
+            case "4", "4x": settings.exciterOversamplingMode = .four
+            default:
+                throw AppError.message("--exciter-os needs auto, 1x, 2x, or 4x")
+            }
         case "--spatial":
             guard let value = iterator.next() else {
                 throw AppError.message("--spatial needs on or off")
@@ -1116,6 +1128,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var bodyValueLabel: NSTextField!
     private var outputValueLabel: NSTextField!
     private var modelPopup: NSPopUpButton!
+    private var oversamplingModeLabel: NSTextField!
+    private var oversamplingModeControl: NSSegmentedControl!
     private var presetButtons: [NSButton] = []
     private var spatialEnabledButton: NSButton!
     private var spatialStageView: SpatialStageView!
@@ -1132,6 +1146,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private let spectrumModel = SpectrumModel()
     private let spatialControlModel = SpatialControlModel()
     private var currentProcessingSampleRate: Double?
+    private var exciterOversamplingMode: ExciterOversamplingMode = {
+        let rawValue = UInt32(UserDefaults.standard.integer(forKey: "exciterOversamplingMode"))
+        return ExciterOversamplingMode(rawValue: rawValue) ?? .auto
+    }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NotificationCenter.default.addObserver(
@@ -1347,6 +1365,20 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         intensityNameLabel = addSliderRow(to: view, y: 86, title: "LowEnd", slider: intensitySlider, valueLabel: intensityValueLabel)
         bodyNameLabel = addSliderRow(to: view, y: 48, title: "Body", slider: bodySlider, valueLabel: bodyValueLabel)
         outputNameLabel = addSliderRow(to: view, y: 10, title: "Output", slider: outputSlider, valueLabel: outputValueLabel)
+
+        oversamplingModeLabel = makeLabel("Oversampling", size: 13, weight: .semibold)
+        oversamplingModeLabel.frame = NSRect(x: 16, y: 10, width: 110, height: 24)
+        oversamplingModeControl = NSSegmentedControl(
+            labels: ExciterOversamplingMode.allCases.map(\.title),
+            trackingMode: .selectOne,
+            target: self,
+            action: #selector(oversamplingModeChanged)
+        )
+        oversamplingModeControl.frame = NSRect(x: 140, y: 7, width: 430, height: 28)
+        oversamplingModeControl.selectedSegment = segmentIndex(for: exciterOversamplingMode)
+        oversamplingModeControl.toolTip = "Auto는 Engine 처리율에 맞춰 배수를 선택합니다. 수동 선택은 384 kHz 이상의 Engine 처리율에 추가 오버샘플링을 하지 않도록 제한됩니다."
+        view.addSubview(oversamplingModeLabel)
+        view.addSubview(oversamplingModeControl)
         configureControlsForSelectedModel()
         return view
     }
@@ -1493,7 +1525,20 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         processor?.updateDSP(intensity: Float(intensitySlider.doubleValue),
                              body: Float(bodySlider.doubleValue),
                              outputDb: Float(outputSlider.doubleValue),
-                             dspModel: selectedDSPModel())
+                             dspModel: selectedDSPModel(),
+                             exciterOversamplingMode: exciterOversamplingMode)
+    }
+
+    @objc private func oversamplingModeChanged() {
+        let modes = ExciterOversamplingMode.allCases
+        let index = oversamplingModeControl.selectedSegment
+        guard modes.indices.contains(index) else { return }
+        exciterOversamplingMode = modes[index]
+        UserDefaults.standard.set(
+            Int(exciterOversamplingMode.rawValue),
+            forKey: "exciterOversamplingMode"
+        )
+        sliderChanged()
     }
 
     @objc private func spatialControlChanged() {
@@ -1548,6 +1593,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             intensitySlider.toolTip = "Clean 모델에서는 DSP 처리를 완전히 우회합니다."
             bodySlider.toolTip = "Clean 모델에서는 DSP 처리를 완전히 우회합니다."
             outputSlider.toolTip = "Clean 모델에서는 출력 게인도 적용하지 않습니다."
+            setOversamplingControlsVisible(false)
         case .circuit:
             intensityNameLabel.stringValue = "LowEnd"
             bodyNameLabel.stringValue = "Body"
@@ -1558,6 +1604,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             intensitySlider.toolTip = "저역 부스트의 강도입니다. 높일수록 베이스가 앞으로 나옵니다."
             bodySlider.toolTip = "서브 저역의 두께감입니다. 높일수록 묵직하지만 과하면 부풀 수 있습니다."
             outputSlider.toolTip = "Circuit 모델의 최종 출력 보정입니다. 저역을 많이 올릴수록 낮춰두는 편이 안전합니다."
+            setOversamplingControlsVisible(false)
         case .highExciter:
             intensityNameLabel.stringValue = "Exciter Drive"
             bodyNameLabel.stringValue = "Wet Mix"
@@ -1568,10 +1615,23 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             intensitySlider.toolTip = "11 kHz 이상 고역 성분에 적용할 배음 생성 drive입니다."
             bodySlider.toolTip = "원본 신호에 병렬로 더할 고역 배음 wet mix입니다."
             outputSlider.toolTip = "HighExciter 모델은 dry 신호 보존을 위해 출력 게인을 적용하지 않습니다."
+            setOversamplingControlsVisible(true)
         }
 
         configurePresetButtons()
         updateSliderLabels()
+    }
+
+    private func setOversamplingControlsVisible(_ isVisible: Bool) {
+        oversamplingModeLabel?.isHidden = !isVisible
+        oversamplingModeControl?.isHidden = !isVisible
+        outputNameLabel?.isHidden = isVisible
+        outputSlider?.isHidden = isVisible
+        outputValueLabel?.isHidden = isVisible
+    }
+
+    private func segmentIndex(for mode: ExciterOversamplingMode) -> Int {
+        ExciterOversamplingMode.allCases.firstIndex(of: mode) ?? 0
     }
 
     private struct ModelPreset {
@@ -1674,11 +1734,11 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             return
         }
 
-        let factor = ExciterOversamplingPolicy.factor(for: sampleRate)
-        oversamplingLabel.stringValue = ExciterOversamplingPolicy.indicator(
+        let resolution = ExciterOversamplingPolicy.resolve(
             processingSampleRate: sampleRate,
-            factor: factor
+            mode: exciterOversamplingMode
         )
+        oversamplingLabel.stringValue = ExciterOversamplingPolicy.indicator(resolution)
         oversamplingLabel.textColor = NSColor(calibratedRed: 0.31, green: 0.78, blue: 0.94, alpha: 1)
     }
 
@@ -1756,6 +1816,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
                  body: Float(bodySlider.doubleValue),
                  outputDb: Float(outputSlider.doubleValue),
                  dspModel: selectedDSPModel(),
+                 exciterOversamplingMode: exciterOversamplingMode,
                  spatial: spatialSettingsFromControls())
     }
 
@@ -2008,7 +2069,11 @@ private final class LockFreeControlEventQueue {
         self.sampleRate = sampleRate
     }
 
-    func pushDSP(intensity: Float, body: Float, outputDb: Float, dspModel: Settings.DSPModel) {
+    func pushDSP(intensity: Float,
+                 body: Float,
+                 outputDb: Float,
+                 dspModel: Settings.DSPModel,
+                 exciterOversamplingMode: ExciterOversamplingMode) {
         var event = LCControlEvent()
         event.type = UInt32(LC_CONTROL_EVENT_DSP)
         event.dsp = DSPPrecompute.makeDSPSettings(
@@ -2016,7 +2081,8 @@ private final class LockFreeControlEventQueue {
             intensity: intensity,
             body: body,
             outputDb: outputDb,
-            dspModel: dspModel
+            dspModel: dspModel,
+            exciterOversamplingMode: exciterOversamplingMode
         )
         _ = withUnsafePointer(to: &event) { lc_control_event_queue_push(handle, $0) }
     }
@@ -2043,7 +2109,8 @@ enum DSPPrecompute {
                                 intensity: Float,
                                 body: Float,
                                 outputDb: Float,
-                                dspModel: Settings.DSPModel) -> LCDSPSettings {
+                                dspModel: Settings.DSPModel,
+                                exciterOversamplingMode: ExciterOversamplingMode = .auto) -> LCDSPSettings {
         let normalIntensity = clamp(intensity / 100, 0, 1)
         let normalBody = clamp(body / 100, 0, 1)
         let shelfDb = normalIntensity * 6.5
@@ -2058,7 +2125,10 @@ enum DSPPrecompute {
         let exciterFrequency = min(Float(11_000), sampleRate * 0.45)
         let exciterDrive = dspModel == .highExciter ? normalIntensity : 0
         let exciterWetMix = dspModel == .highExciter ? normalBody : 0
-        let exciterOversampleFactor = makeExciterOversampleFactor(sampleRate: sampleRate)
+        let exciterOversampleFactor = makeExciterOversampleFactor(
+            sampleRate: sampleRate,
+            mode: exciterOversamplingMode
+        )
         let exciterLowPassFrequency = min(Float(20_000), sampleRate * 0.40)
         let exciterStage1Rate = sampleRate * 2
         let exciterStage2Rate = sampleRate * 4
@@ -2113,8 +2183,14 @@ enum DSPPrecompute {
         )
     }
 
-    static func makeExciterOversampleFactor(sampleRate: Float) -> UInt32 {
-        ExciterOversamplingPolicy.factor(for: Double(sampleRate))
+    static func makeExciterOversampleFactor(
+        sampleRate: Float,
+        mode: ExciterOversamplingMode = .auto
+    ) -> UInt32 {
+        ExciterOversamplingPolicy.resolve(
+            processingSampleRate: Double(sampleRate),
+            mode: mode
+        ).effectiveFactor
     }
 
     static func makeSpatialSettings(sampleRate: Float, settings: SpatialSettings) -> LCSpatialSettings {
@@ -2530,21 +2606,26 @@ final class HighExciterDSP {
         private var drive: Float = 0
         private var wetMix: Float = 0
         private var oversampleFactor: UInt32 = 1
+        private var transitionSamplesRemaining: UInt32 = 0
 
         func update(_ settings: LCDSPSettings) {
+            let nextFactor: UInt32
+            switch settings.exciterOversampleFactor {
+            case 4: nextFactor = 4
+            case 2: nextFactor = 2
+            default: nextFactor = 1
+            }
+            if oversampleFactor != nextFactor {
+                stage1.resetState()
+                stage2.resetState()
+                transitionSamplesRemaining = 256
+            }
             highPass.update(settings.exciterHighPass)
             stage1.update(settings.exciterStage1LowPass1, settings.exciterStage1LowPass2)
             stage2.update(settings.exciterStage2LowPass1, settings.exciterStage2LowPass2)
             drive = settings.exciterDrive
             wetMix = settings.exciterWetMix
-            switch settings.exciterOversampleFactor {
-            case 4:
-                oversampleFactor = 4
-            case 2:
-                oversampleFactor = 2
-            default:
-                oversampleFactor = 1
-            }
+            oversampleFactor = nextFactor
         }
 
         func resetState() {
@@ -2593,7 +2674,12 @@ final class HighExciterDSP {
                 harmonic = makeHarmonic(high)
             }
 
-            return fastClamp(dry + harmonic * wetMix)
+            var transitionGain: Float = 1
+            if transitionSamplesRemaining > 0 {
+                transitionGain = Float(256 - transitionSamplesRemaining) / 256
+                transitionSamplesRemaining -= 1
+            }
+            return fastClamp(dry + harmonic * wetMix * transitionGain)
         }
 
         private func makeHarmonic(_ input: Float) -> Float {
@@ -2619,13 +2705,19 @@ final class HighExciterDSP {
     private let left = Channel()
     private let right = Channel()
 
-    init(sampleRate: Float, intensity: Float, body: Float, outputDb: Float, dspModel: Settings.DSPModel) {
+    init(sampleRate: Float,
+         intensity: Float,
+         body: Float,
+         outputDb: Float,
+         dspModel: Settings.DSPModel,
+         exciterOversamplingMode: ExciterOversamplingMode = .auto) {
         update(DSPPrecompute.makeDSPSettings(
             sampleRate: sampleRate,
             intensity: intensity,
             body: body,
             outputDb: outputDb,
-            dspModel: dspModel
+            dspModel: dspModel,
+            exciterOversamplingMode: exciterOversamplingMode
         ))
     }
 
@@ -2947,6 +3039,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private var currentBody: Float
     private var currentOutputDb: Float
     private var currentDSPModel: Settings.DSPModel
+    private var currentExciterOversamplingMode: ExciterOversamplingMode
     private var currentSpatialSettings: SpatialSettings
     private var currentCaptureTargetSummary = "전체 시스템"
     private var engineRestartCount: UInt64 = 0
@@ -2983,6 +3076,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         self.currentBody = settings.body
         self.currentOutputDb = settings.outputDb
         self.currentDSPModel = settings.dspModel
+        self.currentExciterOversamplingMode = settings.exciterOversamplingMode
         self.currentSpatialSettings = settings.spatial
         self.ringBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)) * 4, channels: 2)
         self.visualizerRingBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)), channels: 2)
@@ -2999,7 +3093,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             intensity: settings.intensity,
             body: settings.body,
             outputDb: settings.outputDb,
-            dspModel: settings.dspModel
+            dspModel: settings.dspModel,
+            exciterOversamplingMode: settings.exciterOversamplingMode
         )
         self.activeDSPModelID = settings.dspModel.controlID
         self.spatializer = Spatializer(sampleRate: Float(sampleRate), settings: settings.spatial)
@@ -3032,14 +3127,25 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         print("LowEnd system audio processing is running. Press Ctrl-C to stop.")
     }
 
-    func updateDSP(intensity: Float, body: Float, outputDb: Float, dspModel: Settings.DSPModel) {
+    func updateDSP(intensity: Float,
+                   body: Float,
+                   outputDb: Float,
+                   dspModel: Settings.DSPModel,
+                   exciterOversamplingMode: ExciterOversamplingMode) {
         managerQueue.async { [weak self] in
             guard let self else { return }
             currentIntensity = intensity
             currentBody = body
             currentOutputDb = outputDb
             currentDSPModel = dspModel
-            controlQueue.pushDSP(intensity: intensity, body: body, outputDb: outputDb, dspModel: dspModel)
+            currentExciterOversamplingMode = exciterOversamplingMode
+            controlQueue.pushDSP(
+                intensity: intensity,
+                body: body,
+                outputDb: outputDb,
+                dspModel: dspModel,
+                exciterOversamplingMode: exciterOversamplingMode
+            )
         }
     }
 
@@ -3243,7 +3349,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             intensity: currentIntensity,
             body: currentBody,
             outputDb: currentOutputDb,
-            dspModel: currentDSPModel
+            dspModel: currentDSPModel,
+            exciterOversamplingMode: currentExciterOversamplingMode
         )
         activeDSPModelID = currentDSPModel.controlID
         circuitDSP.update(dspSettings)

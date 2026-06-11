@@ -140,7 +140,8 @@ struct DSPPrecompute {
                                          float intensity,
                                          float body,
                                          float outputDb,
-                                         uint32_t dspModel);
+                                         uint32_t dspModel,
+                                         uint32_t exciterOversamplingMode = 0);
 
     /// Build a full LCSpatialSettings struct from user-friendly spatial parameters.
     /// This mirrors Swift DSPPrecompute.makeSpatialSettings().

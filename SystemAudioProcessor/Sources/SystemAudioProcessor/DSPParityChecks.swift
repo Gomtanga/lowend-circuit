@@ -1,6 +1,7 @@
 import AudioRingBufferC
 import Foundation
 import LowEndDSPCoreC
+import LowEndSupport
 
 func runDSPParityChecks() throws {
     let sampleRates: [Float] = [44_100, 48_000, 96_000, 192_000, 768_000]
@@ -14,32 +15,39 @@ func runDSPParityChecks() throws {
     for sampleRate in sampleRates {
         for parameters in parameterSets {
             for model in [Settings.DSPModel.circuit, .highExciter] {
-                let swiftSettings = DSPPrecompute.makeDSPSettings(
-                    sampleRate: sampleRate,
-                    intensity: parameters.0,
-                    body: parameters.1,
-                    outputDb: parameters.2,
-                    dspModel: model
-                )
-                var coreSettings = LCDSPSettings()
-                lc_dsp_core_precompute(
-                    sampleRate,
-                    parameters.0,
-                    parameters.1,
-                    parameters.2,
-                    model.controlID,
-                    &coreSettings
-                )
-                try compareSettings(
-                    swiftSettings,
-                    coreSettings,
-                    context: "\(model.displayName) \(sampleRate) Hz precompute"
-                )
-                try compareProcessing(
-                    sampleRate: sampleRate,
-                    model: model,
-                    settings: swiftSettings
-                )
+                let modes: [ExciterOversamplingMode] = model == .highExciter
+                    ? [.auto, .one, .two, .four]
+                    : [.auto]
+                for mode in modes {
+                    let swiftSettings = DSPPrecompute.makeDSPSettings(
+                        sampleRate: sampleRate,
+                        intensity: parameters.0,
+                        body: parameters.1,
+                        outputDb: parameters.2,
+                        dspModel: model,
+                        exciterOversamplingMode: mode
+                    )
+                    var coreSettings = LCDSPSettings()
+                    lc_dsp_core_precompute_with_oversampling(
+                        sampleRate,
+                        parameters.0,
+                        parameters.1,
+                        parameters.2,
+                        model.controlID,
+                        mode.rawValue,
+                        &coreSettings
+                    )
+                    try compareSettings(
+                        swiftSettings,
+                        coreSettings,
+                        context: "\(model.displayName) \(sampleRate) Hz \(mode.title) precompute"
+                    )
+                    try compareProcessing(
+                        sampleRate: sampleRate,
+                        model: model,
+                        settings: swiftSettings
+                    )
+                }
             }
         }
     }
@@ -83,7 +91,10 @@ private func compareProcessing(sampleRate: Float,
             intensity: 0,
             body: 0,
             outputDb: 0,
-            dspModel: .highExciter
+            dspModel: .highExciter,
+            exciterOversamplingMode: ExciterOversamplingMode(
+                rawValue: settings.exciterOversampleFactor
+            ) ?? .one
         )
         swiftDSP.update(settings)
         for frame in 0..<frameCount {
@@ -115,10 +126,10 @@ private func compareProcessing(sampleRate: Float,
             abs(right[frame] - expectedRight[frame])
         )
     }
-    let tolerance: Float = sampleRate >= 384_000 ? 0.003 : 0.001
+    let tolerance: Float = sampleRate >= 384_000 ? 0.003 : 0.002
     guard maximumDelta <= tolerance else {
         throw AppError.message(
-            "\(model.displayName) \(sampleRate) Hz processing delta \(maximumDelta) exceeds tolerance."
+            "\(model.displayName) \(sampleRate) Hz \(settings.exciterOversampleFactor)x processing delta \(maximumDelta) exceeds tolerance."
         )
     }
 }

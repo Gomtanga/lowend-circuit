@@ -121,7 +121,7 @@ static void test_stereo_isolation() {
 
     float l, r;
     // Alternating pattern to keep HP active on left, silent on right
-    for (int i = 0; i < 96; ++i) {
+    for (int i = 0; i < 384; ++i) {
         float leftInput = (i % 2 == 0) ? 0.5f : -0.5f;
         he.process(leftInput, 0.0f, l, r);
     }
@@ -144,7 +144,7 @@ static void test_wetmix_effect() {
     heHigh.update(highMix);
 
     float lLow = 0, rLow = 0, lHigh = 0, rHigh = 0;
-    for (int i = 0; i < 96; ++i) {
+    for (int i = 0; i < 384; ++i) {
         float input = (i % 2 == 0) ? 0.3f : -0.3f;
         heLow.process(input, input, lLow, rLow);
         heHigh.process(input, input, lHigh, rHigh);
@@ -168,7 +168,7 @@ static void test_drive_effect() {
     heHigh.update(highDrive);
 
     float lLow = 0, rLow = 0, lHigh = 0, rHigh = 0;
-    for (int i = 0; i < 96; ++i) {
+    for (int i = 0; i < 384; ++i) {
         float input = (i % 2 == 0) ? 0.3f : -0.3f;
         heLow.process(input, input, lLow, rLow);
         heHigh.process(input, input, lHigh, rHigh);
@@ -216,6 +216,16 @@ static void test_sample_rate_dependence() {
     TEST("44.1k uses 4x oversampling", s44.exciterOversampleFactor == 4);
     TEST("96k uses 2x oversampling", s96.exciterOversampleFactor == 2);
     TEST("192k uses 1x oversampling", s192.exciterOversampleFactor == 1);
+
+    auto manual4At96 = lowend::DSPPrecompute::makeDSPSettings(
+        96000.0f, 100.0f, 100.0f, 0.0f, 2, 4);
+    auto manual4At192 = lowend::DSPPrecompute::makeDSPSettings(
+        192000.0f, 100.0f, 100.0f, 0.0f, 2, 4);
+    auto manual4At768 = lowend::DSPPrecompute::makeDSPSettings(
+        768000.0f, 100.0f, 100.0f, 0.0f, 2, 4);
+    TEST("96k manual 4x remains 4x", manual4At96.exciterOversampleFactor == 4);
+    TEST("192k manual 4x clamps to 2x", manual4At192.exciterOversampleFactor == 2);
+    TEST("768k manual 4x clamps to 1x", manual4At768.exciterOversampleFactor == 1);
 
     lowend::HighExciter he44, he96, he192;
     he44.update(s44);
