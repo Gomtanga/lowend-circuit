@@ -1827,8 +1827,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         let tracker = SourceFormatTracker { [weak self] snapshot in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                sourceFormatLabel?.stringValue = snapshot.indicatorText
-                sourceFormatLabel?.toolTip = snapshot.indicatorText
+                self.sourceFormatLabel?.stringValue = snapshot.indicatorText
+                self.sourceFormatLabel?.toolTip = snapshot.indicatorText
             }
         }
         sourceFormatTracker = tracker
