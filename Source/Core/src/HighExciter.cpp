@@ -83,7 +83,14 @@ float HighExciter::Channel::processSample(float input) {
         harmonic = makeHarmonic(high);
     }
 
-    return fastClamp(dry + harmonic * wetMix);
+    float transitionGain = 1.0f;
+    if (transitionSamplesRemaining > 0) {
+        constexpr float transitionLength = 256.0f;
+        transitionGain = (transitionLength
+            - static_cast<float>(transitionSamplesRemaining)) / transitionLength;
+        --transitionSamplesRemaining;
+    }
+    return fastClamp(dry + harmonic * wetMix * transitionGain);
 }
 
 float HighExciter::Channel::makeHarmonic(float input) const {
@@ -111,14 +118,20 @@ float HighExciter::Channel::fastClamp(float value) {
 
 void HighExciter::update(const LCDSPSettings& settings) {
     auto assign = [](Channel& ch, const LCDSPSettings& s) {
+        const uint32_t nextFactor = s.exciterOversampleFactor == 4 ? 4
+            : s.exciterOversampleFactor == 2 ? 2
+                                             : 1;
+        if (ch.oversampleFactor != nextFactor) {
+            ch.stage1.reset();
+            ch.stage2.reset();
+            ch.transitionSamplesRemaining = 256;
+        }
         ch.highPass.update(s.exciterHighPass);
         ch.stage1.update(s.exciterStage1LowPass1, s.exciterStage1LowPass2);
         ch.stage2.update(s.exciterStage2LowPass1, s.exciterStage2LowPass2);
         ch.drive = s.exciterDrive;
         ch.wetMix = s.exciterWetMix;
-        ch.oversampleFactor = s.exciterOversampleFactor == 4 ? 4
-                                  : s.exciterOversampleFactor == 2 ? 2
-                                                                  : 1;
+        ch.oversampleFactor = nextFactor;
     };
     assign(left_, settings);
     assign(right_, settings);

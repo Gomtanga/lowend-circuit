@@ -39,6 +39,20 @@ void lc_dsp_core_precompute(float sampleRate,
         sampleRate, intensity, body, outputDb, dspModel);
 }
 
+void lc_dsp_core_precompute_with_oversampling(float sampleRate,
+                                              float intensity,
+                                              float body,
+                                              float outputDb,
+                                              uint32_t dspModel,
+                                              uint32_t exciterOversamplingMode,
+                                              LCDSPSettings *settings) {
+    if (settings == nullptr) {
+        return;
+    }
+    *settings = lowend::DSPPrecompute::makeDSPSettings(
+        sampleRate, intensity, body, outputDb, dspModel, exciterOversamplingMode);
+}
+
 void lc_dsp_core_update(LCDSPCore *core, const LCDSPSettings *settings) {
     if (core == nullptr || settings == nullptr) {
         return;

@@ -19,6 +19,13 @@ void lc_dsp_core_precompute(float sampleRate,
                             float outputDb,
                             uint32_t dspModel,
                             LCDSPSettings *settings);
+void lc_dsp_core_precompute_with_oversampling(float sampleRate,
+                                              float intensity,
+                                              float body,
+                                              float outputDb,
+                                              uint32_t dspModel,
+                                              uint32_t exciterOversamplingMode,
+                                              LCDSPSettings *settings);
 void lc_dsp_core_update(LCDSPCore *core, const LCDSPSettings *settings);
 void lc_dsp_core_process_stereo(LCDSPCore *core,
                                 float *left,
