@@ -27,6 +27,7 @@ public enum SourceFormatConfidence: Int, Comparable, Sendable {
 public enum SourceFormatEvidence: String, Sendable {
     case unifiedLog
     case appleScript
+    case tidalPlayerLog
     case unavailable
 }
 
@@ -80,7 +81,17 @@ public struct SourceFormatLogEntry: Equatable, Sendable {
     }
 }
 
+public enum TIDALPlayerLogResult: Equatable, Sendable {
+    case unavailable
+    case inactive
+    case format(SourceAudioFormat)
+}
+
 public enum SourceFormatParser {
+    private static let tidalSinkExpression = try? NSRegularExpression(
+        pattern: #"(?i)CoreaudioSink::open,\s*rate:\s*([0-9]+(?:\.[0-9]+)?),\s*type:\s*(int|float)([0-9]{1,2})"#
+    )
+
     private static let sampleRateExpressions = [
         #"(?i)(?:asbdSampleRate|sample[_ ]?rate|samplerate|mSampleRate)\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*(kHz|Hz)?"#,
         #"(?i)(?:input|source|stream)[^\n]{0,96}?([0-9]{4,7}(?:\.[0-9]+)?)\s*Hz"#,
@@ -105,6 +116,63 @@ public enum SourceFormatParser {
 
     public static func parseTIDAL(entries: [SourceFormatLogEntry]) -> SourceAudioFormat? {
         parse(entries: entries, player: .tidal)
+    }
+
+    public static func parseTIDALPlayerLog(entries: [SourceFormatLogEntry],
+                                           observedAt: Date = Date()) -> SourceAudioFormat? {
+        guard case let .format(format) = parseTIDALPlayerLogResult(
+            entries: entries,
+            observedAt: observedAt
+        ) else {
+            return nil
+        }
+        return format
+    }
+
+    public static func parseTIDALPlayerLogResult(
+        entries: [SourceFormatLogEntry],
+        observedAt: Date = Date()
+    ) -> TIDALPlayerLogResult {
+        guard let tidalSinkExpression else { return .unavailable }
+
+        var latestFormat: (sampleRate: Double, bitDepth: Int)?
+        var playbackIsActive: Bool?
+
+        for entry in entries.sorted(by: { $0.date < $1.date }) {
+            let message = entry.message
+            if let captures = captures(expression: tidalSinkExpression, in: message),
+               let sampleRate = Double(captures[0]),
+               let bitDepth = Int(captures[2]),
+               isPlausibleSampleRate(sampleRate),
+               (8...64).contains(bitDepth) {
+                latestFormat = (sampleRate, bitDepth)
+            }
+
+            if message.contains(#""signal": "media.state""#) {
+                if message.contains(#""state": "active""#) {
+                    playbackIsActive = true
+                } else if message.contains(#""state": "paused""#)
+                            || message.contains(#""state": "stopped""#)
+                            || message.contains(#""state": "completed""#) {
+                    playbackIsActive = false
+                }
+            }
+        }
+
+        guard playbackIsActive == true else {
+            return playbackIsActive == false ? .inactive : .unavailable
+        }
+        guard let latestFormat else { return .unavailable }
+        return .format(
+            SourceAudioFormat(
+                player: .tidal,
+                sampleRate: latestFormat.sampleRate,
+                bitDepth: latestFormat.bitDepth,
+                confidence: .detected,
+                evidence: .tidalPlayerLog,
+                observedAt: observedAt
+            )
+        )
     }
 
     private static func parse(entries: [SourceFormatLogEntry],

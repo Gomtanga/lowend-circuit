@@ -29,6 +29,8 @@ final class SourceFormatTracker: @unchecked Sendable {
     private var cachedFormats: [SourcePlayer: SourceAudioFormat] = [:]
     private let cacheLifetime: TimeInterval = 15
     private lazy var logStore: OSLogStore? = try? OSLogStore.local()
+    private let tidalPlayerLogURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/TIDAL/player.log")
 
     init(onUpdate: @escaping @Sendable (SourceFormatSnapshot) -> Void) {
         self.onUpdate = onUpdate
@@ -70,8 +72,15 @@ final class SourceFormatTracker: @unchecked Sendable {
         }
 
         if activePlayers.contains(.tidal) {
-            if let tidalFormat = readUnifiedLog(player: .tidal) {
+            switch readTIDALPlayerLog(observedAt: now) {
+            case let .format(tidalFormat):
                 cachedFormats[.tidal] = tidalFormat
+            case .inactive:
+                cachedFormats.removeValue(forKey: .tidal)
+            case .unavailable:
+                if let tidalFormat = readUnifiedLog(player: .tidal) {
+                    cachedFormats[.tidal] = tidalFormat
+                }
             }
         } else {
             cachedFormats.removeValue(forKey: .tidal)
@@ -129,6 +138,36 @@ final class SourceFormatTracker: @unchecked Sendable {
             }
         } catch {
             return nil
+        }
+    }
+
+    private func readTIDALPlayerLog(observedAt: Date) -> TIDALPlayerLogResult {
+        guard let handle = try? FileHandle(forReadingFrom: tidalPlayerLogURL) else {
+            return .unavailable
+        }
+        defer { try? handle.close() }
+
+        do {
+            let fileSize = try handle.seekToEnd()
+            let readSize = min(fileSize, 256 * 1_024)
+            try handle.seek(toOffset: fileSize - readSize)
+            let data = try handle.readToEnd() ?? Data()
+            guard let text = String(data: data, encoding: .utf8) else {
+                return .unavailable
+            }
+
+            let entries = text.split(separator: "\n").enumerated().map { index, line in
+                SourceFormatLogEntry(
+                    date: observedAt.addingTimeInterval(Double(index) * 0.000_001),
+                    message: String(line)
+                )
+            }
+            return SourceFormatParser.parseTIDALPlayerLogResult(
+                entries: entries,
+                observedAt: observedAt
+            )
+        } catch {
+            return .unavailable
         }
     }
 

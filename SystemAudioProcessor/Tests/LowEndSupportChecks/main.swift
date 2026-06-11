@@ -81,6 +81,58 @@ require(tidalFormat?.sampleRate == 44_100, "TIDAL source stream sample rate must
 require(tidalFormat?.bitDepth == 16, "TIDAL source stream bit depth must parse")
 require(tidalFormat?.player == .tidal, "TIDAL parser must preserve player identity")
 
+let tidalPlayerLogEntries = [
+    SourceFormatLogEntry(
+        date: now,
+        message: "[tisoc] CoreaudioSink::open, rate: 96000, type: int24"
+    ),
+    SourceFormatLogEntry(
+        date: now.addingTimeInterval(0.1),
+        message: #"SIGNAL: {"signal": "media.state", "state": "active"}"#
+    )
+]
+let tidalPlayerFormat = SourceFormatParser.parseTIDALPlayerLog(
+    entries: tidalPlayerLogEntries,
+    observedAt: now.addingTimeInterval(0.2)
+)
+require(tidalPlayerFormat?.sampleRate == 96_000, "TIDAL player log must expose 96 kHz")
+require(tidalPlayerFormat?.bitDepth == 24, "TIDAL player log int24 must expose 24-bit")
+require(tidalPlayerFormat?.confidence == .detected, "TIDAL player log must be detected")
+require(
+    tidalPlayerFormat?.evidence == .tidalPlayerLog,
+    "TIDAL player log evidence must remain explicit"
+)
+
+let pausedTidalEntries = tidalPlayerLogEntries + [
+    SourceFormatLogEntry(
+        date: now.addingTimeInterval(0.3),
+        message: #"SIGNAL: {"signal": "media.state", "state": "paused"}"#
+    )
+]
+require(
+    SourceFormatParser.parseTIDALPlayerLog(entries: pausedTidalEntries) == nil,
+    "paused TIDAL playback must not retain a stale source format"
+)
+
+let completedTidalEntries = tidalPlayerLogEntries + [
+    SourceFormatLogEntry(
+        date: now.addingTimeInterval(0.3),
+        message: #"SIGNAL: {"signal": "media.state", "state": "completed"}"#
+    )
+]
+require(
+    SourceFormatParser.parseTIDALPlayerLog(entries: completedTidalEntries) == nil,
+    "completed TIDAL playback must not retain a stale source format"
+)
+require(
+    SourceFormatParser.parseTIDALPlayerLogResult(entries: completedTidalEntries) == .inactive,
+    "completed TIDAL playback must explicitly invalidate the tracker cache"
+)
+require(
+    SourceFormatParser.parseTIDALPlayerLogResult(entries: []) == .unavailable,
+    "missing TIDAL player evidence must preserve the fallback path"
+)
+
 let newerOutputEntry = SourceFormatLogEntry(
     date: now.addingTimeInterval(2),
     message: "device sampleRate = 96000, 32-bit Float"
