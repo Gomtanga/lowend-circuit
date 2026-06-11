@@ -72,6 +72,183 @@ let appleCapabilitiesFormat = SourceFormatParser.parseAppleMusic(entries: [apple
 require(appleCapabilitiesFormat?.sampleRate == 96_000, "Apple Music kHz values must normalize to Hz")
 require(appleCapabilitiesFormat?.bitDepth == 24, "Apple Music capability bit depth must parse")
 
+// MARK: - Apple Music Playback State Detection
+
+let amPlayingContext = AppleMusicPlaybackContext(
+    state: .playing, persistentID: "track-abc", sampleRate: 44_100, observedAt: now
+)
+let amPausedContext = AppleMusicPlaybackContext(
+    state: .paused, persistentID: "track-abc", sampleRate: 44_100, observedAt: now
+)
+let amStoppedContext = AppleMusicPlaybackContext(
+    state: .stopped, persistentID: nil, sampleRate: nil, observedAt: now
+)
+let amNotRunningContext = AppleMusicPlaybackContext(
+    state: .notRunning, persistentID: nil, sampleRate: nil, observedAt: now
+)
+
+// Paused/stopped/not-running must return nil regardless of log evidence
+require(
+    SourceFormatParser.resolveAppleMusicFormat(
+        logEntries: [appleDecoderEntry], scriptContext: amPausedContext
+    ) == nil,
+    "paused Apple Music must not produce a source format"
+)
+require(
+    SourceFormatParser.resolveAppleMusicFormat(
+        logEntries: [appleDecoderEntry], scriptContext: amStoppedContext
+    ) == nil,
+    "stopped Apple Music must not produce a source format"
+)
+require(
+    SourceFormatParser.resolveAppleMusicFormat(
+        logEntries: [], scriptContext: amNotRunningContext
+    ) == nil,
+    "not-running Apple Music must not produce a source format"
+)
+
+// Playing with only AppleScript → Inferred
+let amScriptOnly = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [], scriptContext: amPlayingContext
+)
+require(amScriptOnly?.sampleRate == 44_100, "AppleScript-only playing must return sample rate")
+require(amScriptOnly?.bitDepth == nil, "AppleScript-only must not invent bit depth")
+require(amScriptOnly?.confidence == .inferred, "AppleScript-only must be Inferred")
+require(amScriptOnly?.evidence == .appleScript, "AppleScript-only evidence must be appleScript")
+
+// Playing with only Unified Log → detected if source keywords present
+let amLogOnlyPlaying = AppleMusicPlaybackContext(
+    state: .playing, persistentID: "track-xyz", sampleRate: nil, observedAt: now
+)
+let amLogOnly = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [appleDecoderEntry], scriptContext: amLogOnlyPlaying
+)
+require(amLogOnly?.sampleRate == 192_000, "log-only playing must return log sample rate")
+require(amLogOnly?.bitDepth == 24, "log-only playing must return log bit depth")
+require(amLogOnly?.confidence == .detected, "log-only with source keywords must be Detected")
+require(amLogOnly?.evidence == .unifiedLog, "log-only evidence must be unifiedLog")
+
+// Cross-validation: rates agree → prefer log confidence + bit depth
+let amPlaying44 = AppleMusicPlaybackContext(
+    state: .playing, persistentID: "track-44", sampleRate: 44_100, observedAt: now.addingTimeInterval(1)
+)
+let am44LogEntry = SourceFormatLogEntry(
+    date: now,
+    message: "ACAppleLosslessDecoder.cpp Input format: 2 ch, 44100 Hz, decoded from 16-bit source"
+)
+let amCrossValidated = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [am44LogEntry], scriptContext: amPlaying44
+)
+require(amCrossValidated?.sampleRate == 44_100, "cross-validated rate must match")
+require(amCrossValidated?.bitDepth == 16, "cross-validated bit depth must come from log")
+require(amCrossValidated?.confidence == .detected, "cross-validated must use log confidence")
+require(amCrossValidated?.evidence == .unifiedLog, "cross-validated must prefer log evidence")
+
+// Cross-validation: rates disagree → AppleScript wins (reflects current track, log may be stale)
+let amPlaying48 = AppleMusicPlaybackContext(
+    state: .playing, persistentID: "track-disagree", sampleRate: 48_000, observedAt: now
+)
+let amDisagree = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [am44LogEntry], scriptContext: amPlaying48
+)
+require(amDisagree?.sampleRate == 48_000, "rate disagreement must prefer AppleScript rate")
+require(amDisagree?.confidence == .inferred, "rate disagreement must use Inferred confidence")
+require(amDisagree?.evidence == .appleScript, "rate disagreement must use AppleScript evidence")
+
+// MARK: - Apple Music Rate Transition Fixtures
+
+let amRate44Log = SourceFormatLogEntry(
+    date: now,
+    message: "ACAppleLosslessDecoder.cpp Input format: 2 ch, 44100 Hz, decoded from 16-bit source"
+)
+let amRate48Log = SourceFormatLogEntry(
+    date: now.addingTimeInterval(2),
+    message: "ACAppleLosslessDecoder.cpp Input format: 2 ch, 48000 Hz, decoded from 24-bit source"
+)
+let amRate96Log = SourceFormatLogEntry(
+    date: now.addingTimeInterval(4),
+    message: "ACAppleLosslessDecoder.cpp Input format: 2 ch, 96000 Hz, decoded from 24-bit source"
+)
+let amRate192Log = SourceFormatLogEntry(
+    date: now.addingTimeInterval(6),
+    message: "ACAppleLosslessDecoder.cpp Input format: 2 ch, 192000 Hz, decoded from 24-bit source"
+)
+
+// 44.1 → 48 kHz transition
+let amTrack44to48 = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [amRate44Log, amRate48Log],
+    scriptContext: AppleMusicPlaybackContext(
+        state: .playing, persistentID: "track-48", sampleRate: 48_000, observedAt: now.addingTimeInterval(2)
+    )
+)
+require(amTrack44to48?.sampleRate == 48_000, "44.1→48 kHz transition must show 48 kHz")
+require(amTrack44to48?.bitDepth == 24, "44.1→48 kHz transition must show new bit depth")
+
+// 48 → 96 kHz transition
+let amTrack48to96 = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [amRate48Log, amRate96Log],
+    scriptContext: AppleMusicPlaybackContext(
+        state: .playing, persistentID: "track-96", sampleRate: 96_000, observedAt: now.addingTimeInterval(4)
+    )
+)
+require(amTrack48to96?.sampleRate == 96_000, "48→96 kHz transition must show 96 kHz")
+
+// 96 → 192 kHz transition
+let amTrack96to192 = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [amRate96Log, amRate192Log],
+    scriptContext: AppleMusicPlaybackContext(
+        state: .playing, persistentID: "track-192", sampleRate: 192_000, observedAt: now.addingTimeInterval(6)
+    )
+)
+require(amTrack96to192?.sampleRate == 192_000, "96→192 kHz transition must show 192 kHz")
+
+// 192 → 44.1 kHz transition (high-res to lossy)
+let amRate44LogLate = SourceFormatLogEntry(
+    date: now.addingTimeInterval(8),
+    message: "ACAppleLosslessDecoder.cpp Input format: 2 ch, 44100 Hz, decoded from 16-bit source"
+)
+let amTrack192to44 = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [amRate192Log, amRate44LogLate],
+    scriptContext: AppleMusicPlaybackContext(
+        state: .playing, persistentID: "track-44b", sampleRate: 44_100, observedAt: now.addingTimeInterval(8)
+    )
+)
+require(amTrack192to44?.sampleRate == 44_100, "192→44.1 kHz transition must show 44.1 kHz")
+
+// 96 kHz playing → paused → 96 kHz resumes (format clears on pause)
+let am96Paused = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [amRate96Log],
+    scriptContext: AppleMusicPlaybackContext(
+        state: .paused, persistentID: "track-96", sampleRate: 96_000, observedAt: now.addingTimeInterval(3)
+    )
+)
+require(am96Paused == nil, "paused playback must clear format regardless of log evidence")
+
+let am96Resumed = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [amRate96Log],
+    scriptContext: AppleMusicPlaybackContext(
+        state: .playing, persistentID: "track-96", sampleRate: 96_000, observedAt: now.addingTimeInterval(5)
+    )
+)
+require(am96Resumed?.sampleRate == 96_000, "resumed 96 kHz must re-detect after pause")
+
+// MARK: - Apple Music indicator text with state
+
+let amPlayingNoScript = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [], scriptContext: AppleMusicPlaybackContext(
+        state: .playing, persistentID: "track-no-meta", sampleRate: nil, observedAt: now
+    )
+)
+require(amPlayingNoScript == nil, "playing with no script rate and no log must return nil")
+
+let amInferredIndicator = SourceFormatParser.resolveAppleMusicFormat(
+    logEntries: [], scriptContext: amPlayingContext
+)
+require(
+    amInferredIndicator?.indicatorText == "Source Apple Music: 44.1 kHz (Inferred)",
+    "Apple Music Inferred indicator must not show bit depth"
+)
+
 let tidalEntry = SourceFormatLogEntry(
     date: now,
     message: "TIDAL decoder source stream format sample_rate: 44100 bit_depth: 16"
