@@ -235,6 +235,11 @@ Log 메시지를 사용하며, 근거에 따라 `Detected` 또는 `Inferred`를 
 표시합니다. 확인할 수 없는 값은 Tap이나 DAC 값을 원본인 것처럼 대신
 표시하지 않고 `unknown`으로 유지합니다.
 
+`Rate Match Preview`는 감지된 Source rate와 현재 DAC가 보고하는 지원
+Nominal rate를 비교합니다. 정확히 같은 rate를 우선하고, 없으면 동일한
+44.1 kHz 또는 48 kHz 계열에서 가장 높은 지원 rate를 제안합니다. 이 표시는
+읽기 전용이며 DAC나 Engine rate를 변경하지 않습니다.
+
 Source 감지는 실시간 오디오 경로 밖에서 동작합니다. Apple Music 메타데이터
 fallback은 macOS 자동화 권한을 요청할 수 있습니다. TIDAL은 공개된 원본 포맷
 API가 없으므로 설치된 버전에서 인식 가능한 포맷 로그를 남기지 않으면

@@ -381,6 +381,40 @@ require(
     ) == nil,
     "rate matching must not silently cross sample-rate families"
 )
+let exactPreview = SourceRateMatchPolicy.preview(
+    sourceRate: 96_000,
+    currentDeviceRate: 96_000,
+    supportedRates: [44_100, 48_000, 96_000, 192_000],
+    isDeviceRateSettable: true
+)
+require(exactPreview.targetRate == 96_000, "preview must preserve an exact supported rate")
+require(
+    exactPreview.indicatorText
+        == "Rate Match Preview: 96.0 kHz -> 96.0 kHz (already matched)",
+    "preview must distinguish an already matched device"
+)
+let fallbackPreview = SourceRateMatchPolicy.preview(
+    sourceRate: 192_000,
+    currentDeviceRate: 48_000,
+    supportedRates: [44_100, 48_000, 96_000],
+    isDeviceRateSettable: true
+)
+require(fallbackPreview.targetRate == 96_000, "preview must expose the safe family fallback")
+require(
+    fallbackPreview.indicatorText
+        == "Rate Match Preview: 192.0 kHz -> 96.0 kHz (preview only)",
+    "preview must state that it does not mutate the device"
+)
+let waitingPreview = SourceRateMatchPolicy.preview(
+    sourceRate: nil,
+    currentDeviceRate: 48_000,
+    supportedRates: [44_100, 48_000],
+    isDeviceRateSettable: true
+)
+require(
+    waitingPreview.indicatorText == "Rate Match Preview: source waiting",
+    "preview must remain visible while waiting for source metadata"
+)
 
 guard let sharedCore = lc_dsp_core_create() else {
     fputs("FAIL: shared DSP core allocation\n", stderr)

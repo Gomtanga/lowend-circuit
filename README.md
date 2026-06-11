@@ -233,6 +233,11 @@ format messages with an explicit `Detected` or `Inferred` confidence label.
 Unknown values remain `unknown`; the app never substitutes the Tap or DAC rate
 and presents it as the source-file rate.
 
+`Rate Match Preview` compares a detected source rate with the nominal rates
+reported by the current DAC. It prefers an exact match, otherwise the highest
+supported rate in the same 44.1 kHz or 48 kHz family. The preview is read-only:
+it does not change the DAC or Engine rate.
+
 Source detection is intentionally outside the real-time audio path. Apple Music
 metadata fallback may request macOS Automation permission. TIDAL does not expose
 a public source-format API, so detection remains conservative and may show

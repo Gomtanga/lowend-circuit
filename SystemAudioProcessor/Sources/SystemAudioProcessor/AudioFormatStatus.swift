@@ -30,4 +30,6 @@ enum AudioFormatNotifications {
     static let sampleFormatKey = "sampleFormat"
     static let isSampleRateMatchedKey = "isSampleRateMatched"
     static let indicatorTextKey = "indicatorText"
+    static let supportedSampleRatesKey = "supportedSampleRates"
+    static let isSampleRateSettableKey = "isSampleRateSettable"
 }

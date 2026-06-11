@@ -1114,6 +1114,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var sourceFormatLabel: NSTextField!
     private var formatLabel: NSTextField!
     private var oversamplingLabel: NSTextField!
+    private var rateMatchPreviewLabel: NSTextField!
     private var diagnosticsLabel: NSTextField!
     private var rightPanelView: NSHostingView<AnyView>!
     private var bundleField: NSTextField!
@@ -1146,6 +1147,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private let spectrumModel = SpectrumModel()
     private let spatialControlModel = SpatialControlModel()
     private var currentProcessingSampleRate: Double?
+    private var currentSourceSampleRate: Double?
+    private var currentDeviceSampleRate: Double?
+    private var supportedDeviceSampleRates: [Double] = []
+    private var isDeviceSampleRateSettable = false
     private var exciterOversamplingMode: ExciterOversamplingMode = {
         let rawValue = UInt32(UserDefaults.standard.integer(forKey: "exciterOversamplingMode"))
         return ExciterOversamplingMode(rawValue: rawValue) ?? .auto
@@ -1159,6 +1164,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             object: nil
         )
         buildWindow()
+        refreshRateMatchDeviceCapabilities()
         startSourceFormatTracking()
     }
 
@@ -1221,6 +1227,13 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         oversamplingLabel.isHidden = true
         content.addSubview(oversamplingLabel)
 
+        rateMatchPreviewLabel = makeLabel("Rate Match Preview: source waiting", size: 11.5, weight: .medium)
+        rateMatchPreviewLabel.alignment = .right
+        rateMatchPreviewLabel.frame = NSRect(x: 740, y: 644, width: 430, height: 18)
+        rateMatchPreviewLabel.textColor = NSColor(calibratedRed: 0.62, green: 0.68, blue: 0.75, alpha: 1)
+        rateMatchPreviewLabel.toolTip = "원본 음원의 rate와 DAC 지원 rate를 비교한 미리보기입니다. 이 표시만으로 장치 설정을 변경하지 않습니다."
+        content.addSubview(rateMatchPreviewLabel)
+
         rightPanelView = NSHostingView(rootView: AnyView(
             RightPanelContainerView(
                 spatialModel: spatialControlModel,
@@ -1231,7 +1244,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
                 }
             )
         ))
-        rightPanelView.frame = NSRect(x: 740, y: 28, width: 430, height: 628)
+        rightPanelView.frame = NSRect(x: 740, y: 28, width: 430, height: 606)
         rightPanelView.wantsLayer = true
         rightPanelView.layer?.cornerRadius = 8
         content.addSubview(rightPanelView)
@@ -1890,6 +1903,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
                 guard let self else { return }
                 self.sourceFormatLabel?.stringValue = snapshot.indicatorText
                 self.sourceFormatLabel?.toolTip = snapshot.indicatorText
+                self.currentSourceSampleRate = snapshot.format?.sampleRate
+                self.updateRateMatchPreview()
             }
         }
         sourceFormatTracker = tracker
@@ -1924,7 +1939,42 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             currentProcessingSampleRate = sampleRate
             spectrumAnalyzer?.updateSampleRate(Float(sampleRate))
         }
+        currentDeviceSampleRate = notification.userInfo?[AudioFormatNotifications.sampleRateKey] as? Double
+        supportedDeviceSampleRates =
+            notification.userInfo?[AudioFormatNotifications.supportedSampleRatesKey] as? [Double]
+            ?? supportedDeviceSampleRates
+        isDeviceSampleRateSettable =
+            notification.userInfo?[AudioFormatNotifications.isSampleRateSettableKey] as? Bool
+            ?? isDeviceSampleRateSettable
+        updateRateMatchPreview()
         updateOversamplingIndicator()
+    }
+
+    private func refreshRateMatchDeviceCapabilities() {
+        do {
+            let deviceID = try HardwareSampleRateTracker.defaultOutputDevice()
+            let capabilities = try HardwareSampleRateTracker.rateCapabilities(for: deviceID)
+            currentDeviceSampleRate = try HardwareSampleRateTracker.nominalSampleRate(for: deviceID)
+            supportedDeviceSampleRates = capabilities.supportedRates
+            isDeviceSampleRateSettable = capabilities.isSettable
+        } catch {
+            currentDeviceSampleRate = nil
+            supportedDeviceSampleRates = []
+            isDeviceSampleRateSettable = false
+        }
+        updateRateMatchPreview()
+    }
+
+    private func updateRateMatchPreview() {
+        let preview = SourceRateMatchPolicy.preview(
+            sourceRate: currentSourceSampleRate,
+            currentDeviceRate: currentDeviceSampleRate,
+            supportedRates: supportedDeviceSampleRates,
+            isDeviceRateSettable: isDeviceSampleRateSettable
+        )
+        rateMatchPreviewLabel?.stringValue = preview.indicatorText
+        rateMatchPreviewLabel?.toolTip =
+            "\(preview.indicatorText)\nPreview는 장치 설정을 변경하지 않습니다."
     }
 
 }
@@ -2818,6 +2868,17 @@ private final class Spatializer {
 }
 
 private final class HardwareSampleRateTracker {
+    struct RateCapabilities {
+        let supportedRates: [Double]
+        let isSettable: Bool
+    }
+
+    private static let standardSampleRates: [Double] = [
+        8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000,
+        44_100, 48_000, 88_200, 96_000, 176_400, 192_000,
+        352_800, 384_000, 705_600, 768_000
+    ]
+
     private let queue: DispatchQueue
     private let onChange: (AudioObjectID, Double) -> Void
     private var outputDeviceID = AudioObjectID(kAudioObjectUnknown)
@@ -2987,6 +3048,61 @@ private final class HardwareSampleRateTracker {
         )
     }
 
+    static func rateCapabilities(for deviceID: AudioObjectID) throws -> RateCapabilities {
+        guard deviceID != kAudioObjectUnknown else {
+            throw AppError.message("Audio device is unknown.")
+        }
+
+        var address = availableNominalSampleRatesAddress()
+        var dataSize: UInt32 = 0
+        try check(
+            AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &dataSize),
+            "AudioObjectGetPropertyDataSize AvailableNominalSampleRates"
+        )
+
+        let count = Int(dataSize) / MemoryLayout<AudioValueRange>.stride
+        var ranges = Array(
+            repeating: AudioValueRange(mMinimum: 0, mMaximum: 0),
+            count: count
+        )
+        if count > 0 {
+            try ranges.withUnsafeMutableBytes { bytes in
+                guard let baseAddress = bytes.baseAddress else {
+                    throw AppError.message("Available sample-rate storage is unavailable.")
+                }
+                try check(
+                    AudioObjectGetPropertyData(
+                        deviceID,
+                        &address,
+                        0,
+                        nil,
+                        &dataSize,
+                        baseAddress
+                    ),
+                    "AudioObjectGetPropertyData AvailableNominalSampleRates"
+                )
+            }
+        }
+
+        var settable = DarwinBoolean(false)
+        var nominalAddress = nominalSampleRateAddress()
+        try check(
+            AudioObjectIsPropertySettable(deviceID, &nominalAddress, &settable),
+            "AudioObjectIsPropertySettable NominalSampleRate"
+        )
+
+        let supportedRates = standardSampleRates.filter { rate in
+            ranges.contains { range in
+                rate >= Double(range.mMinimum) - 0.5
+                    && rate <= Double(range.mMaximum) + 0.5
+            }
+        }
+        return RateCapabilities(
+            supportedRates: supportedRates,
+            isSettable: settable.boolValue
+        )
+    }
+
     private static func defaultOutputDeviceAddress() -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
@@ -2998,6 +3114,14 @@ private final class HardwareSampleRateTracker {
     private static func nominalSampleRateAddress() -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+    }
+
+    private static func availableNominalSampleRatesAddress() -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyAvailableNominalSampleRates,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
@@ -3360,6 +3484,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
 
     private func publishFormatStatus() {
         let status = makeFormatStatus()
+        let capabilities = try? HardwareSampleRateTracker.rateCapabilities(for: currentOutputDeviceID)
         DispatchQueue.main.async {
             NotificationCenter.default.post(
                 name: AudioFormatNotifications.didChange,
@@ -3370,7 +3495,9 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                     AudioFormatNotifications.processingSampleRateKey: status.processingSampleRate,
                     AudioFormatNotifications.sampleFormatKey: status.sampleFormat,
                     AudioFormatNotifications.isSampleRateMatchedKey: status.isSampleRateMatched,
-                    AudioFormatNotifications.indicatorTextKey: status.indicatorText
+                    AudioFormatNotifications.indicatorTextKey: status.indicatorText,
+                    AudioFormatNotifications.supportedSampleRatesKey: capabilities?.supportedRates ?? [],
+                    AudioFormatNotifications.isSampleRateSettableKey: capabilities?.isSettable ?? false
                 ]
             )
         }
