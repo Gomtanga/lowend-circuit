@@ -420,3 +420,77 @@ public extension SourceRateMatchPolicy {
         )
     }
 }
+
+public struct SourceRateMatchStabilityGate: Sendable {
+    private struct Key: Equatable, Sendable {
+        let player: SourcePlayer
+        let sourceRate: Int
+        let confidence: SourceFormatConfidence
+        let targetRate: Int
+        let currentDeviceRate: Int
+    }
+
+    public var minimumStableDuration: TimeInterval
+    public var requiredObservationCount: Int
+    private var candidate: Key?
+    private var candidateSince: Date?
+    private var observationCount = 0
+    private var emitted: Key?
+
+    public init(minimumStableDuration: TimeInterval = 1,
+                requiredObservationCount: Int = 2) {
+        self.minimumStableDuration = max(minimumStableDuration, 0)
+        self.requiredObservationCount = max(requiredObservationCount, 1)
+    }
+
+    public mutating func reset() {
+        candidate = nil
+        candidateSince = nil
+        observationCount = 0
+        emitted = nil
+    }
+
+    public mutating func observe(format: SourceAudioFormat?,
+                                 currentDeviceRate: Double,
+                                 supportedRates: [Double],
+                                 isDeviceRateSettable: Bool,
+                                 observedAt: Date) -> Double? {
+        guard isDeviceRateSettable,
+              let format,
+              let sourceRate = format.sampleRate,
+              format.hasUsableSampleRate,
+              let targetRate = SourceRateMatchPolicy.bestRate(
+                sourceRate: sourceRate,
+                supportedRates: supportedRates
+              ),
+              abs(targetRate - currentDeviceRate) > 1 else {
+            candidate = nil
+            candidateSince = nil
+            observationCount = 0
+            return nil
+        }
+
+        let key = Key(
+            player: format.player,
+            sourceRate: Int(sourceRate.rounded()),
+            confidence: format.confidence,
+            targetRate: Int(targetRate.rounded()),
+            currentDeviceRate: Int(currentDeviceRate.rounded())
+        )
+        if candidate != key {
+            candidate = key
+            candidateSince = observedAt
+            observationCount = 1
+            return nil
+        }
+
+        observationCount += 1
+        guard emitted != key,
+              observationCount >= requiredObservationCount,
+              observedAt.timeIntervalSince(candidateSince ?? observedAt) >= minimumStableDuration else {
+            return nil
+        }
+        emitted = key
+        return targetRate
+    }
+}

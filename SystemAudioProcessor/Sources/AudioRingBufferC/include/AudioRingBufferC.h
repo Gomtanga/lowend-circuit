@@ -11,6 +11,7 @@ extern "C" {
 typedef struct LCLockFreeRingBuffer LCLockFreeRingBuffer;
 typedef struct LCControlEventQueue LCControlEventQueue;
 typedef struct LCSpectrumSnapshot LCSpectrumSnapshot;
+typedef struct LCOutputGainRamp LCOutputGainRamp;
 
 enum {
     LC_SPECTRUM_BIN_COUNT = 128
@@ -96,6 +97,19 @@ uint64_t lc_ring_buffer_dropped_write_samples(const LCLockFreeRingBuffer *ringBu
 uint64_t lc_ring_buffer_underrun_samples(const LCLockFreeRingBuffer *ringBuffer);
 void lc_ring_buffer_reset_diagnostics(LCLockFreeRingBuffer *ringBuffer);
 void lc_ring_buffer_clear(LCLockFreeRingBuffer *ringBuffer);
+
+LCOutputGainRamp *lc_output_gain_ramp_create(float initialGain);
+void lc_output_gain_ramp_destroy(LCOutputGainRamp *ramp);
+void lc_output_gain_ramp_set_target(LCOutputGainRamp *ramp, float targetGain, uint32_t frameCount);
+float lc_output_gain_ramp_current(const LCOutputGainRamp *ramp);
+void lc_output_gain_ramp_apply_stereo(LCOutputGainRamp *ramp,
+                                      float *left,
+                                      float *right,
+                                      uint32_t frameCount);
+void lc_output_gain_ramp_apply_interleaved(LCOutputGainRamp *ramp,
+                                           float *samples,
+                                           uint32_t frameCount,
+                                           uint32_t channelCount);
 
 LCControlEventQueue *lc_control_event_queue_create(uint32_t requestedCapacityEvents);
 void lc_control_event_queue_destroy(LCControlEventQueue *queue);

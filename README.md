@@ -238,6 +238,13 @@ reported by the current DAC. It prefers an exact match, otherwise the highest
 supported rate in the same 44.1 kHz or 48 kHz family. The preview is read-only:
 it does not change the DAC or Engine rate.
 
+`Automatic Rate Match` is a separate opt-in checkbox and is OFF by default.
+When enabled, two stable source observations are required before a change. The
+output follows a fixed fade-out, engine stop/reset, DAC and Engine rate update,
+restart, and fade-in sequence. Turning the option off or quitting the app
+restores the rate that was active before the first automatic change. A failed
+device change is rolled back and automatic matching is paused for that session.
+
 Source detection is intentionally outside the real-time audio path. Apple Music
 metadata fallback may request macOS Automation permission. TIDAL does not expose
 a public source-format API, so detection remains conservative and may show

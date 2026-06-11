@@ -1,5 +1,6 @@
 #include "AudioRingBufferC.h"
 
+#include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,18 @@ struct LCSpectrumSnapshot {
     atomic_uint_fast32_t values[LC_SPECTRUM_BIN_COUNT];
 };
 
+struct LCOutputGainRamp {
+    atomic_uint_fast64_t commandSequence;
+    atomic_uint_fast32_t requestedTargetBits;
+    atomic_uint_fast32_t requestedFrameCount;
+    atomic_uint_fast32_t publishedCurrentBits;
+    uint64_t appliedSequence;
+    float currentGain;
+    float targetGain;
+    float step;
+    uint32_t remainingFrames;
+};
+
 static uint32_t float_to_bits(float value) {
     uint32_t bits = 0;
     memcpy(&bits, &value, sizeof(bits));
@@ -38,6 +51,16 @@ static float bits_to_float(uint32_t bits) {
     float value = 0;
     memcpy(&value, &bits, sizeof(value));
     return value;
+}
+
+static float clamp_gain(float gain) {
+    if (!isfinite(gain)) {
+        return 1.0f;
+    }
+    if (gain < 0.0f) {
+        return 0.0f;
+    }
+    return gain > 1.0f ? 1.0f : gain;
 }
 
 static uint32_t next_power_of_two(uint32_t value) {
@@ -243,6 +266,125 @@ void lc_ring_buffer_clear(LCLockFreeRingBuffer *ringBuffer) {
     memset(ringBuffer->storage, 0, ringBuffer->capacity * sizeof(float));
     atomic_store_explicit(&ringBuffer->readIndex, 0, memory_order_release);
     atomic_store_explicit(&ringBuffer->writeIndex, 0, memory_order_release);
+}
+
+LCOutputGainRamp *lc_output_gain_ramp_create(float initialGain) {
+    LCOutputGainRamp *ramp = (LCOutputGainRamp *)calloc(1, sizeof(LCOutputGainRamp));
+    if (ramp == NULL) {
+        return NULL;
+    }
+
+    initialGain = clamp_gain(initialGain);
+    atomic_init(&ramp->commandSequence, 0);
+    atomic_init(&ramp->requestedTargetBits, float_to_bits(initialGain));
+    atomic_init(&ramp->requestedFrameCount, 0);
+    atomic_init(&ramp->publishedCurrentBits, float_to_bits(initialGain));
+    ramp->currentGain = initialGain;
+    ramp->targetGain = initialGain;
+    return ramp;
+}
+
+void lc_output_gain_ramp_destroy(LCOutputGainRamp *ramp) {
+    free(ramp);
+}
+
+void lc_output_gain_ramp_set_target(LCOutputGainRamp *ramp, float targetGain, uint32_t frameCount) {
+    if (ramp == NULL) {
+        return;
+    }
+
+    targetGain = clamp_gain(targetGain);
+    atomic_store_explicit(&ramp->requestedTargetBits, float_to_bits(targetGain), memory_order_relaxed);
+    atomic_store_explicit(&ramp->requestedFrameCount, frameCount, memory_order_relaxed);
+    atomic_fetch_add_explicit(&ramp->commandSequence, 1, memory_order_release);
+}
+
+float lc_output_gain_ramp_current(const LCOutputGainRamp *ramp) {
+    if (ramp == NULL) {
+        return 1.0f;
+    }
+    return bits_to_float((uint32_t)atomic_load_explicit(
+        &ramp->publishedCurrentBits,
+        memory_order_acquire
+    ));
+}
+
+static void output_gain_ramp_consume_command(LCOutputGainRamp *ramp) {
+    const uint64_t sequence = atomic_load_explicit(&ramp->commandSequence, memory_order_acquire);
+    if (sequence == ramp->appliedSequence) {
+        return;
+    }
+
+    ramp->appliedSequence = sequence;
+    ramp->targetGain = bits_to_float((uint32_t)atomic_load_explicit(
+        &ramp->requestedTargetBits,
+        memory_order_relaxed
+    ));
+    ramp->remainingFrames = (uint32_t)atomic_load_explicit(
+        &ramp->requestedFrameCount,
+        memory_order_relaxed
+    );
+    if (ramp->remainingFrames == 0) {
+        ramp->currentGain = ramp->targetGain;
+        ramp->step = 0;
+    } else {
+        ramp->step = (ramp->targetGain - ramp->currentGain) / (float)ramp->remainingFrames;
+    }
+}
+
+static float output_gain_ramp_next(LCOutputGainRamp *ramp) {
+    if (ramp->remainingFrames > 0) {
+        ramp->currentGain += ramp->step;
+        ramp->remainingFrames--;
+        if (ramp->remainingFrames == 0) {
+            ramp->currentGain = ramp->targetGain;
+        }
+    }
+    return ramp->currentGain;
+}
+
+void lc_output_gain_ramp_apply_stereo(LCOutputGainRamp *ramp,
+                                      float *left,
+                                      float *right,
+                                      uint32_t frameCount) {
+    if (ramp == NULL || left == NULL || right == NULL) {
+        return;
+    }
+
+    output_gain_ramp_consume_command(ramp);
+    for (uint32_t frame = 0; frame < frameCount; ++frame) {
+        const float gain = output_gain_ramp_next(ramp);
+        left[frame] *= gain;
+        right[frame] *= gain;
+    }
+    atomic_store_explicit(
+        &ramp->publishedCurrentBits,
+        float_to_bits(ramp->currentGain),
+        memory_order_release
+    );
+}
+
+void lc_output_gain_ramp_apply_interleaved(LCOutputGainRamp *ramp,
+                                           float *samples,
+                                           uint32_t frameCount,
+                                           uint32_t channelCount) {
+    if (ramp == NULL || samples == NULL || channelCount == 0) {
+        return;
+    }
+
+    output_gain_ramp_consume_command(ramp);
+    for (uint32_t frame = 0; frame < frameCount; ++frame) {
+        const float gain = output_gain_ramp_next(ramp);
+        const uint32_t base = frame * channelCount;
+        for (uint32_t channel = 0; channel < channelCount; ++channel) {
+            samples[base + channel] *= gain;
+        }
+    }
+    atomic_store_explicit(
+        &ramp->publishedCurrentBits,
+        float_to_bits(ramp->currentGain),
+        memory_order_release
+    );
 }
 
 LCControlEventQueue *lc_control_event_queue_create(uint32_t requestedCapacityEvents) {

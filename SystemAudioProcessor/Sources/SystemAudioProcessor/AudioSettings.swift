@@ -22,6 +22,7 @@ struct Settings {
     var outputDb: Float = -1.5
     var dspModel: DSPModel = .circuit
     var exciterOversamplingMode: ExciterOversamplingMode = .auto
+    var automaticRateMatchingEnabled = false
     var spatial: SpatialSettings = SpatialSettings()
 
     enum Mode {
