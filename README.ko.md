@@ -227,6 +227,21 @@ Analysis 탭은 다음 기능을 제공합니다.
 포맷 변경은 즉시 표시하고 출력 처리율이 바뀌면 AVAudioEngine과 DSP 상태를
 안전하게 재설정합니다.
 
+별도의 `Source` 줄은 오디오 Tap과 독립된 읽기 전용 플레이어 어댑터가
+표시합니다. Apple Music 메타데이터와 인식 가능한 Apple Music/TIDAL Unified
+Log 메시지를 사용하며, 근거에 따라 `Detected` 또는 `Inferred`를 함께
+표시합니다. 확인할 수 없는 값은 Tap이나 DAC 값을 원본인 것처럼 대신
+표시하지 않고 `unknown`으로 유지합니다.
+
+Source 감지는 실시간 오디오 경로 밖에서 동작합니다. Apple Music 메타데이터
+fallback은 macOS 자동화 권한을 요청할 수 있습니다. TIDAL은 공개된 원본 포맷
+API가 없으므로 설치된 버전에서 인식 가능한 포맷 로그를 남기지 않으면
+`unknown`으로 표시될 수 있습니다.
+
+자동 레이트 매칭과 Device Lock의 단계별 설계는
+[Source Rate Tracking and Device Lock Plan](docs/source-rate-and-device-lock-plan.md)에
+정리되어 있습니다.
+
 DSP가 신호를 변경하므로 출력은 엄밀한 의미의 Bit-Perfect가 아닙니다. Tidal
 **Use Exclusive Mode** 같은 독점 출력은 Core Audio Process Tap을 우회하거나
 입력을 끊을 수 있습니다. LowEnd Native Audio를 사용할 때는 플레이어의 독점

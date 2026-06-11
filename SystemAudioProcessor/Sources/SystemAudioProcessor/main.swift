@@ -1099,6 +1099,7 @@ private final class AudioSpectrumAnalyzer: NSObject {
 private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     private var window: NSWindow!
     private var statusLabel: NSTextField!
+    private var sourceFormatLabel: NSTextField!
     private var formatLabel: NSTextField!
     private var oversamplingLabel: NSTextField!
     private var diagnosticsLabel: NSTextField!
@@ -1125,6 +1126,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var spatialAmountValueLabel: NSTextField!
     private var processor: SystemAudioProcessor?
     private var spectrumAnalyzer: AudioSpectrumAnalyzer?
+    private var sourceFormatTracker: SourceFormatTracker?
     private var diagnosticsTimer: Timer?
     private let dynamicsMeterModel = DynamicsMeterModel()
     private let spectrumModel = SpectrumModel()
@@ -1139,9 +1141,11 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             object: nil
         )
         buildWindow()
+        startSourceFormatTracking()
     }
 
     deinit {
+        sourceFormatTracker?.stop()
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -1180,15 +1184,21 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         subtitle.frame = NSRect(x: 30, y: 674, width: 680, height: 22)
         content.addSubview(subtitle)
 
-        formatLabel = makeLabel("처리 포맷 대기 중", size: 13, weight: .semibold)
+        sourceFormatLabel = makeLabel("Source: Apple Music/TIDAL 대기 중", size: 12.5, weight: .semibold)
+        sourceFormatLabel.alignment = .right
+        sourceFormatLabel.frame = NSRect(x: 740, y: 710, width: 430, height: 20)
+        sourceFormatLabel.toolTip = "플레이어 메타데이터 또는 Unified Log에서 감지한 원본 스트림 정보입니다. 확인할 수 없는 값은 추정하지 않고 unknown으로 표시합니다."
+        content.addSubview(sourceFormatLabel)
+
+        formatLabel = makeLabel("처리 포맷 대기 중", size: 12, weight: .semibold)
         formatLabel.alignment = .right
-        formatLabel.frame = NSRect(x: 740, y: 704, width: 430, height: 24)
-        formatLabel.toolTip = "Tap은 Core Audio 공유 믹서에서 캡처한 PCM, Engine은 DSP 처리율, DAC는 출력 장치 레이트입니다. Tidal 비독점 모드에서는 원본 파일 레이트가 제공되지 않습니다."
+        formatLabel.frame = NSRect(x: 740, y: 688, width: 430, height: 20)
+        formatLabel.toolTip = "Tap은 Core Audio 공유 믹서에서 캡처한 PCM, Engine은 DSP 처리율, DAC는 출력 장치 레이트입니다."
         content.addSubview(formatLabel)
 
         oversamplingLabel = makeLabel("", size: 12, weight: .semibold)
         oversamplingLabel.alignment = .right
-        oversamplingLabel.frame = NSRect(x: 740, y: 680, width: 430, height: 20)
+        oversamplingLabel.frame = NSRect(x: 740, y: 666, width: 430, height: 20)
         oversamplingLabel.toolTip = "전체 음원을 업스케일링하는 기능이 아니라 HighExciter의 비선형 배음 생성 구간에만 적용되는 내부 오버샘플링 상태입니다. Tap 값은 공유 시스템 PCM 처리율입니다."
         oversamplingLabel.isHidden = true
         content.addSubview(oversamplingLabel)
@@ -1203,7 +1213,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
                 }
             )
         ))
-        rightPanelView.frame = NSRect(x: 740, y: 28, width: 430, height: 636)
+        rightPanelView.frame = NSRect(x: 740, y: 28, width: 430, height: 628)
         rightPanelView.wantsLayer = true
         rightPanelView.layer?.cornerRadius = 8
         content.addSubview(rightPanelView)
@@ -1811,6 +1821,18 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             userInfo: nil,
             repeats: true
         )
+    }
+
+    private func startSourceFormatTracking() {
+        let tracker = SourceFormatTracker { [weak self] snapshot in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.sourceFormatLabel?.stringValue = snapshot.indicatorText
+                self.sourceFormatLabel?.toolTip = snapshot.indicatorText
+            }
+        }
+        sourceFormatTracker = tracker
+        tracker.start()
     }
 
     @objc private func updateDiagnostics() {
