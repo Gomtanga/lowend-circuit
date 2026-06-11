@@ -362,3 +362,61 @@ public enum SourceRateMatchPolicy {
         return abs(ratio - ratio.rounded()) <= 0.000_1
     }
 }
+
+public struct SourceRateMatchPreview: Equatable, Sendable {
+    public let sourceRate: Double?
+    public let currentDeviceRate: Double?
+    public let targetRate: Double?
+    public let isDeviceRateSettable: Bool
+
+    public init(sourceRate: Double?,
+                currentDeviceRate: Double?,
+                targetRate: Double?,
+                isDeviceRateSettable: Bool) {
+        self.sourceRate = sourceRate
+        self.currentDeviceRate = currentDeviceRate
+        self.targetRate = targetRate
+        self.isDeviceRateSettable = isDeviceRateSettable
+    }
+
+    public var indicatorText: String {
+        guard let sourceRate, sourceRate.isFinite, sourceRate >= 8_000 else {
+            return "Rate Match Preview: source waiting"
+        }
+        guard let targetRate else {
+            return "Rate Match Preview: \(Self.rateText(sourceRate)) -> no compatible DAC rate"
+        }
+
+        let suffix: String
+        if !isDeviceRateSettable {
+            suffix = "read-only device"
+        } else if let currentDeviceRate, abs(currentDeviceRate - targetRate) <= 1 {
+            suffix = "already matched"
+        } else {
+            suffix = "preview only"
+        }
+        return "Rate Match Preview: \(Self.rateText(sourceRate)) -> \(Self.rateText(targetRate)) (\(suffix))"
+    }
+
+    private static func rateText(_ sampleRate: Double) -> String {
+        sampleRate >= 1_000
+            ? String(format: "%.1f kHz", sampleRate / 1_000)
+            : String(format: "%.0f Hz", sampleRate)
+    }
+}
+
+public extension SourceRateMatchPolicy {
+    static func preview(sourceRate: Double?,
+                        currentDeviceRate: Double?,
+                        supportedRates: [Double],
+                        isDeviceRateSettable: Bool) -> SourceRateMatchPreview {
+        SourceRateMatchPreview(
+            sourceRate: sourceRate,
+            currentDeviceRate: currentDeviceRate,
+            targetRate: sourceRate.flatMap {
+                bestRate(sourceRate: $0, supportedRates: supportedRates)
+            },
+            isDeviceRateSettable: isDeviceRateSettable
+        )
+    }
+}
