@@ -415,6 +415,45 @@ require(
     waitingPreview.indicatorText == "Rate Match Preview: source waiting",
     "preview must remain visible while waiting for source metadata"
 )
+var stabilityGate = SourceRateMatchStabilityGate()
+let stableFormat = SourceAudioFormat(
+    player: .tidal,
+    sampleRate: 96_000,
+    bitDepth: 24,
+    confidence: .detected,
+    evidence: .tidalPlayerLog,
+    observedAt: now
+)
+require(
+    stabilityGate.observe(
+        format: stableFormat,
+        currentDeviceRate: 48_000,
+        supportedRates: [44_100, 48_000, 96_000],
+        isDeviceRateSettable: true,
+        observedAt: now
+    ) == nil,
+    "rate matching must wait for a stable second observation"
+)
+require(
+    stabilityGate.observe(
+        format: stableFormat,
+        currentDeviceRate: 48_000,
+        supportedRates: [44_100, 48_000, 96_000],
+        isDeviceRateSettable: true,
+        observedAt: now.addingTimeInterval(1)
+    ) == 96_000,
+    "stable source observations must emit the target rate"
+)
+require(
+    stabilityGate.observe(
+        format: stableFormat,
+        currentDeviceRate: 48_000,
+        supportedRates: [44_100, 48_000, 96_000],
+        isDeviceRateSettable: true,
+        observedAt: now.addingTimeInterval(2)
+    ) == nil,
+    "one stable source must not repeatedly emit the same transition"
+)
 
 guard let sharedCore = lc_dsp_core_create() else {
     fputs("FAIL: shared DSP core allocation\n", stderr)
@@ -474,5 +513,27 @@ require(lc_ring_buffer_dropped_write_samples(ring) == 2, "ring buffer must count
 lc_ring_buffer_reset_diagnostics(ring)
 require(lc_ring_buffer_underrun_samples(ring) == 0, "underrun diagnostics must reset")
 require(lc_ring_buffer_dropped_write_samples(ring) == 0, "drop diagnostics must reset")
+
+guard let gainRamp = lc_output_gain_ramp_create(1) else {
+    fputs("FAIL: output gain ramp allocation\n", stderr)
+    exit(1)
+}
+defer { lc_output_gain_ramp_destroy(gainRamp) }
+lc_output_gain_ramp_set_target(gainRamp, 0, 4)
+var rampLeft: [Float] = [1, 1, 1, 1]
+var rampRight: [Float] = [1, 1, 1, 1]
+rampLeft.withUnsafeMutableBufferPointer { left in
+    rampRight.withUnsafeMutableBufferPointer { right in
+        lc_output_gain_ramp_apply_stereo(gainRamp, left.baseAddress, right.baseAddress, 4)
+    }
+}
+require(abs(rampLeft[3]) < 0.000_1, "output ramp must reach silence")
+require(abs(lc_output_gain_ramp_current(gainRamp)) < 0.000_1, "output ramp must publish gain")
+lc_output_gain_ramp_set_target(gainRamp, 1, 2)
+var rampInterleaved: [Float] = [1, 1, 1, 1]
+rampInterleaved.withUnsafeMutableBufferPointer {
+    lc_output_gain_ramp_apply_interleaved(gainRamp, $0.baseAddress, 2, 2)
+}
+require(abs(rampInterleaved[3] - 1) < 0.000_1, "interleaved ramp must reach unity")
 
 print("LowEndSupportChecks: all checks passed")

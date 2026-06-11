@@ -1116,6 +1116,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var oversamplingLabel: NSTextField!
     private var rateMatchPreviewLabel: NSTextField!
     private var diagnosticsLabel: NSTextField!
+    private var automaticRateMatchButton: NSButton!
     private var rightPanelView: NSHostingView<AnyView>!
     private var bundleField: NSTextField!
     private var appsView: NSTextView!
@@ -1151,12 +1152,19 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var currentDeviceSampleRate: Double?
     private var supportedDeviceSampleRates: [Double] = []
     private var isDeviceSampleRateSettable = false
+    private var automaticRateMatchingEnabled = UserDefaults.standard.bool(
+        forKey: "automaticRateMatchingEnabled"
+    )
+    private var rateMatchStatusText = "Auto OFF"
     private var exciterOversamplingMode: ExciterOversamplingMode = {
         let rawValue = UInt32(UserDefaults.standard.integer(forKey: "exciterOversamplingMode"))
         return ExciterOversamplingMode(rawValue: rawValue) ?? .auto
     }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        rateMatchStatusText = automaticRateMatchingEnabled
+            ? "Auto ON: source 안정화 대기"
+            : "Auto OFF"
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(audioFormatDidChange(_:)),
@@ -1260,6 +1268,16 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         diagnosticsLabel.lineBreakMode = .byTruncatingMiddle
         diagnosticsLabel.toolTip = "출력 underrun, 출력/분석 버퍼 drop, 엔진 재시작 횟수와 실제 캡처 프로세스를 표시합니다."
         content.addSubview(diagnosticsLabel)
+
+        automaticRateMatchButton = NSButton(
+            checkboxWithTitle: "자동 Rate Match",
+            target: self,
+            action: #selector(automaticRateMatchChanged)
+        )
+        automaticRateMatchButton.frame = NSRect(x: 370, y: 295, width: 180, height: 24)
+        automaticRateMatchButton.state = automaticRateMatchingEnabled ? .on : .off
+        automaticRateMatchButton.toolTip = "감지된 Apple Music/TIDAL Source rate에 맞춰 기본 출력 DAC의 Nominal Sample Rate를 변경합니다. 기본값은 OFF입니다."
+        content.addSubview(automaticRateMatchButton)
 
         let modelLabel = makeLabel("Model", size: 13, weight: .semibold)
         modelLabel.frame = NSRect(x: 498, y: 638, width: 52, height: 26)
@@ -1554,6 +1572,17 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         sliderChanged()
     }
 
+    @objc private func automaticRateMatchChanged() {
+        automaticRateMatchingEnabled = automaticRateMatchButton.state == .on
+        UserDefaults.standard.set(
+            automaticRateMatchingEnabled,
+            forKey: "automaticRateMatchingEnabled"
+        )
+        rateMatchStatusText = automaticRateMatchingEnabled ? "Auto ON: source 안정화 대기" : "Auto OFF"
+        updateRateMatchPreview()
+        processor?.setAutomaticRateMatchingEnabled(automaticRateMatchingEnabled)
+    }
+
     @objc private func spatialControlChanged() {
         updateSpatialControls(from: spatialControlModel.settings, notifyProcessor: true)
     }
@@ -1830,6 +1859,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
                  outputDb: Float(outputSlider.doubleValue),
                  dspModel: selectedDSPModel(),
                  exciterOversamplingMode: exciterOversamplingMode,
+                 automaticRateMatchingEnabled: automaticRateMatchingEnabled,
                  spatial: spatialSettingsFromControls())
     }
 
@@ -1898,15 +1928,22 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     private func startSourceFormatTracking() {
-        let tracker = SourceFormatTracker { [weak self] snapshot in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.sourceFormatLabel?.stringValue = snapshot.indicatorText
-                self.sourceFormatLabel?.toolTip = snapshot.indicatorText
-                self.currentSourceSampleRate = snapshot.format?.sampleRate
-                self.updateRateMatchPreview()
+        let tracker = SourceFormatTracker(
+            onUpdate: { [weak self] snapshot in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.sourceFormatLabel?.stringValue = snapshot.indicatorText
+                    self.sourceFormatLabel?.toolTip = snapshot.indicatorText
+                    self.currentSourceSampleRate = snapshot.format?.sampleRate
+                    self.updateRateMatchPreview()
+                }
+            },
+            onObservation: { [weak self] snapshot in
+                Task { @MainActor [weak self] in
+                    self?.processor?.observeSourceFormat(snapshot.format)
+                }
             }
-        }
+        )
         sourceFormatTracker = tracker
         tracker.start()
     }
@@ -1946,6 +1983,14 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         isDeviceSampleRateSettable =
             notification.userInfo?[AudioFormatNotifications.isSampleRateSettableKey] as? Bool
             ?? isDeviceSampleRateSettable
+        if let enabled =
+            notification.userInfo?[AudioFormatNotifications.automaticRateMatchingEnabledKey] as? Bool {
+            automaticRateMatchingEnabled = enabled
+            automaticRateMatchButton?.state = enabled ? .on : .off
+        }
+        rateMatchStatusText =
+            notification.userInfo?[AudioFormatNotifications.rateMatchStatusKey] as? String
+            ?? rateMatchStatusText
         updateRateMatchPreview()
         updateOversamplingIndicator()
     }
@@ -1972,9 +2017,9 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             supportedRates: supportedDeviceSampleRates,
             isDeviceRateSettable: isDeviceSampleRateSettable
         )
-        rateMatchPreviewLabel?.stringValue = preview.indicatorText
+        rateMatchPreviewLabel?.stringValue = "\(preview.indicatorText) | \(rateMatchStatusText)"
         rateMatchPreviewLabel?.toolTip =
-            "\(preview.indicatorText)\nPreview는 장치 설정을 변경하지 않습니다."
+            "\(preview.indicatorText)\n자동 Rate Matching: \(rateMatchStatusText)"
     }
 
 }
@@ -3140,6 +3185,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private let settings: Settings
     private let ringBuffer: LockFreeFloatRingBuffer
     private let visualizerRingBuffer: LockFreeFloatRingBuffer
+    private let outputGainRamp: OpaquePointer
     private let controlQueue: LockFreeControlEventQueue
     private let scratchFrameCapacity = 8192
     private let inputScratch: UnsafeMutablePointer<Float>
@@ -3164,6 +3210,13 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private var currentOutputDb: Float
     private var currentDSPModel: Settings.DSPModel
     private var currentExciterOversamplingMode: ExciterOversamplingMode
+    private var automaticRateMatchingEnabled: Bool
+    private var rateMatchGate = SourceRateMatchStabilityGate()
+    private var rateMatchSessionDisabled = false
+    private var isAutomaticRateTransition = false
+    private var originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
+    private var originalRateMatchSampleRate: Double?
+    private var rateMatchStatus = "Auto OFF"
     private var currentSpatialSettings: SpatialSettings
     private var currentCaptureTargetSummary = "전체 시스템"
     private var engineRestartCount: UInt64 = 0
@@ -3201,6 +3254,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         self.currentOutputDb = settings.outputDb
         self.currentDSPModel = settings.dspModel
         self.currentExciterOversamplingMode = settings.exciterOversamplingMode
+        self.automaticRateMatchingEnabled = settings.automaticRateMatchingEnabled
+        self.rateMatchStatus = settings.automaticRateMatchingEnabled
+            ? "Auto ON: source 안정화 대기"
+            : "Auto OFF"
         self.currentSpatialSettings = settings.spatial
         self.ringBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)) * 4, channels: 2)
         self.visualizerRingBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)), channels: 2)
@@ -3222,10 +3279,16 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         )
         self.activeDSPModelID = settings.dspModel.controlID
         self.spatializer = Spatializer(sampleRate: Float(sampleRate), settings: settings.spatial)
+        guard let outputGainRamp = lc_output_gain_ramp_create(1) else {
+            inputScratch.deallocate()
+            throw AppError.message("Could not allocate the output gain ramp.")
+        }
+        self.outputGainRamp = outputGainRamp
     }
 
     deinit {
         stop()
+        lc_output_gain_ramp_destroy(outputGainRamp)
         inputScratch.deallocate()
     }
 
@@ -3281,6 +3344,53 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
     }
 
+    func setAutomaticRateMatchingEnabled(_ enabled: Bool) {
+        managerQueue.async { [weak self] in
+            guard let self else { return }
+            automaticRateMatchingEnabled = enabled
+            rateMatchSessionDisabled = false
+            rateMatchGate.reset()
+            rateMatchStatus = enabled ? "Auto ON: source 안정화 대기" : "Auto OFF"
+            if !enabled {
+                do {
+                    try restoreOriginalRateMatchIfNeeded()
+                } catch {
+                    rateMatchStatus = "Auto OFF: 원래 rate 복구 실패"
+                }
+            }
+            publishFormatStatus()
+        }
+    }
+
+    func observeSourceFormat(_ format: SourceAudioFormat?) {
+        managerQueue.async { [weak self] in
+            guard let self,
+                  automaticRateMatchingEnabled,
+                  !rateMatchSessionDisabled,
+                  isStarted,
+                  !isAutomaticRateTransition else {
+                return
+            }
+
+            do {
+                let capabilities = try HardwareSampleRateTracker.rateCapabilities(
+                    for: currentOutputDeviceID
+                )
+                if let targetRate = rateMatchGate.observe(
+                    format: format,
+                    currentDeviceRate: currentHardwareSampleRate,
+                    supportedRates: capabilities.supportedRates,
+                    isDeviceRateSettable: capabilities.isSettable,
+                    observedAt: Date()
+                ) {
+                    try performAutomaticRateTransition(to: targetRate)
+                }
+            } catch {
+                disableAutomaticRateMatchingForSession(error)
+            }
+        }
+    }
+
     func makeSpectrumAnalyzer(dynamicsModel: DynamicsMeterModel,
                               spectrumModel: SpectrumModel) -> AudioSpectrumAnalyzer {
         let sampleRate = managerQueue.sync { currentSampleRate }
@@ -3313,6 +3423,9 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             visualizerRingBuffer.clear()
             ringBuffer.resetDiagnostics()
             visualizerRingBuffer.resetDiagnostics()
+            if originalRateMatchSampleRate != nil {
+                try? restoreOriginalRateMatchIfNeeded(reconfigureEngine: false)
+            }
             isStarted = false
         }
     }
@@ -3339,7 +3452,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     }
 
     private func makeSourceNode() throws -> AVAudioSourceNode {
-        AVAudioSourceNode { [ringBuffer] _, _, frameCount, audioBufferList -> OSStatus in
+        AVAudioSourceNode { [ringBuffer, outputGainRamp] _, _, frameCount, audioBufferList -> OSStatus in
             let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
             let frames = Int(frameCount)
 
@@ -3349,20 +3462,187 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                     return noErr
                 }
                 ringBuffer.popStereo(left: left, right: right, frameCount: frames)
+                lc_output_gain_ramp_apply_stereo(
+                    outputGainRamp,
+                    left,
+                    right,
+                    UInt32(frames)
+                )
             } else if let buffer = abl.first,
                       let data = buffer.mData?.assumingMemoryBound(to: Float.self) {
                 let channels = max(Int(buffer.mNumberChannels), 1)
                 ringBuffer.popInterleaved(into: data, count: frames * channels)
+                lc_output_gain_ramp_apply_interleaved(
+                    outputGainRamp,
+                    data,
+                    UInt32(frames),
+                    UInt32(channels)
+                )
             }
 
             return noErr
         }
     }
 
+    private func performAutomaticRateTransition(to targetRate: Double) throws {
+        guard !isAutomaticRateTransition,
+              abs(targetRate - currentHardwareSampleRate) > 1 else {
+            return
+        }
+
+        if originalRateMatchSampleRate == nil {
+            originalRateMatchDeviceID = currentOutputDeviceID
+            originalRateMatchSampleRate = currentHardwareSampleRate
+        }
+
+        do {
+            try performRateTransition(
+                to: targetRate,
+                successStatus: "Auto matched: \(Self.rateText(targetRate))"
+            )
+        } catch {
+            let originalRate = originalRateMatchSampleRate
+            let originalDevice = originalRateMatchDeviceID
+            var rollbackSucceeded = false
+            if let originalRate, originalDevice == currentOutputDeviceID {
+                do {
+                    try performRateTransition(
+                        to: originalRate,
+                        successStatus: "Auto rollback: \(Self.rateText(originalRate))"
+                    )
+                    rollbackSucceeded = true
+                } catch {
+                    rollbackSucceeded = false
+                }
+            }
+            if rollbackSucceeded {
+                originalRateMatchSampleRate = nil
+                originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
+            }
+            throw error
+        }
+    }
+
+    private func restoreOriginalRateMatchIfNeeded(reconfigureEngine: Bool = true) throws {
+        guard let originalRate = originalRateMatchSampleRate,
+              originalRateMatchDeviceID == currentOutputDeviceID else {
+            originalRateMatchSampleRate = nil
+            originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
+            return
+        }
+
+        defer {
+            originalRateMatchSampleRate = nil
+            originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
+        }
+        if reconfigureEngine, isStarted {
+            try performRateTransition(
+                to: originalRate,
+                successStatus: "Auto OFF: \(Self.rateText(originalRate)) 복구"
+            )
+        } else {
+            try HardwareSampleRateTracker.setNominalSampleRate(
+                originalRate,
+                for: currentOutputDeviceID
+            )
+        }
+    }
+
+    private func performRateTransition(to targetRate: Double,
+                                       successStatus: String) throws {
+        guard !isAutomaticRateTransition else { return }
+        isAutomaticRateTransition = true
+        rateMatchStatus = "Auto switching: \(Self.rateText(targetRate))"
+        publishFormatStatus()
+        defer { isAutomaticRateTransition = false }
+
+        requestOutputGain(0, duration: 0.05)
+        waitForOutputGain(atMost: 0.001, timeout: 0.25)
+        suspendForHardwareReconfigure()
+
+        do {
+            try HardwareSampleRateTracker.setNominalSampleRate(
+                targetRate,
+                for: currentOutputDeviceID
+            )
+            let confirmedRate = try waitForNominalSampleRate(
+                targetRate,
+                deviceID: currentOutputDeviceID
+            )
+            try restartForHardwareFormat(
+                deviceID: currentOutputDeviceID,
+                hardwareSampleRate: confirmedRate
+            )
+            rateMatchStatus = successStatus
+            requestOutputGain(1, duration: 0.08)
+            publishFormatStatus()
+        } catch {
+            if !engine.isRunning {
+                let recoveryRate =
+                    (try? HardwareSampleRateTracker.nominalSampleRate(for: currentOutputDeviceID))
+                    ?? currentHardwareSampleRate
+                try? restartForHardwareFormat(
+                    deviceID: currentOutputDeviceID,
+                    hardwareSampleRate: Self.validSampleRate(recoveryRate)
+                )
+            }
+            requestOutputGain(1, duration: 0.08)
+            throw error
+        }
+    }
+
+    private func requestOutputGain(_ target: Float, duration: Double) {
+        let frameCount = UInt32(max(currentSampleRate * max(duration, 0), 0))
+        lc_output_gain_ramp_set_target(outputGainRamp, target, frameCount)
+    }
+
+    private func waitForOutputGain(atMost maximumGain: Float,
+                                   timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if lc_output_gain_ramp_current(outputGainRamp) <= maximumGain {
+                return
+            }
+            usleep(5_000)
+        }
+    }
+
+    private func waitForNominalSampleRate(_ targetRate: Double,
+                                          deviceID: AudioObjectID) throws -> Double {
+        var lastRate = try HardwareSampleRateTracker.nominalSampleRate(for: deviceID)
+        for _ in 0..<100 {
+            if abs(lastRate - targetRate) <= 1 {
+                return lastRate
+            }
+            usleep(10_000)
+            lastRate = try HardwareSampleRateTracker.nominalSampleRate(for: deviceID)
+        }
+        throw AppError.message(
+            "DAC did not confirm \(Self.rateText(targetRate)); current \(Self.rateText(lastRate))."
+        )
+    }
+
+    private func disableAutomaticRateMatchingForSession(_ error: Error) {
+        rateMatchSessionDisabled = true
+        rateMatchGate.reset()
+        rateMatchStatus = "Auto paused: \(error)"
+        requestOutputGain(1, duration: 0.08)
+        publishFormatStatus()
+    }
+
     private func handleHardwareFormatChange(deviceID: AudioObjectID, sampleRate: Double) {
         let newHardwareSampleRate = Self.validSampleRate(sampleRate)
         let deviceChanged = deviceID != currentOutputDeviceID
         let rateChanged = abs(newHardwareSampleRate - currentHardwareSampleRate) > 0.5
+
+        if (deviceChanged || rateChanged) && !isAutomaticRateTransition {
+            originalRateMatchSampleRate = nil
+            originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
+            rateMatchGate.reset()
+            rateMatchStatus = automaticRateMatchingEnabled
+                ? "Auto ON: 외부 장치 변경 감지"
+                : "Auto OFF"
+        }
 
         guard isStarted else {
             currentOutputDeviceID = deviceID
@@ -3384,13 +3664,25 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     }
 
     private func reconfigureForHardwareFormat(deviceID: AudioObjectID, hardwareSampleRate: Double) throws {
+        suspendForHardwareReconfigure()
+        try restartForHardwareFormat(
+            deviceID: deviceID,
+            hardwareSampleRate: hardwareSampleRate
+        )
+    }
+
+    private func suspendForHardwareReconfigure() {
         engine.stop()
         stopCaptureForReconfigure()
         ringBuffer.clear()
+        visualizerRingBuffer.clear()
         controlQueue.drain()
         resetDSPState()
         engineRestartCount &+= 1
+    }
 
+    private func restartForHardwareFormat(deviceID: AudioObjectID,
+                                          hardwareSampleRate: Double) throws {
         currentOutputDeviceID = deviceID
         currentHardwareSampleRate = hardwareSampleRate
         currentSampleRate = syncAggregateSampleRate(preferredSampleRate: hardwareSampleRate)
@@ -3485,6 +3777,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private func publishFormatStatus() {
         let status = makeFormatStatus()
         let capabilities = try? HardwareSampleRateTracker.rateCapabilities(for: currentOutputDeviceID)
+        let rateMatchingEnabled = automaticRateMatchingEnabled
+        let currentRateMatchStatus = rateMatchStatus
         DispatchQueue.main.async {
             NotificationCenter.default.post(
                 name: AudioFormatNotifications.didChange,
@@ -3497,7 +3791,9 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                     AudioFormatNotifications.isSampleRateMatchedKey: status.isSampleRateMatched,
                     AudioFormatNotifications.indicatorTextKey: status.indicatorText,
                     AudioFormatNotifications.supportedSampleRatesKey: capabilities?.supportedRates ?? [],
-                    AudioFormatNotifications.isSampleRateSettableKey: capabilities?.isSettable ?? false
+                    AudioFormatNotifications.isSampleRateSettableKey: capabilities?.isSettable ?? false,
+                    AudioFormatNotifications.automaticRateMatchingEnabledKey: rateMatchingEnabled,
+                    AudioFormatNotifications.rateMatchStatusKey: currentRateMatchStatus
                 ]
             )
         }
@@ -3516,6 +3812,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private static func validSampleRate(_ sampleRate: Double) -> Double {
         guard sampleRate.isFinite, sampleRate >= 8_000 else { return 48_000 }
         return sampleRate
+    }
+
+    private static func rateText(_ sampleRate: Double) -> String {
+        String(format: "%.1f kHz", sampleRate / 1_000)
     }
 
     private func refreshTapSampleRate() {

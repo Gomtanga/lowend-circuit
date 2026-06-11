@@ -28,9 +28,9 @@ LowEnd Circuit는 저역 보강, 배음 생성, 헤드폰 공간음향, 실시�
 
 | 플랫폼 | 파일 | 용도 |
 | --- | --- | --- |
-| macOS 14.4 이상 | `LowEnd-Native-Audio-macOS-v0.2.2.zip` | 전체 시스템 및 특정 앱 처리 |
-| Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.2.zip` | 일반 데스크톱 오디오 앱 |
-| Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.2.zip` | DAW/플러그인 호스트 |
+| macOS 14.4 이상 | `LowEnd-Native-Audio-macOS-v0.2.4.zip` | 전체 시스템 및 특정 앱 처리 |
+| Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.4.zip` | 일반 데스크톱 오디오 앱 |
+| Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.4.zip` | DAW/플러그인 호스트 |
 
 > **Windows Native System Audio Processor**: macOS Native 앱의 전체 시스템 및
 > 특정 앱 오디오 처리 기능은 Windows에서 아직 지원되지 않습니다. Windows
@@ -46,7 +46,7 @@ macOS 릴리스는 임시 서명되어 있으며 Apple 공증을 받지 않았�
 
 ### macOS LowEnd Native Audio
 
-현재 `v0.2.2` 릴리스 최소 사양:
+현재 `v0.2.4` 릴리스 최소 사양:
 
 - macOS 14.4 이상
 - Apple Silicon Mac (`arm64`), M1 이상
@@ -64,7 +64,7 @@ Apple M5 테스트 환경에서는 FFT, Metal, SwiftUI 최적화 후 Analysis �
 사용률이 한 자릿수 범위로 측정됐습니다. 이는 참고 결과이며 장치, 샘플레이트,
 재생 환경에 따라 동일한 성능을 보장하는 수치는 아닙니다.
 
-현재 배포 중인 macOS `v0.2.2` 바이너리는 arm64 전용입니다. 해당 ZIP은 Intel
+현재 배포 중인 macOS `v0.2.4` 바이너리는 arm64 전용입니다. 해당 ZIP은 Intel
 Mac을 지원하지 않습니다.
 
 ### Windows Standalone 및 VST3
@@ -78,7 +78,7 @@ Windows 빌드에는 전체 시스템 및 특정 앱 Native 캡처 기능이 포
 
 ## macOS Native 앱 빠른 시작
 
-1. `LowEnd-Native-Audio-macOS-v0.2.2.zip`의 압축을 풉니다.
+1. `LowEnd-Native-Audio-macOS-v0.2.4.zip`의 압축을 풉니다.
 2. `LowEnd Native Audio.app`을 응용 프로그램 폴더로 옮깁니다.
 3. 앱을 실행하고 macOS가 요청하는 시스템 오디오 녹음 권한을 허용합니다.
 4. `Circuit`, `HighExciter`, `Clean` 중 모델을 선택합니다.
@@ -97,7 +97,7 @@ ID를 확인할 수 있습니다. 일치하는 Core Audio 프로세스를 찾지
 
 ### Standalone
 
-1. `LowEnd-Circuit-Standalone-Windows-v0.2.2.zip`의 압축을 풉니다.
+1. `LowEnd-Circuit-Standalone-Windows-v0.2.4.zip`의 압축을 풉니다.
 2. `LowEnd Circuit.exe`를 일반 데스크톱 오디오 앱으로 실행합니다.
 3. JUCE 설정 패널에서 오디오 입력/출력 장치를 선택합니다.
 4. `LowEnd`, `Body`, `Output` 슬라이더를 조절합니다.
@@ -107,7 +107,7 @@ ID를 확인할 수 있습니다. 일치하는 Core Audio 프로세스를 찾지
 
 ### VST3
 
-1. `LowEnd-Circuit-VST3-Windows-v0.2.2.zip`의 압축을 풉니다.
+1. `LowEnd-Circuit-VST3-Windows-v0.2.4.zip`의 압축을 풉니다.
 2. `LowEnd Circuit.vst3` 폴더를 VST3 플러그인 디렉터리에 복사합니다:
    ```
    C:\Program Files\Common Files\VST3
@@ -240,6 +240,12 @@ Nominal rate를 비교합니다. 정확히 같은 rate를 우선하고, 없으�
 44.1 kHz 또는 48 kHz 계열에서 가장 높은 지원 rate를 제안합니다. 이 표시는
 읽기 전용이며 DAC나 Engine rate를 변경하지 않습니다.
 
+`자동 Rate Match`는 별도의 선택 옵션이며 기본값은 OFF입니다. 켜면 동일한
+Source 포맷이 두 번 안정적으로 관찰된 뒤 `fade-out -> 엔진 정지/초기화 ->
+DAC/Engine rate 변경 -> 재시작 -> fade-in` 순서로 전환합니다. 옵션을 끄거나
+앱을 종료하면 첫 자동 변경 전의 rate로 복구합니다. 장치 변경에 실패하면
+이전 rate로 롤백하고 해당 실행 세션의 자동 전환을 일시 중지합니다.
+
 Source 감지는 실시간 오디오 경로 밖에서 동작합니다. Apple Music 메타데이터
 fallback은 macOS 자동화 권한을 요청할 수 있습니다. TIDAL은 공개된 원본 포맷
 API가 없으므로 설치된 버전에서 인식 가능한 포맷 로그를 남기지 않으면
@@ -269,9 +275,9 @@ Lock-free SPSC 제어 큐로 전달되고, 콜백은 최신 패킷을 꺼내 필
 채 필드 대입만 수행합니다. 오디오 출력과 비주얼라이저는 서로 분리된 Lock-free
 링 버퍼를 사용합니다.
 
-### v0.2.2 이후 개발 상태
+### v0.2.4 개발 상태
 
-다음 개발 라인은 기존 Native 앱의 음색을 바꾸지 않는 `v0.2.3` 안정화 작업입니다.
+`v0.2.4`는 기존 모델의 음색을 유지하면서 포맷 및 rate 제어 기반을 확장합니다.
 
 - Native UI에서 링 버퍼 underrun, drop sample, 엔진 재시작 횟수, 실제 캡처
   프로세스를 확인할 수 있습니다.
@@ -279,6 +285,10 @@ Lock-free SPSC 제어 큐로 전달되고, 콜백은 최신 패킷을 꺼내 필
   경로를 보여줍니다.
 - bundle ID 매칭과 44.1/48/96/192/768 kHz 정책을 실행형 Swift 회귀 검사로
   검증합니다.
+- HighExciter에 384 kHz 안전 상한을 적용하는 Auto/1x/2x/4x 오버샘플링
+  선택과 설정 저장을 추가했습니다.
+- Rate Match Preview는 항상 표시하고, 자동 DAC Rate Matching은 독립적인
+  선택 옵션으로 제공합니다.
 - `Source/Core`에 적응형 오버샘플링과 Swift C ABI를 갖춘 무할당
   Circuit/HighExciter 공통 코어를 추가했습니다.
 - JUCE는 `-DLOWEND_JUCE_SHARED_CORE=ON`으로 기존 경로와 공통 Core A/B 빌드를

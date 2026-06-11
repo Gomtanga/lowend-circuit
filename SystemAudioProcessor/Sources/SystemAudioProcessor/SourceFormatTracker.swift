@@ -24,6 +24,7 @@ final class SourceFormatTracker: @unchecked Sendable {
         qos: .utility
     )
     private let onUpdate: @Sendable (SourceFormatSnapshot) -> Void
+    private let onObservation: @Sendable (SourceFormatSnapshot) -> Void
     private var timer: DispatchSourceTimer?
     private var lastSnapshotText = ""
     private var cachedFormats: [SourcePlayer: SourceAudioFormat] = [:]
@@ -35,8 +36,10 @@ final class SourceFormatTracker: @unchecked Sendable {
     private var lastAppleMusicState: AppleMusicPlaybackState = .notRunning
     private var acceleratedPollsRemaining: Int = 0
 
-    init(onUpdate: @escaping @Sendable (SourceFormatSnapshot) -> Void) {
+    init(onUpdate: @escaping @Sendable (SourceFormatSnapshot) -> Void,
+         onObservation: @escaping @Sendable (SourceFormatSnapshot) -> Void = { _ in }) {
         self.onUpdate = onUpdate
+        self.onObservation = onObservation
     }
 
     func start() {
@@ -147,6 +150,7 @@ final class SourceFormatTracker: @unchecked Sendable {
             return lhs.confidence < rhs.confidence
         }
         let snapshot = SourceFormatSnapshot(activePlayers: activePlayers, format: bestFormat)
+        onObservation(snapshot)
         guard snapshot.indicatorText != lastSnapshotText else { return }
         lastSnapshotText = snapshot.indicatorText
         onUpdate(snapshot)

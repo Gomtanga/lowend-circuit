@@ -28,9 +28,9 @@ Get the latest binaries from
 
 | Platform | Download | Purpose |
 | --- | --- | --- |
-| macOS 14.4+ | `LowEnd-Native-Audio-macOS-v0.2.2.zip` | Whole-system and per-app processing |
-| Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.2.zip` | Normal desktop audio application |
-| Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.2.zip` | DAW/plugin-host use |
+| macOS 14.4+ | `LowEnd-Native-Audio-macOS-v0.2.4.zip` | Whole-system and per-app processing |
+| Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.4.zip` | Normal desktop audio application |
+| Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.4.zip` | DAW/plugin-host use |
 
 > **Windows Native System Audio Processor**: The system-wide and per-application
 > audio processing features available in the macOS Native app are not yet
@@ -46,7 +46,7 @@ also request system-audio recording permission when capture starts.
 
 ### LowEnd Native Audio for macOS
 
-Current `v0.2.2` release:
+Current `v0.2.4` release:
 
 - macOS 14.4 or newer
 - Apple Silicon Mac (`arm64`); M1 or newer
@@ -64,7 +64,7 @@ An Apple M5 test system kept Analysis-mode CPU use in the single-digit range
 after the FFT, Metal, and SwiftUI optimizations. This is a reference result,
 not a guaranteed benchmark for every device, sample rate, or audio workload.
 
-The downloadable macOS `v0.2.2` binary is arm64-only. Intel Macs are not
+The downloadable macOS `v0.2.4` binary is arm64-only. Intel Macs are not
 supported by that archive.
 
 ### Windows Standalone and VST3
@@ -78,7 +78,7 @@ Windows builds do not include native whole-system or per-application capture.
 
 ## Quick Start: macOS Native App
 
-1. Extract `LowEnd-Native-Audio-macOS-v0.2.2.zip`.
+1. Extract `LowEnd-Native-Audio-macOS-v0.2.4.zip`.
 2. Move `LowEnd Native Audio.app` to Applications.
 3. Open the app and allow system-audio recording when macOS asks.
 4. Select `Circuit`, `HighExciter`, or `Clean`.
@@ -97,7 +97,7 @@ and apply the target again.
 
 ### Standalone
 
-1. Extract `LowEnd-Circuit-Standalone-Windows-v0.2.2.zip`.
+1. Extract `LowEnd-Circuit-Standalone-Windows-v0.2.4.zip`.
 2. Run `LowEnd Circuit.exe` as a normal desktop audio application.
 3. Select your audio input and output device in the JUCE settings panel.
 4. Adjust `LowEnd`, `Body`, and `Output` sliders.
@@ -107,7 +107,7 @@ and apply the target again.
 
 ### VST3
 
-1. Extract `LowEnd-Circuit-VST3-Windows-v0.2.2.zip`.
+1. Extract `LowEnd-Circuit-VST3-Windows-v0.2.4.zip`.
 2. Copy the `LowEnd Circuit.vst3` folder to your VST3 plugin directory,
    usually:
    ```
@@ -238,6 +238,13 @@ reported by the current DAC. It prefers an exact match, otherwise the highest
 supported rate in the same 44.1 kHz or 48 kHz family. The preview is read-only:
 it does not change the DAC or Engine rate.
 
+`Automatic Rate Match` is a separate opt-in checkbox and is OFF by default.
+When enabled, two stable source observations are required before a change. The
+output follows a fixed fade-out, engine stop/reset, DAC and Engine rate update,
+restart, and fade-in sequence. Turning the option off or quitting the app
+restores the rate that was active before the first automatic change. A failed
+device change is rolled back and automatic matching is paused for that session.
+
 Source detection is intentionally outside the real-time audio path. Apple Music
 metadata fallback may request macOS Automation permission. TIDAL does not expose
 a public source-format API, so detection remains conservative and may show
@@ -272,10 +279,10 @@ drains the latest packet and performs assignment-only DSP updates while
 preserving filter state. Audio and visualizer samples use separate lock-free
 ring buffers.
 
-### Development Status After v0.2.2
+### Development Status in v0.2.4
 
-The next development line prepares `v0.2.3` without changing the released
-Native app's sound:
+The `v0.2.4` line keeps the existing model voicing while extending format and
+rate-control infrastructure:
 
 - the Native UI reports ring-buffer underruns, dropped samples, engine
   restarts, and the resolved capture process
@@ -283,6 +290,10 @@ Native app's sound:
   path instead of showing `Source n/a`
 - bundle matching and 44.1/48/96/192/768 kHz policies have executable Swift
   regression checks
+- HighExciter provides persisted Auto/1x/2x/4x oversampling with a 384 kHz
+  safety ceiling
+- Rate Match Preview is always visible, while automatic DAC Rate Matching is
+  an independent opt-in option
 - `Source/Core` provides a portable allocation-free Circuit/HighExciter engine
   with adaptive oversampling and a Swift C ABI
 - JUCE can build the legacy or shared Core path with
