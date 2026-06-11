@@ -87,6 +87,32 @@ public enum TIDALPlayerLogResult: Equatable, Sendable {
     case format(SourceAudioFormat)
 }
 
+public enum AppleMusicPlaybackState: String, Equatable, Sendable {
+    case playing
+    case paused
+    case stopped
+    case notRunning
+}
+
+public struct AppleMusicPlaybackContext: Equatable, Sendable {
+    public let state: AppleMusicPlaybackState
+    public let persistentID: String?
+    public let sampleRate: Double?
+    public let observedAt: Date
+
+    public init(state: AppleMusicPlaybackState,
+                persistentID: String?,
+                sampleRate: Double?,
+                observedAt: Date) {
+        self.state = state
+        self.persistentID = persistentID
+        self.sampleRate = sampleRate
+        self.observedAt = observedAt
+    }
+
+    public var isPlaying: Bool { state == .playing }
+}
+
 public enum SourceFormatParser {
     private static let tidalSinkExpression = try? NSRegularExpression(
         pattern: #"(?i)CoreaudioSink::open,\s*rate:\s*([0-9]+(?:\.[0-9]+)?),\s*type:\s*(int|float)([0-9]{1,2})"#
@@ -172,6 +198,54 @@ public enum SourceFormatParser {
                 evidence: .tidalPlayerLog,
                 observedAt: observedAt
             )
+        )
+    }
+
+    public static func resolveAppleMusicFormat(
+        logEntries: [SourceFormatLogEntry],
+        scriptContext: AppleMusicPlaybackContext
+    ) -> SourceAudioFormat? {
+        guard scriptContext.isPlaying else { return nil }
+
+        let logFormat = parseAppleMusic(entries: logEntries)
+
+        guard let scriptRate = scriptContext.sampleRate,
+              scriptRate.isFinite, scriptRate >= 8_000 else {
+            return logFormat
+        }
+
+        guard let logFormat else {
+            return SourceAudioFormat(
+                player: .appleMusic,
+                sampleRate: scriptRate,
+                bitDepth: nil,
+                confidence: .inferred,
+                evidence: .appleScript,
+                observedAt: scriptContext.observedAt
+            )
+        }
+
+        let ratesAgree = logFormat.hasUsableSampleRate
+            && abs(logFormat.sampleRate! - scriptRate) <= 1
+
+        if ratesAgree {
+            return SourceAudioFormat(
+                player: .appleMusic,
+                sampleRate: logFormat.sampleRate ?? scriptRate,
+                bitDepth: logFormat.bitDepth,
+                confidence: logFormat.confidence,
+                evidence: logFormat.evidence,
+                observedAt: max(logFormat.observedAt, scriptContext.observedAt)
+            )
+        }
+
+        return SourceAudioFormat(
+            player: .appleMusic,
+            sampleRate: scriptRate,
+            bitDepth: nil,
+            confidence: .inferred,
+            evidence: .appleScript,
+            observedAt: scriptContext.observedAt
         )
     }
 
