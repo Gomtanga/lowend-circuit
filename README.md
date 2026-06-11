@@ -225,10 +225,20 @@ The format label reports the Core Audio `Tap`, DSP `Engine`, and output `DAC`
 rates. When all three match it appears as
 `Shared Tap/Engine/DAC 96.0 kHz / 32-bit Float`.
 
-It does not report the original bit depth or sample rate of a music file. In
-shared/non-exclusive playback, Core Audio converts application streams to the
-shared output format and doesn't expose the streaming service's source-file
-rate through the Process Tap.
+The separate `Source` line uses an independent, read-only player adapter. It
+can report Apple Music metadata and recognized Apple Music/TIDAL Unified Log
+format messages with an explicit `Detected` or `Inferred` confidence label.
+Unknown values remain `unknown`; the app never substitutes the Tap or DAC rate
+and presents it as the source-file rate.
+
+Source detection is intentionally outside the real-time audio path. Apple Music
+metadata fallback may request macOS Automation permission. TIDAL does not expose
+a public source-format API, so detection remains conservative and may show
+`unknown` when the installed TIDAL version does not emit a recognized format
+message.
+
+The staged automatic rate-matching and Device Lock design is documented in
+[Source Rate Tracking and Device Lock Plan](docs/source-rate-and-device-lock-plan.md).
 
 The app tracks Process Tap format, default-output-device, and nominal-sample-rate
 changes. It reports format changes immediately and safely reconfigures the
