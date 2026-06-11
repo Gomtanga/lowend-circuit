@@ -57,6 +57,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
     <string>14.4</string>
     <key>NSAudioCaptureUsageDescription</key>
     <string>LowEnd Native Audio captures system or selected app audio so it can apply bass enhancement and play the processed signal to your speakers or headphones.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>LowEnd Native Audio sends Apple events to Music to detect playback state and source format.</string>
 </dict>
 </plist>
 PLIST

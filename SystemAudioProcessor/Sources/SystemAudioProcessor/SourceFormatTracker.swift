@@ -75,6 +75,14 @@ final class SourceFormatTracker: @unchecked Sendable {
                 logEntries: logEntries,
                 scriptContext: scriptContext
             )
+
+            if let resolvedFormat {
+                let rate = resolvedFormat.sampleRate.map { "\($0 / 1000)kHz" } ?? "nil"
+                let depth = resolvedFormat.bitDepth.map { "\($0)-bit" } ?? "no-bit-depth"
+                let conf = resolvedFormat.confidence == .detected ? "Detected" : "Inferred"
+                print("[AM] \(rate) \(depth) (\(conf))")
+            }
+
             if let resolvedFormat {
                 cachedFormats[.appleMusic] = resolvedFormat
             } else {
@@ -146,8 +154,10 @@ final class SourceFormatTracker: @unchecked Sendable {
 
     private func readUnifiedLogEntries(player: SourcePlayer) -> [SourceFormatLogEntry] {
         do {
-            guard let store = logStore else { return [] }
-            let position = store.position(timeIntervalSinceEnd: -8)
+            guard let store = logStore else {
+                return []
+            }
+            let position = store.position(timeIntervalSinceEnd: -30)
             let predicate: NSPredicate
             switch player {
             case .appleMusic:
@@ -166,11 +176,22 @@ final class SourceFormatTracker: @unchecked Sendable {
                 )
             }
 
-            return try store.getEntries(at: position, matching: predicate)
+            let entries = try store.getEntries(at: position, matching: predicate)
                 .compactMap { entry -> SourceFormatLogEntry? in
                     guard let log = entry as? OSLogEntryLog else { return nil }
                     return SourceFormatLogEntry(date: log.date, message: log.composedMessage)
                 }
+
+            if player == .appleMusic && !entries.isEmpty {
+                for entry in entries {
+                    let msg = entry.message.lowercased()
+                    if msg.contains("hz") || msg.contains("rate") || msg.contains("format") || msg.contains("decoder") || msg.contains("bit") {
+                        print("[AM] log candidate: \(entry.message)")
+                    }
+                }
+            }
+
+            return entries
         } catch {
             return []
         }
@@ -240,6 +261,11 @@ final class SourceFormatTracker: @unchecked Sendable {
         var error: NSDictionary?
         let result = script.executeAndReturnError(&error).stringValue
         guard error == nil, let result else {
+            if let error {
+                let number = error["AppleScriptErrorNumber"] as? Int ?? 0
+                let message = error["AppleScriptErrorMessage"] as? String ?? "unknown"
+                print("[AM] AppleScript error \(number): \(message)")
+            }
             return AppleMusicPlaybackContext(
                 state: .notRunning, persistentID: nil, sampleRate: nil, observedAt: observedAt
             )
