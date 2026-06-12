@@ -155,7 +155,8 @@ private struct DynamicsMeterView: View {
                 Text(String(format: "%.1f dB", model.levels.crestFactor))
                     .font(.system(size: 30, weight: .heavy, design: .monospaced))
                     .foregroundStyle(Color(red: 0.96, green: 0.75, blue: 0.31))
-                    .minimumScaleFactor(0.72)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.55)
             }
 
             VStack(spacing: 9) {
@@ -546,6 +547,157 @@ private struct RightPanelContainerView: View {
             return "\(Int(value.rounded()))\(suffix)"
         }
         return String(format: "%.2f %@", value, suffix)
+    }
+}
+
+@available(macOS 14.4, *)
+private struct PersistentAnalysisView: View {
+    let dynamicsModel: DynamicsMeterModel
+    let spectrumModel: SpectrumModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("LIVE ANALYSIS")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(Color(red: 0.55, green: 0.60, blue: 0.68))
+
+            MetalSpectrumView(model: spectrumModel, isActive: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minHeight: 250)
+                .overlay(alignment: .topLeading) {
+                    Text("Spectrum")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
+                        .padding(10)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            DynamicsMeterView(model: dynamicsModel, style: .analysis)
+                .frame(maxWidth: .infinity)
+                .frame(height: 150)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(red: 0.10, green: 0.12, blue: 0.15))
+    }
+}
+
+@available(macOS 14.4, *)
+private struct SpatialPageView: View {
+    @ObservedObject var spatialModel: SpatialControlModel
+    let onSpatialChange: (SpatialSettings) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("공간 음향")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text("청취 위치와 가상 스피커 폭을 실시간으로 조절합니다.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(red: 0.60, green: 0.65, blue: 0.72))
+                }
+                Spacer()
+                Button {
+                    applySpatialChange { settings in
+                        settings.listenerX = 0
+                        settings.listenerZ = 0
+                    }
+                } label: {
+                    Image(systemName: "location.fill.viewfinder")
+                }
+                .buttonStyle(.bordered)
+                .help("청취 위치를 원점으로 되돌립니다.")
+
+                Toggle("공간음향", isOn: spatialEnabledBinding)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+
+            SpatialStageRepresentable(model: spatialModel, onChange: onSpatialChange)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minHeight: 300)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            VStack(spacing: 10) {
+                spatialSlider(title: "나 X", value: listenerXBinding, range: -3.0...3.0, suffix: "m")
+                spatialSlider(title: "나 Z", value: listenerZBinding, range: -2.8...2.8, suffix: "m")
+                spatialSlider(title: "Width", value: speakerWidthBinding, range: 0.6...3.0, suffix: "m")
+                spatialSlider(title: "Space", value: spatialAmountBinding, range: 0...100, suffix: "%")
+            }
+            .padding(14)
+            .background(Color(red: 0.12, green: 0.14, blue: 0.17))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(red: 0.08, green: 0.09, blue: 0.11))
+    }
+
+    private func spatialSlider(title: String,
+                               value: Binding<Double>,
+                               range: ClosedRange<Double>,
+                               suffix: String) -> some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
+                .frame(width: 50, alignment: .leading)
+            Slider(value: value, in: range)
+            Text(valueText(value.wrappedValue, suffix: suffix))
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white)
+                .frame(width: 72, alignment: .trailing)
+        }
+    }
+
+    private var spatialEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { spatialModel.settings.enabled },
+            set: { newValue in
+                applySpatialChange { settings in settings.enabled = newValue }
+            }
+        )
+    }
+
+    private var listenerXBinding: Binding<Double> {
+        spatialBinding(\.listenerX)
+    }
+
+    private var listenerZBinding: Binding<Double> {
+        spatialBinding(\.listenerZ)
+    }
+
+    private var speakerWidthBinding: Binding<Double> {
+        spatialBinding(\.speakerWidth)
+    }
+
+    private var spatialAmountBinding: Binding<Double> {
+        spatialBinding(\.amount)
+    }
+
+    private func spatialBinding(_ keyPath: WritableKeyPath<SpatialSettings, Float>) -> Binding<Double> {
+        Binding(
+            get: { Double(spatialModel.settings[keyPath: keyPath]) },
+            set: { newValue in
+                applySpatialChange { settings in
+                    settings[keyPath: keyPath] = Float(newValue)
+                }
+            }
+        )
+    }
+
+    private func applySpatialChange(_ mutation: (inout SpatialSettings) -> Void) {
+        var settings = spatialModel.settings
+        mutation(&settings)
+        spatialModel.update(settings)
+        onSpatialChange(spatialModel.settings)
+    }
+
+    private func valueText(_ value: Double, suffix: String) -> String {
+        suffix == "%" ? "\(Int(value.rounded()))%" : String(format: "%.2f %@", value, suffix)
     }
 }
 
@@ -1108,16 +1260,60 @@ private final class AudioSpectrumAnalyzer: NSObject {
 
 @available(macOS 14.4, *)
 @MainActor
-private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
+private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate {
+    private enum AppPage: Int, CaseIterable {
+        case model
+        case spatial
+        case routing
+        case settings
+
+        var title: String {
+            switch self {
+            case .model: return "모델"
+            case .spatial: return "공간 음향"
+            case .routing: return "오디오 적용"
+            case .settings: return "설정"
+            }
+        }
+
+        var symbolName: String {
+            switch self {
+            case .model: return "slider.horizontal.3"
+            case .spatial: return "move.3d"
+            case .routing: return "app.connected.to.app.below.fill"
+            case .settings: return "gearshape.fill"
+            }
+        }
+    }
+
     private var window: NSWindow!
+    private var rootView: NSView!
+    private var sidebarView: NSView!
+    private var pageContainerView: NSView!
+    private var analysisContainerView: NSView!
+    private var formatHeaderView: NSView!
+    private var analysisRailView: NSHostingView<AnyView>!
+    private var pageViews: [AppPage: NSView] = [:]
+    private var sidebarButtons: [NSButton] = []
+    private var selectedPage: AppPage = .model
+    private var allSystemButton: NSButton!
+    private var modelExplanationView: NSView!
+    private var modelControlsView: NSView!
+    private var modelPresetsView: NSView!
+    private var routingAppsScrollView: NSScrollView!
+    private var routingStartAppButton: NSButton!
     private var statusLabel: NSTextField!
     private var sourceFormatLabel: NSTextField!
     private var formatLabel: NSTextField!
     private var oversamplingLabel: NSTextField!
     private var rateMatchPreviewLabel: NSTextField!
+    private var compactSourceTitleLabel: NSTextField!
+    private var compactSourceValueLabel: NSTextField!
+    private var compactOutputLabel: NSTextField!
+    private var compactModelLabel: NSTextField!
     private var diagnosticsLabel: NSTextField!
     private var automaticRateMatchButton: NSButton!
-    private var rightPanelView: NSHostingView<AnyView>!
+    private var expertModeButton: NSButton!
     private var bundleField: NSTextField!
     private var appsView: NSTextView!
     private var intensitySlider: NSSlider!
@@ -1150,10 +1346,16 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     private var currentProcessingSampleRate: Double?
     private var currentSourceSampleRate: Double?
     private var currentDeviceSampleRate: Double?
+    private var currentSourcePlayerName: String?
+    private var currentSourceBitDepth: Int?
+    private var currentOutputSampleFormat = "32-bit Float"
     private var supportedDeviceSampleRates: [Double] = []
     private var isDeviceSampleRateSettable = false
     private var automaticRateMatchingEnabled = UserDefaults.standard.bool(
         forKey: "automaticRateMatchingEnabled"
+    )
+    private var expertModeEnabled = UserDefaults.standard.bool(
+        forKey: "expertModeEnabled"
     )
     private var rateMatchStatusText = "Auto OFF"
     private var exciterOversamplingMode: ExciterOversamplingMode = {
@@ -1192,7 +1394,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
 
     private func buildWindow() {
         print("Opening LowEnd Native Audio control window.")
-        let rect = NSRect(x: 0, y: 0, width: 1200, height: 760)
+        let rect = NSRect(x: 0, y: 0, width: 1080, height: 700)
         window = NSWindow(
             contentRect: rect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -1200,148 +1402,488 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             defer: false
         )
         window.title = "LowEnd Native Audio"
+        window.minSize = NSSize(width: 940, height: 640)
+        window.delegate = self
         window.center()
 
         let content = NSView(frame: rect)
+        content.autoresizingMask = [.width, .height]
         content.wantsLayer = true
         content.layer?.backgroundColor = NSColor(calibratedRed: 0.09, green: 0.10, blue: 0.12, alpha: 1).cgColor
         window.contentView = content
+        rootView = content
 
-        let title = makeLabel("LowEnd Native Audio", size: 28, weight: .bold)
-        title.textColor = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 1)
-        title.frame = NSRect(x: 28, y: 702, width: 560, height: 34)
-        content.addSubview(title)
+        sidebarView = NSView(frame: NSRect(x: 0, y: 0, width: 160, height: rect.height))
+        sidebarView.wantsLayer = true
+        sidebarView.layer?.backgroundColor = NSColor(calibratedRed: 0.065, green: 0.075, blue: 0.095, alpha: 1).cgColor
+        content.addSubview(sidebarView)
 
-        let subtitle = makeLabel("시스템 전체 또는 특정 앱 오디오에 저역 보강 처리를 적용합니다.", size: 14, weight: .regular)
-        subtitle.frame = NSRect(x: 30, y: 674, width: 680, height: 22)
-        content.addSubview(subtitle)
+        let brand = makeLabel("LowEnd", size: 23, weight: .bold)
+        brand.textColor = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 1)
+        brand.frame = NSRect(x: 18, y: 642, width: 120, height: 30)
+        brand.autoresizingMask = [.minYMargin]
+        sidebarView.addSubview(brand)
 
-        sourceFormatLabel = makeLabel("Source: Apple Music/TIDAL 대기 중", size: 12.5, weight: .semibold)
-        sourceFormatLabel.alignment = .right
-        sourceFormatLabel.frame = NSRect(x: 740, y: 710, width: 430, height: 20)
+        let brandCaption = makeLabel("NATIVE AUDIO", size: 9, weight: .bold)
+        brandCaption.textColor = NSColor(calibratedRed: 0.48, green: 0.53, blue: 0.61, alpha: 1)
+        brandCaption.frame = NSRect(x: 19, y: 625, width: 120, height: 14)
+        brandCaption.autoresizingMask = [.minYMargin]
+        sidebarView.addSubview(brandCaption)
+
+        for (index, page) in AppPage.allCases.enumerated() {
+            let button = makeSidebarButton(page: page)
+            button.frame = NSRect(x: 10, y: 560 - CGFloat(index) * 48, width: 140, height: 38)
+            button.autoresizingMask = [.minYMargin]
+            sidebarView.addSubview(button)
+            sidebarButtons.append(button)
+        }
+
+        allSystemButton = NSButton(
+            image: NSImage(systemSymbolName: "speaker.wave.3.fill", accessibilityDescription: "전체 시스템 적용") ?? NSImage(),
+            target: self,
+            action: #selector(startAllAudio)
+        )
+        allSystemButton.bezelStyle = .texturedRounded
+        allSystemButton.imageScaling = .scaleProportionallyDown
+        allSystemButton.contentTintColor = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 1)
+        allSystemButton.frame = NSRect(x: 59, y: 22, width: 42, height: 42)
+        allSystemButton.toolTip = "전체 시스템 오디오 처리를 시작합니다."
+        sidebarView.addSubview(allSystemButton)
+
+        pageContainerView = NSView(frame: NSRect(x: 160, y: 0, width: 620, height: rect.height))
+        pageContainerView.wantsLayer = true
+        pageContainerView.layer?.backgroundColor = NSColor(calibratedRed: 0.08, green: 0.09, blue: 0.11, alpha: 1).cgColor
+        content.addSubview(pageContainerView)
+
+        analysisContainerView = NSView(frame: NSRect(x: 780, y: 0, width: 300, height: rect.height))
+        analysisContainerView.wantsLayer = true
+        analysisContainerView.layer?.backgroundColor = NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.15, alpha: 1).cgColor
+        content.addSubview(analysisContainerView)
+
+        formatHeaderView = NSView()
+        formatHeaderView.wantsLayer = true
+        formatHeaderView.layer?.backgroundColor = NSColor(
+            calibratedRed: 0.13,
+            green: 0.16,
+            blue: 0.20,
+            alpha: 1
+        ).cgColor
+        formatHeaderView.layer?.cornerRadius = 7
+        analysisContainerView.addSubview(formatHeaderView)
+
+        compactSourceTitleLabel = makeLabel("음원 재생", size: 10.5, weight: .semibold)
+        compactSourceTitleLabel.textColor = NSColor(
+            calibratedRed: 0.62,
+            green: 0.68,
+            blue: 0.76,
+            alpha: 1
+        )
+        formatHeaderView.addSubview(compactSourceTitleLabel)
+
+        compactSourceValueLabel = makeLabel("재생 정보 대기 중", size: 19, weight: .bold)
+        compactSourceValueLabel.textColor = .white
+        compactSourceValueLabel.lineBreakMode = .byTruncatingTail
+        formatHeaderView.addSubview(compactSourceValueLabel)
+
+        compactOutputLabel = makeLabel("출력 포맷 대기 중", size: 11, weight: .medium)
+        compactOutputLabel.textColor = NSColor(
+            calibratedRed: 0.68,
+            green: 0.73,
+            blue: 0.80,
+            alpha: 1
+        )
+        compactOutputLabel.lineBreakMode = .byTruncatingMiddle
+        formatHeaderView.addSubview(compactOutputLabel)
+
+        compactModelLabel = makeLabel("적용 모델  Circuit", size: 11, weight: .semibold)
+        compactModelLabel.textColor = NSColor(
+            calibratedRed: 0.31,
+            green: 0.78,
+            blue: 0.94,
+            alpha: 1
+        )
+        compactModelLabel.lineBreakMode = .byTruncatingTail
+        formatHeaderView.addSubview(compactModelLabel)
+
+        sourceFormatLabel = makeLabel("Source: Apple Music/TIDAL 대기 중", size: 11.5, weight: .semibold)
+        sourceFormatLabel.lineBreakMode = .byTruncatingMiddle
         sourceFormatLabel.toolTip = "플레이어 메타데이터 또는 Unified Log에서 감지한 원본 스트림 정보입니다. 확인할 수 없는 값은 추정하지 않고 unknown으로 표시합니다."
-        content.addSubview(sourceFormatLabel)
+        formatHeaderView.addSubview(sourceFormatLabel)
 
-        formatLabel = makeLabel("처리 포맷 대기 중", size: 12, weight: .semibold)
-        formatLabel.alignment = .right
-        formatLabel.frame = NSRect(x: 740, y: 688, width: 430, height: 20)
+        formatLabel = makeLabel("처리 포맷 대기 중", size: 11, weight: .semibold)
+        formatLabel.lineBreakMode = .byTruncatingMiddle
         formatLabel.toolTip = "Tap은 Core Audio 공유 믹서에서 캡처한 PCM, Engine은 DSP 처리율, DAC는 출력 장치 레이트입니다."
-        content.addSubview(formatLabel)
+        formatHeaderView.addSubview(formatLabel)
 
-        oversamplingLabel = makeLabel("", size: 12, weight: .semibold)
-        oversamplingLabel.alignment = .right
-        oversamplingLabel.frame = NSRect(x: 740, y: 666, width: 430, height: 20)
+        oversamplingLabel = makeLabel("", size: 10.5, weight: .semibold)
+        oversamplingLabel.lineBreakMode = .byTruncatingMiddle
         oversamplingLabel.toolTip = "전체 음원을 업스케일링하는 기능이 아니라 HighExciter의 비선형 배음 생성 구간에만 적용되는 내부 오버샘플링 상태입니다. Tap 값은 공유 시스템 PCM 처리율입니다."
         oversamplingLabel.isHidden = true
-        content.addSubview(oversamplingLabel)
+        formatHeaderView.addSubview(oversamplingLabel)
 
-        rateMatchPreviewLabel = makeLabel("Rate Match Preview: source waiting", size: 11.5, weight: .medium)
-        rateMatchPreviewLabel.alignment = .right
-        rateMatchPreviewLabel.frame = NSRect(x: 740, y: 644, width: 430, height: 18)
+        rateMatchPreviewLabel = makeLabel("Rate Match Preview: source waiting", size: 10, weight: .medium)
+        rateMatchPreviewLabel.lineBreakMode = .byTruncatingMiddle
         rateMatchPreviewLabel.textColor = NSColor(calibratedRed: 0.62, green: 0.68, blue: 0.75, alpha: 1)
         rateMatchPreviewLabel.toolTip = "원본 음원의 rate와 DAC 지원 rate를 비교한 미리보기입니다. 이 표시만으로 장치 설정을 변경하지 않습니다."
-        content.addSubview(rateMatchPreviewLabel)
+        formatHeaderView.addSubview(rateMatchPreviewLabel)
 
-        rightPanelView = NSHostingView(rootView: AnyView(
-            RightPanelContainerView(
-                spatialModel: spatialControlModel,
+        analysisRailView = NSHostingView(rootView: AnyView(
+            PersistentAnalysisView(
                 dynamicsModel: dynamicsMeterModel,
-                spectrumModel: spectrumModel,
+                spectrumModel: spectrumModel
+            )
+        ))
+        analysisContainerView.addSubview(analysisRailView)
+
+        pageViews[.model] = makeModelPage()
+        pageViews[.spatial] = makeSpatialPage()
+        pageViews[.routing] = makeRoutingPage()
+        pageViews[.settings] = makeSettingsPage()
+        for page in AppPage.allCases {
+            guard let pageView = pageViews[page] else { continue }
+            pageView.frame = pageContainerView.bounds
+            pageView.isHidden = page != selectedPage
+            pageContainerView.addSubview(pageView)
+        }
+
+        refreshApps()
+        updateFormatHeaderMode()
+        updateCompactFormatSummary()
+        layoutApplication()
+        updateSelectedPage()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        layoutApplication()
+    }
+
+    private func layoutApplication() {
+        guard let content = window?.contentView else { return }
+        let bounds = content.bounds
+        let sidebarWidth: CGFloat = 160
+        let analysisWidth = min(max(bounds.width * 0.28, 260), 320)
+        let gap: CGFloat = 1
+
+        sidebarView.frame = NSRect(x: 0, y: 0, width: sidebarWidth, height: bounds.height)
+        analysisContainerView.frame = NSRect(
+            x: bounds.width - analysisWidth,
+            y: 0,
+            width: analysisWidth,
+            height: bounds.height
+        )
+        pageContainerView.frame = NSRect(
+            x: sidebarWidth + gap,
+            y: 0,
+            width: max(bounds.width - sidebarWidth - analysisWidth - gap * 2, 1),
+            height: bounds.height
+        )
+
+        let railWidth = analysisContainerView.bounds.width
+        let headerHeight: CGFloat = expertModeEnabled ? 90 : 106
+        formatHeaderView.frame = NSRect(
+            x: 8,
+            y: bounds.height - headerHeight - 8,
+            width: railWidth - 16,
+            height: headerHeight
+        )
+
+        let headerWidth = formatHeaderView.bounds.width
+        compactSourceTitleLabel.frame = NSRect(x: 14, y: 80, width: headerWidth - 28, height: 15)
+        compactSourceValueLabel.frame = NSRect(x: 14, y: 52, width: headerWidth - 28, height: 25)
+        compactOutputLabel.frame = NSRect(x: 14, y: 29, width: headerWidth - 28, height: 17)
+        compactModelLabel.frame = NSRect(x: 14, y: 9, width: headerWidth - 28, height: 16)
+
+        sourceFormatLabel.frame = NSRect(x: 12, y: 67, width: headerWidth - 24, height: 17)
+        formatLabel.frame = NSRect(x: 12, y: 48, width: headerWidth - 24, height: 16)
+        oversamplingLabel.frame = NSRect(x: 12, y: 29, width: headerWidth - 24, height: 16)
+        rateMatchPreviewLabel.frame = NSRect(x: 12, y: 10, width: headerWidth - 24, height: 15)
+        analysisRailView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: railWidth,
+            height: max(bounds.height - headerHeight - 16, 1)
+        )
+
+        for pageView in pageViews.values {
+            pageView.frame = pageContainerView.bounds
+        }
+        layoutModelPage()
+        layoutRoutingPage()
+    }
+
+    private func makeSidebarButton(page: AppPage) -> NSButton {
+        let button = NSButton(title: page.title, target: self, action: #selector(sidebarPageChanged(_:)))
+        button.tag = page.rawValue
+        button.bezelStyle = .recessed
+        button.refusesFirstResponder = true
+        button.alignment = .left
+        button.font = .systemFont(ofSize: 13, weight: .semibold)
+        button.image = NSImage(systemSymbolName: page.symbolName, accessibilityDescription: page.title)
+        button.imagePosition = .imageLeading
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 6
+        return button
+    }
+
+    @objc private func sidebarPageChanged(_ sender: NSButton) {
+        guard let page = AppPage(rawValue: sender.tag) else { return }
+        selectedPage = page
+        updateSelectedPage()
+    }
+
+    private func updateSelectedPage() {
+        for page in AppPage.allCases {
+            pageViews[page]?.isHidden = page != selectedPage
+            guard let button = sidebarButtons.first(where: { $0.tag == page.rawValue }) else {
+                continue
+            }
+            let selected = page == selectedPage
+            button.state = selected ? .on : .off
+            button.layer?.backgroundColor = selected
+                ? NSColor(calibratedRed: 0.16, green: 0.26, blue: 0.34, alpha: 1).cgColor
+                : NSColor.clear.cgColor
+            button.contentTintColor = selected
+                ? NSColor(calibratedRed: 0.40, green: 0.78, blue: 0.96, alpha: 1)
+                : NSColor(calibratedRed: 0.78, green: 0.81, blue: 0.86, alpha: 1)
+        }
+    }
+
+    private func makeModelPage() -> NSView {
+        let page = NSView(frame: pageContainerView?.bounds ?? NSRect(x: 0, y: 0, width: 620, height: 700))
+        page.wantsLayer = true
+        page.layer?.backgroundColor = NSColor(calibratedRed: 0.08, green: 0.09, blue: 0.11, alpha: 1).cgColor
+
+        let title = makeLabel("모델 및 사운드", size: 24, weight: .bold)
+        title.textColor = .white
+        title.frame = NSRect(x: 24, y: 636, width: 300, height: 32)
+        title.autoresizingMask = [.minYMargin]
+        page.addSubview(title)
+
+        statusLabel = makeLabel("대기 중", size: 13, weight: .semibold)
+        statusLabel.textColor = .white
+        statusLabel.frame = NSRect(x: 24, y: 607, width: 300, height: 22)
+        statusLabel.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(statusLabel)
+
+        diagnosticsLabel = makeLabel("XRuns 대기 중", size: 10, weight: .regular)
+        diagnosticsLabel.textColor = NSColor(calibratedRed: 0.55, green: 0.60, blue: 0.67, alpha: 1)
+        diagnosticsLabel.lineBreakMode = .byTruncatingMiddle
+        diagnosticsLabel.toolTip = "출력 underrun, 출력/분석 버퍼 drop, 엔진 재시작 횟수와 실제 캡처 프로세스를 표시합니다."
+        diagnosticsLabel.frame = NSRect(x: 24, y: 586, width: 480, height: 16)
+        diagnosticsLabel.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(diagnosticsLabel)
+
+        let modelLabel = makeLabel("Model", size: 12, weight: .semibold)
+        modelLabel.frame = NSRect(x: 24, y: 548, width: 55, height: 26)
+        modelLabel.autoresizingMask = [.minYMargin]
+        page.addSubview(modelLabel)
+
+        modelPopup = NSPopUpButton(frame: NSRect(x: 84, y: 545, width: 170, height: 30), pullsDown: false)
+        modelPopup.addItems(withTitles: ["Clean", "Circuit", "HighExciter"])
+        modelPopup.selectItem(withTitle: "Circuit")
+        modelPopup.target = self
+        modelPopup.action = #selector(modelChanged)
+        modelPopup.toolTip = "Clean은 DSP bypass, Circuit은 저역 회로 모델, HighExciter는 독립 고역 배음 모델입니다."
+        modelPopup.autoresizingMask = [.minYMargin]
+        page.addSubview(modelPopup)
+
+        modelExplanationView = makeExplanationSection()
+        page.addSubview(modelExplanationView)
+        modelControlsView = makeControlSection()
+        page.addSubview(modelControlsView)
+        modelPresetsView = makePresetSection()
+        page.addSubview(modelPresetsView)
+        return page
+    }
+
+    private func makeSpatialPage() -> NSView {
+        let view = NSHostingView(rootView: AnyView(
+            SpatialPageView(
+                spatialModel: spatialControlModel,
                 onSpatialChange: { [weak self] settings in
                     self?.updateSpatialControls(from: settings, notifyProcessor: true)
                 }
             )
         ))
-        rightPanelView.frame = NSRect(x: 740, y: 28, width: 430, height: 606)
-        rightPanelView.wantsLayer = true
-        rightPanelView.layer?.cornerRadius = 8
-        content.addSubview(rightPanelView)
+        view.frame = pageContainerView?.bounds ?? NSRect(x: 0, y: 0, width: 620, height: 700)
+        return view
+    }
 
-        statusLabel = makeLabel("대기 중", size: 14, weight: .semibold)
-        statusLabel.textColor = .white
-        statusLabel.frame = NSRect(x: 30, y: 638, width: 440, height: 26)
-        content.addSubview(statusLabel)
+    private func makeRoutingPage() -> NSView {
+        let page = NSView(frame: pageContainerView?.bounds ?? NSRect(x: 0, y: 0, width: 620, height: 700))
+        page.wantsLayer = true
+        page.layer?.backgroundColor = NSColor(calibratedRed: 0.08, green: 0.09, blue: 0.11, alpha: 1).cgColor
 
-        diagnosticsLabel = makeLabel("XRuns 대기 중", size: 10, weight: .regular)
-        diagnosticsLabel.textColor = NSColor(calibratedRed: 0.55, green: 0.60, blue: 0.67, alpha: 1)
-        diagnosticsLabel.frame = NSRect(x: 30, y: 620, width: 680, height: 16)
-        diagnosticsLabel.lineBreakMode = .byTruncatingMiddle
-        diagnosticsLabel.toolTip = "출력 underrun, 출력/분석 버퍼 drop, 엔진 재시작 횟수와 실제 캡처 프로세스를 표시합니다."
-        content.addSubview(diagnosticsLabel)
+        let title = makeLabel("오디오 적용", size: 24, weight: .bold)
+        title.textColor = .white
+        title.frame = NSRect(x: 24, y: 636, width: 260, height: 32)
+        title.autoresizingMask = [.minYMargin]
+        page.addSubview(title)
+
+        let description = makeLabel("전체 시스템 또는 선택한 앱의 오디오 신호를 처리합니다.", size: 12.5, weight: .regular)
+        description.frame = NSRect(x: 24, y: 608, width: 500, height: 20)
+        description.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(description)
+
+        let stop = makeButton("중지", action: #selector(stopAudio))
+        stop.frame = NSRect(x: 24, y: 555, width: 110, height: 38)
+        stop.autoresizingMask = [.minYMargin]
+        stop.toolTip = "처리를 멈추고 원래 소리로 되돌립니다."
+        page.addSubview(stop)
 
         automaticRateMatchButton = NSButton(
             checkboxWithTitle: "자동 Rate Match",
             target: self,
             action: #selector(automaticRateMatchChanged)
         )
-        automaticRateMatchButton.frame = NSRect(x: 370, y: 295, width: 180, height: 24)
+        automaticRateMatchButton.frame = NSRect(x: 152, y: 562, width: 180, height: 24)
+        automaticRateMatchButton.autoresizingMask = [.minYMargin]
         automaticRateMatchButton.state = automaticRateMatchingEnabled ? .on : .off
         automaticRateMatchButton.toolTip = "감지된 Apple Music/TIDAL Source rate에 맞춰 기본 출력 DAC의 Nominal Sample Rate를 변경합니다. 기본값은 OFF입니다."
-        content.addSubview(automaticRateMatchButton)
+        page.addSubview(automaticRateMatchButton)
 
-        let modelLabel = makeLabel("Model", size: 13, weight: .semibold)
-        modelLabel.frame = NSRect(x: 498, y: 638, width: 52, height: 26)
-        content.addSubview(modelLabel)
+        bundleField = NSTextField(frame: NSRect(x: 24, y: 500, width: 350, height: 32))
+        bundleField.placeholderString = "예: com.tidal.desktop"
+        bundleField.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(bundleField)
 
-        modelPopup = NSPopUpButton(frame: NSRect(x: 552, y: 635, width: 158, height: 30), pullsDown: false)
-        modelPopup.addItems(withTitles: ["Clean", "Circuit", "HighExciter"])
-        modelPopup.selectItem(withTitle: "Circuit")
-        modelPopup.target = self
-        modelPopup.action = #selector(modelChanged)
-        modelPopup.toolTip = "Clean은 DSP bypass, Circuit은 저역 회로 모델, HighExciter는 독립 고역 배음 모델입니다."
-        content.addSubview(modelPopup)
+        routingStartAppButton = makeButton("특정 앱 적용", action: #selector(startSelectedApp))
+        routingStartAppButton.frame = NSRect(x: 390, y: 496, width: 128, height: 40)
+        routingStartAppButton.autoresizingMask = [.minYMargin, .minXMargin]
+        routingStartAppButton.toolTip = "입력한 bundle id를 가진 앱의 소리에만 LowEnd를 적용합니다."
+        page.addSubview(routingStartAppButton)
 
-        let explanation = makeExplanationSection()
-        explanation.frame = NSRect(x: 30, y: 546, width: 680, height: 76)
-        content.addSubview(explanation)
+        let listButton = makeButton("실행 중인 앱 새로고침", action: #selector(refreshApps))
+        listButton.frame = NSRect(x: 24, y: 446, width: 190, height: 34)
+        listButton.autoresizingMask = [.minYMargin]
+        page.addSubview(listButton)
 
-        let controls = makeControlSection()
-        controls.frame = NSRect(x: 30, y: 392, width: 680, height: 128)
-        content.addSubview(controls)
-
-        let presets = makePresetSection()
-        presets.frame = NSRect(x: 30, y: 338, width: 680, height: 38)
-        content.addSubview(presets)
-
-        let startAll = makeButton("전체 시스템 적용", action: #selector(startAllAudio))
-        startAll.frame = NSRect(x: 30, y: 286, width: 190, height: 42)
-        content.addSubview(startAll)
-        startAll.toolTip = "Mac에서 나오는 대부분의 소리에 LowEnd를 적용합니다."
-
-        let stop = makeButton("중지", action: #selector(stopAudio))
-        stop.frame = NSRect(x: 238, y: 286, width: 110, height: 42)
-        content.addSubview(stop)
-        stop.toolTip = "처리를 멈추고 원래 소리로 되돌립니다."
-
-        bundleField = NSTextField(frame: NSRect(x: 30, y: 234, width: 440, height: 32))
-        bundleField.placeholderString = "예: com.spotify.client 또는 com.kakao.KakaoTalkMac"
-        bundleField.stringValue = ""
-        content.addSubview(bundleField)
-
-        let startApp = makeButton("특정 앱 적용", action: #selector(startSelectedApp))
-        startApp.frame = NSRect(x: 488, y: 230, width: 150, height: 40)
-        content.addSubview(startApp)
-        startApp.toolTip = "입력한 bundle id를 가진 앱의 소리에만 LowEnd를 적용합니다."
-
-        let listButton = makeButton("실행 중인 앱 목록 새로고침", action: #selector(refreshApps))
-        listButton.frame = NSRect(x: 30, y: 184, width: 220, height: 38)
-        content.addSubview(listButton)
-        listButton.toolTip = "아래 목록을 갱신합니다. 특정 앱 적용 때 bundle id를 참고하세요."
-
-        let scroll = NSScrollView(frame: NSRect(x: 30, y: 28, width: 680, height: 148))
-        scroll.borderType = .bezelBorder
-        scroll.hasVerticalScroller = true
-        appsView = NSTextView(frame: scroll.bounds)
+        routingAppsScrollView = NSScrollView(frame: NSRect(x: 24, y: 24, width: 494, height: 408))
+        routingAppsScrollView.borderType = .bezelBorder
+        routingAppsScrollView.hasVerticalScroller = true
+        routingAppsScrollView.autoresizingMask = [.width, .height]
+        appsView = NSTextView(frame: routingAppsScrollView.bounds)
         appsView.isEditable = false
-        appsView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        appsView.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
         appsView.textColor = .white
         appsView.backgroundColor = NSColor(calibratedRed: 0.12, green: 0.14, blue: 0.17, alpha: 1)
-        scroll.documentView = appsView
-        content.addSubview(scroll)
+        routingAppsScrollView.documentView = appsView
+        page.addSubview(routingAppsScrollView)
+        return page
+    }
 
-        refreshApps()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+    private func makeSettingsPage() -> NSView {
+        let page = NSView(frame: pageContainerView?.bounds ?? NSRect(x: 0, y: 0, width: 620, height: 700))
+        page.wantsLayer = true
+        page.layer?.backgroundColor = NSColor(calibratedRed: 0.08, green: 0.09, blue: 0.11, alpha: 1).cgColor
+
+        let title = makeLabel("설정", size: 24, weight: .bold)
+        title.textColor = .white
+        title.frame = NSRect(x: 24, y: 636, width: 220, height: 32)
+        title.autoresizingMask = [.minYMargin]
+        page.addSubview(title)
+
+        let versionTitle = makeLabel("버전", size: 12, weight: .semibold)
+        versionTitle.frame = NSRect(x: 24, y: 574, width: 90, height: 20)
+        versionTitle.autoresizingMask = [.minYMargin]
+        page.addSubview(versionTitle)
+
+        let shortVersion =
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "0.2.5"
+        let buildVersion =
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+            ?? "7"
+        let version = makeLabel(
+            "LowEnd Native Audio \(shortVersion) (\(buildVersion))",
+            size: 15,
+            weight: .semibold
+        )
+        version.textColor = .white
+        version.frame = NSRect(x: 24, y: 544, width: 360, height: 24)
+        version.autoresizingMask = [.minYMargin]
+        page.addSubview(version)
+
+        let displayTitle = makeLabel("표시", size: 12, weight: .semibold)
+        displayTitle.frame = NSRect(x: 24, y: 490, width: 90, height: 20)
+        displayTitle.autoresizingMask = [.minYMargin]
+        page.addSubview(displayTitle)
+
+        expertModeButton = NSButton(
+            checkboxWithTitle: "전문가 모드",
+            target: self,
+            action: #selector(expertModeChanged)
+        )
+        expertModeButton.frame = NSRect(x: 24, y: 454, width: 180, height: 24)
+        expertModeButton.autoresizingMask = [.minYMargin]
+        expertModeButton.state = expertModeEnabled ? .on : .off
+        expertModeButton.toolTip = "오른쪽 상단에 Source, Tap, Engine, DAC, 오버샘플링과 Rate Match 경로를 자세히 표시합니다."
+        page.addSubview(expertModeButton)
+
+        let note = makeLabel(
+            "끄면 재생 음원, 출력 포맷, 적용 모델만 간결하게 표시합니다.",
+            size: 12,
+            weight: .regular
+        )
+        note.frame = NSRect(x: 24, y: 426, width: 480, height: 20)
+        note.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(note)
+        return page
+    }
+
+    private func layoutModelPage() {
+        guard let page = pageViews[.model] else { return }
+        let width = page.bounds.width
+        let height = page.bounds.height
+        modelExplanationView.frame = NSRect(x: 24, y: height - 246, width: max(width - 48, 1), height: 78)
+        modelControlsView.frame = NSRect(x: 24, y: height - 402, width: max(width - 48, 1), height: 132)
+        modelPresetsView.frame = NSRect(x: 24, y: height - 458, width: max(width - 48, 1), height: 38)
+
+        let controlsWidth = modelControlsView.bounds.width
+        let sliderWidth = max(controlsWidth - 220, 120)
+        for slider in [intensitySlider, bodySlider, outputSlider] {
+            slider?.frame.size.width = sliderWidth
+        }
+        for valueLabel in [intensityValueLabel, bodyValueLabel, outputValueLabel] {
+            valueLabel?.frame.origin.x = controlsWidth - 90
+        }
+        oversamplingModeControl?.frame.size.width = max(controlsWidth - 220, 180)
+
+        let gap: CGFloat = 8
+        let presetWidth = max((modelPresetsView.bounds.width - gap * 4) / 5, 48)
+        for (index, button) in presetButtons.enumerated() {
+            button.frame = NSRect(
+                x: CGFloat(index) * (presetWidth + gap),
+                y: 0,
+                width: presetWidth,
+                height: 36
+            )
+        }
+    }
+
+    private func layoutRoutingPage() {
+        guard let page = pageViews[.routing] else { return }
+        let width = page.bounds.width
+        bundleField?.frame = NSRect(
+            x: 24,
+            y: page.bounds.height - 200,
+            width: max(width - 200, 160),
+            height: 32
+        )
+        routingStartAppButton?.frame = NSRect(
+            x: max(width - 152, 184),
+            y: page.bounds.height - 204,
+            width: 128,
+            height: 40
+        )
+        routingAppsScrollView?.frame = NSRect(
+            x: 24,
+            y: 24,
+            width: max(page.bounds.width - 48, 1),
+            height: max(page.bounds.height - 292, 120)
+        )
     }
 
     private func makeLabel(_ text: String, size: CGFloat, weight: NSFont.Weight) -> NSTextField {
@@ -1359,7 +1901,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     private func makeExplanationSection() -> NSView {
-        let view = NSView(frame: .zero)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 78))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor(calibratedRed: 0.12, green: 0.14, blue: 0.17, alpha: 1).cgColor
         view.layer?.cornerRadius = 8
@@ -1372,7 +1914,9 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
 
         for (index, line) in lines.enumerated() {
             let label = makeLabel(line, size: 12.5, weight: index == 0 ? .semibold : .regular)
-            label.frame = NSRect(x: 18, y: 48.0 - CGFloat(index) * 22.0, width: 640, height: 20)
+            label.frame = NSRect(x: 18, y: 48.0 - CGFloat(index) * 22.0, width: 484, height: 20)
+            label.autoresizingMask = [.width]
+            label.lineBreakMode = .byTruncatingTail
             view.addSubview(label)
         }
 
@@ -1380,7 +1924,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     private func makeControlSection() -> NSView {
-        let view = NSView(frame: .zero)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 132))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor(calibratedRed: 0.12, green: 0.14, blue: 0.17, alpha: 1).cgColor
         view.layer?.cornerRadius = 8
@@ -1398,14 +1942,15 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         outputNameLabel = addSliderRow(to: view, y: 10, title: "Output", slider: outputSlider, valueLabel: outputValueLabel)
 
         oversamplingModeLabel = makeLabel("Oversampling", size: 13, weight: .semibold)
-        oversamplingModeLabel.frame = NSRect(x: 16, y: 10, width: 110, height: 24)
+        oversamplingModeLabel.frame = NSRect(x: 16, y: 10, width: 100, height: 24)
         oversamplingModeControl = NSSegmentedControl(
             labels: ExciterOversamplingMode.allCases.map(\.title),
             trackingMode: .selectOne,
             target: self,
             action: #selector(oversamplingModeChanged)
         )
-        oversamplingModeControl.frame = NSRect(x: 140, y: 7, width: 430, height: 28)
+        oversamplingModeControl.frame = NSRect(x: 120, y: 7, width: 310, height: 28)
+        oversamplingModeControl.autoresizingMask = [.width]
         oversamplingModeControl.selectedSegment = segmentIndex(for: exciterOversamplingMode)
         oversamplingModeControl.toolTip = "Auto는 Engine 처리율에 맞춰 배수를 선택합니다. 수동 선택은 384 kHz 이상의 Engine 처리율에 추가 오버샘플링을 하지 않도록 제한됩니다."
         view.addSubview(oversamplingModeLabel)
@@ -1415,7 +1960,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     }
 
     private func makePresetSection() -> NSView {
-        let view = NSView(frame: .zero)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 38))
         presetButtons = [
             makeButton("IEM", action: #selector(applyIEMPreset)),
             makeButton("Gentle", action: #selector(applyGentlePreset)),
@@ -1425,7 +1970,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         ]
 
         let gap: CGFloat = 10
-        let width = (680.0 - gap * 4) / 5
+        let width = (520.0 - gap * 4) / 5
         for index in 0..<presetButtons.count {
             presetButtons[index].frame = NSRect(x: CGFloat(index) * (width + gap), y: 0, width: width, height: 36)
             view.addSubview(presetButtons[index])
@@ -1513,9 +2058,11 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     @discardableResult
     private func addSliderRow(to view: NSView, y: CGFloat, title: String, slider: NSSlider, valueLabel: NSTextField) -> NSTextField {
         let label = makeLabel(title, size: 13, weight: .semibold)
-        label.frame = NSRect(x: 18, y: y, width: 108, height: 24)
-        slider.frame = NSRect(x: 132, y: y, width: 384, height: 24)
-        valueLabel.frame = NSRect(x: 530, y: y, width: 92, height: 24)
+        label.frame = NSRect(x: 18, y: y, width: 96, height: 24)
+        slider.frame = NSRect(x: 120, y: y, width: 300, height: 24)
+        slider.autoresizingMask = [.width]
+        valueLabel.frame = NSRect(x: 430, y: y, width: 72, height: 24)
+        valueLabel.autoresizingMask = [.minXMargin]
         view.addSubview(label)
         view.addSubview(slider)
         view.addSubview(valueLabel)
@@ -1583,6 +2130,13 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         processor?.setAutomaticRateMatchingEnabled(automaticRateMatchingEnabled)
     }
 
+    @objc private func expertModeChanged() {
+        expertModeEnabled = expertModeButton.state == .on
+        UserDefaults.standard.set(expertModeEnabled, forKey: "expertModeEnabled")
+        updateFormatHeaderMode()
+        layoutApplication()
+    }
+
     @objc private func spatialControlChanged() {
         updateSpatialControls(from: spatialControlModel.settings, notifyProcessor: true)
     }
@@ -1613,6 +2167,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
     @objc private func modelChanged() {
         configureControlsForSelectedModel()
         sliderChanged()
+        updateCompactFormatSummary()
         statusLabel.stringValue = "모델 변경: \(selectedDSPModel().displayName)"
     }
 
@@ -1756,7 +2311,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
 
     private func updateOversamplingIndicator() {
         guard oversamplingLabel != nil else { return }
-        guard selectedDSPModel() == .highExciter else {
+        guard expertModeEnabled, selectedDSPModel() == .highExciter else {
             oversamplingLabel.isHidden = true
             return
         }
@@ -1782,6 +2337,49 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         )
         oversamplingLabel.stringValue = ExciterOversamplingPolicy.indicator(resolution)
         oversamplingLabel.textColor = NSColor(calibratedRed: 0.31, green: 0.78, blue: 0.94, alpha: 1)
+    }
+
+    private func updateFormatHeaderMode() {
+        let showExpertDetails = expertModeEnabled
+        compactSourceTitleLabel?.isHidden = showExpertDetails
+        compactSourceValueLabel?.isHidden = showExpertDetails
+        compactOutputLabel?.isHidden = showExpertDetails
+        compactModelLabel?.isHidden = showExpertDetails
+        sourceFormatLabel?.isHidden = !showExpertDetails
+        formatLabel?.isHidden = !showExpertDetails
+        rateMatchPreviewLabel?.isHidden = !showExpertDetails
+        updateOversamplingIndicator()
+    }
+
+    private func updateCompactFormatSummary() {
+        guard compactSourceTitleLabel != nil else { return }
+
+        if let playerName = currentSourcePlayerName {
+            compactSourceTitleLabel.stringValue = "\(playerName) 재생 음원"
+        } else {
+            compactSourceTitleLabel.stringValue = "음원 재생"
+        }
+
+        if let sourceRate = currentSourceSampleRate {
+            let depthText = currentSourceBitDepth.map { "\($0)-bit" } ?? "비트 깊이 미확인"
+            compactSourceValueLabel.stringValue = "\(formatSampleRate(sourceRate)) / \(depthText)"
+        } else {
+            compactSourceValueLabel.stringValue = "재생 정보 대기 중"
+        }
+
+        if let outputRate = currentDeviceSampleRate {
+            compactOutputLabel.stringValue =
+                "출력  \(formatSampleRate(outputRate)) / \(currentOutputSampleFormat)"
+        } else {
+            compactOutputLabel.stringValue = "출력 포맷 대기 중"
+        }
+        compactModelLabel.stringValue = "적용 모델  \(selectedDSPModel().displayName)"
+    }
+
+    private func formatSampleRate(_ sampleRate: Double) -> String {
+        sampleRate >= 1_000
+            ? String(format: "%.1f kHz", sampleRate / 1_000)
+            : String(format: "%.0f Hz", sampleRate)
     }
 
     private func spatialSettingsFromControls() -> SpatialSettings {
@@ -1914,6 +2512,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         diagnosticsLabel?.stringValue = "XRuns 대기 중"
         currentProcessingSampleRate = nil
         updateOversamplingIndicator()
+        updateCompactFormatSummary()
     }
 
     private func startDiagnosticsTimer() {
@@ -1935,6 +2534,12 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
                     self.sourceFormatLabel?.stringValue = snapshot.indicatorText
                     self.sourceFormatLabel?.toolTip = snapshot.indicatorText
                     self.currentSourceSampleRate = snapshot.format?.sampleRate
+                    let activePlayerNames =
+                        snapshot.activePlayers.map(\.displayName).joined(separator: " + ")
+                    self.currentSourcePlayerName = snapshot.format?.player.displayName
+                        ?? (activePlayerNames.isEmpty ? nil : activePlayerNames)
+                    self.currentSourceBitDepth = snapshot.format?.bitDepth
+                    self.updateCompactFormatSummary()
                     self.updateRateMatchPreview()
                 }
             },
@@ -1977,6 +2582,9 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             spectrumAnalyzer?.updateSampleRate(Float(sampleRate))
         }
         currentDeviceSampleRate = notification.userInfo?[AudioFormatNotifications.sampleRateKey] as? Double
+        currentOutputSampleFormat =
+            notification.userInfo?[AudioFormatNotifications.sampleFormatKey] as? String
+            ?? currentOutputSampleFormat
         supportedDeviceSampleRates =
             notification.userInfo?[AudioFormatNotifications.supportedSampleRatesKey] as? [Double]
             ?? supportedDeviceSampleRates
@@ -1991,6 +2599,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
         rateMatchStatusText =
             notification.userInfo?[AudioFormatNotifications.rateMatchStatusKey] as? String
             ?? rateMatchStatusText
+        updateCompactFormatSummary()
         updateRateMatchPreview()
         updateOversamplingIndicator()
     }
@@ -2007,6 +2616,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSTextFi
             supportedDeviceSampleRates = []
             isDeviceSampleRateSettable = false
         }
+        updateCompactFormatSummary()
         updateRateMatchPreview()
     }
 
