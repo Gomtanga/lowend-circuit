@@ -27,6 +27,20 @@ enum AppError: Error, CustomStringConvertible {
     }
 }
 
+enum RateMatchPhase: String, Sendable {
+    case idle
+    case fadingOut
+    case stopping
+    case changingDeviceRate
+    case rebuilding
+    case waitingForCapture
+    case fadingIn
+    case running
+    case rollback
+    case aborted
+}
+
+
 private final class DynamicsMeterModel: ObservableObject {
     struct Levels {
         var peak: Float
@@ -3827,6 +3841,16 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private var originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var originalRateMatchSampleRate: Double?
     private var rateMatchStatus = "Auto OFF"
+    private var rateMatchPhase: RateMatchPhase = .idle
+    private var rateMatchTransitionID: UInt64 = 0
+    private var rateMatchActiveTransitionID: UInt64 = 0
+    private var rateMatchLastTransitionAt: Date?
+    private var rateMatchLastSourceRate: Double?
+    private var rateMatchLastTargetRate: Double?
+    private var rateMatchCooldownUntil: Date = .distantPast
+    private let rateMatchCooldownInterval: TimeInterval = 2.0
+    private var captureFrameCounter: UInt64 = 0
+    private var captureFrameCounterAtTransitionStart: UInt64 = 0
     private var currentSpatialSettings: SpatialSettings
     private var currentCaptureTargetSummary = "전체 시스템"
     private var engineRestartCount: UInt64 = 0
@@ -3960,6 +3984,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             automaticRateMatchingEnabled = enabled
             rateMatchSessionDisabled = false
             rateMatchGate.reset()
+            rateMatchPhase = enabled ? .idle : .idle
+            rateMatchCooldownUntil = .distantPast
+            rateMatchLastSourceRate = nil
+            rateMatchLastTargetRate = nil
             rateMatchStatus = enabled ? "Auto ON: source 안정화 대기" : "Auto OFF"
             if !enabled {
                 do {
@@ -3979,6 +4007,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                   !rateMatchSessionDisabled,
                   isStarted,
                   !isAutomaticRateTransition else {
+                return
+            }
+
+            guard let format, format.hasUsableSampleRate else {
                 return
             }
 
@@ -4037,6 +4069,12 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 try? restoreOriginalRateMatchIfNeeded(reconfigureEngine: false)
             }
             isStarted = false
+            isAutomaticRateTransition = false
+            rateMatchPhase = .idle
+            rateMatchActiveTransitionID = 0
+            rateMatchCooldownUntil = .distantPast
+            rateMatchLastSourceRate = nil
+            rateMatchLastTargetRate = nil
         }
     }
 
@@ -4100,25 +4138,59 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             return
         }
 
+        let now = Date()
+        if now < rateMatchCooldownUntil {
+            let remaining = rateMatchCooldownUntil.timeIntervalSince(now)
+            rateMatchStatus = "Auto cooldown: \(String(format: "%.1f", remaining))s"
+            publishFormatStatus()
+            return
+        }
+
         if originalRateMatchSampleRate == nil {
             originalRateMatchDeviceID = currentOutputDeviceID
             originalRateMatchSampleRate = currentHardwareSampleRate
         }
 
+        if let priorTargetRate = rateMatchLastTargetRate,
+           abs(priorTargetRate - targetRate) < 1,
+           now.timeIntervalSince(rateMatchLastTransitionAt ?? .distantPast) < rateMatchCooldownInterval {
+            return
+        }
+
+        rateMatchTransitionID &+= 1
+        let transitionID = rateMatchTransitionID
+        rateMatchActiveTransitionID = transitionID
+        rateMatchLastSourceRate = currentHardwareSampleRate
+        rateMatchLastTargetRate = targetRate
+        rateMatchLastTransitionAt = now
+        rateMatchCooldownUntil = now.addingTimeInterval(rateMatchCooldownInterval)
+
+        defer {
+            if rateMatchActiveTransitionID == transitionID {
+                rateMatchActiveTransitionID = 0
+            }
+        }
+
         do {
             try performRateTransition(
                 to: targetRate,
-                successStatus: "Auto matched: \(Self.rateText(targetRate))"
+                successStatus: "Auto matched: \(Self.rateText(targetRate))",
+                transitionID: transitionID
             )
         } catch {
+            rateMatchPhase = .rollback
             let originalRate = originalRateMatchSampleRate
             let originalDevice = originalRateMatchDeviceID
             var rollbackSucceeded = false
             if let originalRate, originalDevice == currentOutputDeviceID {
                 do {
+                    rateMatchTransitionID &+= 1
+                    let rollbackID = rateMatchTransitionID
+                    rateMatchActiveTransitionID = rollbackID
                     try performRateTransition(
                         to: originalRate,
-                        successStatus: "Auto rollback: \(Self.rateText(originalRate))"
+                        successStatus: "Auto rollback: \(Self.rateText(originalRate))",
+                        transitionID: rollbackID
                     )
                     rollbackSucceeded = true
                 } catch {
@@ -4146,9 +4218,18 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
         }
         if reconfigureEngine, isStarted {
+            rateMatchTransitionID &+= 1
+            let restoreID = rateMatchTransitionID
+            rateMatchActiveTransitionID = restoreID
+            defer {
+                if rateMatchActiveTransitionID == restoreID {
+                    rateMatchActiveTransitionID = 0
+                }
+            }
             try performRateTransition(
                 to: originalRate,
-                successStatus: "Auto OFF: \(Self.rateText(originalRate)) 복구"
+                successStatus: "Auto OFF: \(Self.rateText(originalRate)) 복구",
+                transitionID: restoreID
             )
         } else {
             try HardwareSampleRateTracker.setNominalSampleRate(
@@ -4159,17 +4240,36 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     }
 
     private func performRateTransition(to targetRate: Double,
-                                       successStatus: String) throws {
+                                       successStatus: String,
+                                       transitionID: UInt64) throws {
         guard !isAutomaticRateTransition else { return }
         isAutomaticRateTransition = true
+        rateMatchPhase = .fadingOut
         rateMatchStatus = "Auto switching: \(Self.rateText(targetRate))"
         publishFormatStatus()
-        defer { isAutomaticRateTransition = false }
+        let phaseStarted = Date()
+
+        func finishPhase(_ nextPhase: RateMatchPhase) {
+            rateMatchPhase = nextPhase
+        }
+
+        defer {
+            isAutomaticRateTransition = false
+        }
 
         requestOutputGain(0, duration: 0.05)
+        finishPhase(.stopping)
         waitForOutputGain(atMost: 0.001, timeout: 0.25)
+        let gainAfterFadeOut = lc_output_gain_ramp_current(outputGainRamp)
+
+        captureFrameCounterAtTransitionStart = captureFrameCounter
         suspendForHardwareReconfigure()
 
+        let priorDeviceID = currentOutputDeviceID
+        let priorHardwareRate = currentHardwareSampleRate
+        let priorEngineRestartCount = engineRestartCount
+
+        finishPhase(.changingDeviceRate)
         do {
             try HardwareSampleRateTracker.setNominalSampleRate(
                 targetRate,
@@ -4179,15 +4279,31 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 targetRate,
                 deviceID: currentOutputDeviceID
             )
+            finishPhase(.rebuilding)
             try restartForHardwareFormat(
                 deviceID: currentOutputDeviceID,
                 hardwareSampleRate: confirmedRate
             )
+            finishPhase(.waitingForCapture)
+            let captureRecovered = waitForCaptureRecovery(timeout: 1.0)
+            if !captureRecovered {
+                throw AppError.message(
+                    "capture did not recover after \(Self.rateText(confirmedRate)) reconfigure"
+                )
+            }
+            let ringFill = ringBuffer.availableSamples()
             rateMatchStatus = successStatus
+            finishPhase(.fadingIn)
             requestOutputGain(1, duration: 0.08)
             publishFormatStatus()
+            let engineRunning = engine.isRunning
+            let gainAfterFadeIn = lc_output_gain_ramp_current(outputGainRamp)
+            rateMatchPhase = .running
+            print("[RateMatch] tid=\(transitionID) OK src=\(Self.rateText(priorHardwareRate))→\(Self.rateText(targetRate)) device=\(priorDeviceID)→\(currentOutputDeviceID) restarts=\(engineRestartCount - priorEngineRestartCount) gainOut=\(gainAfterFadeOut) gainIn=\(gainAfterFadeIn) ringFill=\(ringFill) engineRunning=\(engineRunning) elapsed=\(String(format: "%.0fms", Date().timeIntervalSince(phaseStarted) * 1000))")
         } catch {
-            if !engine.isRunning {
+            let engineRunningBeforeRecovery = engine.isRunning
+            let captureBeforeRecovery = captureFrameCounter
+            if !engineRunningBeforeRecovery {
                 let recoveryRate =
                     (try? HardwareSampleRateTracker.nominalSampleRate(for: currentOutputDeviceID))
                     ?? currentHardwareSampleRate
@@ -4196,7 +4312,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                     hardwareSampleRate: Self.validSampleRate(recoveryRate)
                 )
             }
+            _ = waitForCaptureRecovery(timeout: 0.5)
             requestOutputGain(1, duration: 0.08)
+            rateMatchPhase = .aborted
+            print("[RateMatch] tid=\(transitionID) FAIL src=\(Self.rateText(priorHardwareRate))→\(Self.rateText(targetRate)) engine=\(engineRunningBeforeRecovery) captureBefore=\(captureBeforeRecovery) captureAfter=\(captureFrameCounter) err=\(error)")
             throw error
         }
     }
@@ -4232,11 +4351,34 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         )
     }
 
+    private func waitForCaptureRecovery(timeout: TimeInterval) -> Bool {
+        let baseline = captureFrameCounterAtTransitionStart
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if captureFrameCounter > baseline {
+                return true
+            }
+            usleep(5_000)
+        }
+        return captureFrameCounter > baseline
+    }
+
     private func disableAutomaticRateMatchingForSession(_ error: Error) {
         rateMatchSessionDisabled = true
         rateMatchGate.reset()
+        rateMatchPhase = .aborted
         rateMatchStatus = "Auto paused: \(error)"
         requestOutputGain(1, duration: 0.08)
+        if !engine.isRunning {
+            let recoveryRate =
+                (try? HardwareSampleRateTracker.nominalSampleRate(for: currentOutputDeviceID))
+                ?? currentHardwareSampleRate
+            try? restartForHardwareFormat(
+                deviceID: currentOutputDeviceID,
+                hardwareSampleRate: Self.validSampleRate(recoveryRate)
+            )
+            _ = waitForCaptureRecovery(timeout: 0.5)
+        }
         publishFormatStatus()
     }
 
@@ -4254,9 +4396,17 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 : "Auto OFF"
         }
 
+        print("[RateMatch] hardware-change device=\(deviceID) rate=\(Self.rateText(newHardwareSampleRate)) deviceChanged=\(deviceChanged) rateChanged=\(rateChanged) duringAuto=\(isAutomaticRateTransition) phase=\(rateMatchPhase.rawValue)")
+
         guard isStarted else {
             currentOutputDeviceID = deviceID
             currentHardwareSampleRate = newHardwareSampleRate
+            publishFormatStatus()
+            return
+        }
+
+        if isAutomaticRateTransition {
+            print("[RateMatch] listener ignored during automatic transition (tid=\(rateMatchActiveTransitionID))")
             publishFormatStatus()
             return
         }
@@ -4310,14 +4460,22 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private func stopCaptureForReconfigure() {
         if aggregateDeviceID != kAudioObjectUnknown {
             if let ioProcID {
-                AudioDeviceStop(aggregateDeviceID, ioProcID)
+                let status = AudioDeviceStop(aggregateDeviceID, ioProcID)
+                if status != noErr {
+                    print("[RateMatch] AudioDeviceStop status=\(status) (aggregating=\(aggregateDeviceID))")
+                }
             }
         }
     }
 
     private func resumeCaptureAfterReconfigure() throws {
         if aggregateDeviceID != kAudioObjectUnknown, let ioProcID {
-            try check(AudioDeviceStart(aggregateDeviceID, ioProcID), "AudioDeviceStart")
+            do {
+                try check(AudioDeviceStart(aggregateDeviceID, ioProcID), "AudioDeviceStart")
+            } catch {
+                print("[RateMatch] AudioDeviceStart failed: \(error)")
+                throw error
+            }
         }
     }
 
@@ -4389,6 +4547,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         let capabilities = try? HardwareSampleRateTracker.rateCapabilities(for: currentOutputDeviceID)
         let rateMatchingEnabled = automaticRateMatchingEnabled
         let currentRateMatchStatus = rateMatchStatus
+        let currentRateMatchPhase = rateMatchPhase.rawValue
         DispatchQueue.main.async {
             NotificationCenter.default.post(
                 name: AudioFormatNotifications.didChange,
@@ -4403,7 +4562,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                     AudioFormatNotifications.supportedSampleRatesKey: capabilities?.supportedRates ?? [],
                     AudioFormatNotifications.isSampleRateSettableKey: capabilities?.isSettable ?? false,
                     AudioFormatNotifications.automaticRateMatchingEnabledKey: rateMatchingEnabled,
-                    AudioFormatNotifications.rateMatchStatusKey: currentRateMatchStatus
+                    AudioFormatNotifications.rateMatchStatusKey: currentRateMatchStatus,
+                    AudioFormatNotifications.rateMatchPhaseKey: currentRateMatchPhase
                 ]
             )
         }
@@ -4732,6 +4892,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         guard let first = buffers.first, first.mDataByteSize > 0 else { return }
 
         let frameCount = Int(first.mDataByteSize) / MemoryLayout<Float>.size
+        captureFrameCounter &+= UInt64(frameCount)
         applyPendingControlEvents()
 
         if buffers.count >= 2,
