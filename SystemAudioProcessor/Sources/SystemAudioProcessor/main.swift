@@ -1806,10 +1806,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
 
         let shortVersion =
             Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-            ?? "0.2.5"
+            ?? "0.2.6"
         let buildVersion =
             Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-            ?? "7"
+            ?? "8"
         let version = makeLabel(
             "LowEnd Native Audio \(shortVersion) (\(buildVersion))",
             size: 15,
