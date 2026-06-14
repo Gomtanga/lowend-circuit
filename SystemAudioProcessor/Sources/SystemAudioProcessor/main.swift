@@ -3544,6 +3544,24 @@ private final class Spatializer {
     }
 }
 
+// Lock-protected optional Double shared between queues during a rate change.
+private final class RateBox {
+    private let lock = NSLock()
+    private var value: Double?
+
+    func set(_ rate: Double) {
+        lock.lock()
+        value = rate
+        lock.unlock()
+    }
+
+    func get() -> Double? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 private final class HardwareSampleRateTracker {
     struct RateCapabilities {
         let supportedRates: [Double]
@@ -3562,6 +3580,14 @@ private final class HardwareSampleRateTracker {
     private var defaultOutputListener: AudioObjectPropertyListenerBlock?
     private var sampleRateListener: AudioObjectPropertyListenerBlock?
     private var isStarted = false
+
+    // Core Audio's listener must run on a queue other than `queue`, because
+    // `queue` (= the audio manager queue) is blocked by the transition itself
+    // during `performRateTransition`. Without a separate queue the listener
+    // could not fire and the transition would deadlock on the semaphore.
+    private let listenerQueue = DispatchQueue(label: "lowend.hardware-tracker.listener")
+    private let confirmationLock = NSLock()
+    private var confirmRateChange: ((Double) -> Void)?
 
     init(queue: DispatchQueue, onChange: @escaping (AudioObjectID, Double) -> Void) {
         self.queue = queue
@@ -3625,11 +3651,27 @@ private final class HardwareSampleRateTracker {
         }
     }
 
-    private func handleSampleRateChanged() {
+    private func handleSampleRateChanged(registeredDeviceID: AudioObjectID) {
         do {
-            let deviceID = outputDeviceID
+            confirmationLock.lock()
+            let currentDeviceID = outputDeviceID
+            confirmationLock.unlock()
+            // Reject stale callbacks queued for the previously-registered device.
+            guard currentDeviceID == registeredDeviceID else { return }
+            let deviceID = currentDeviceID
             guard deviceID != kAudioObjectUnknown else { return }
-            onChange(deviceID, try Self.nominalSampleRate(for: deviceID))
+            let rate = try Self.nominalSampleRate(for: deviceID)
+            confirmationLock.lock()
+            let confirm = confirmRateChange
+            confirmRateChange = nil
+            confirmationLock.unlock()
+            confirm?(rate)
+            // `onChange` must run on the audio manager queue to preserve the
+            // invariant that hardware state observers see consistent ordering
+            // with other manager-queue work.
+            queue.async { [weak self] in
+                self?.onChange(deviceID, rate)
+            }
         } catch {
             fputs("Sample rate change handling failed: \(error)\n", stderr)
         }
@@ -3637,11 +3679,16 @@ private final class HardwareSampleRateTracker {
 
     private func refreshOutputDevice(forceNotify: Bool) throws {
         let newDeviceID = try Self.defaultOutputDevice()
-        let deviceChanged = newDeviceID != outputDeviceID
+        confirmationLock.lock()
+        let previousDeviceID = outputDeviceID
+        confirmationLock.unlock()
+        let deviceChanged = newDeviceID != previousDeviceID
 
         if deviceChanged {
             removeSampleRateListener()
+            confirmationLock.lock()
             outputDeviceID = newDeviceID
+            confirmationLock.unlock()
             try installSampleRateListener(for: newDeviceID)
         }
 
@@ -3654,21 +3701,24 @@ private final class HardwareSampleRateTracker {
         guard deviceID != kAudioObjectUnknown else { return }
 
         let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.handleSampleRateChanged()
+            self?.handleSampleRateChanged(registeredDeviceID: deviceID)
         }
         sampleRateListener = listener
 
         var address = Self.nominalSampleRateAddress()
         try check(
-            AudioObjectAddPropertyListenerBlock(deviceID, &address, queue, listener),
+            AudioObjectAddPropertyListenerBlock(deviceID, &address, listenerQueue, listener),
             "AudioObjectAddPropertyListenerBlock NominalSampleRate"
         )
     }
 
     private func removeSampleRateListener() {
-        guard outputDeviceID != kAudioObjectUnknown, let sampleRateListener else { return }
+        confirmationLock.lock()
+        let deviceID = outputDeviceID
+        confirmationLock.unlock()
+        guard deviceID != kAudioObjectUnknown, let sampleRateListener else { return }
         var address = Self.nominalSampleRateAddress()
-        AudioObjectRemovePropertyListenerBlock(outputDeviceID, &address, queue, sampleRateListener)
+        AudioObjectRemovePropertyListenerBlock(deviceID, &address, listenerQueue, sampleRateListener)
         self.sampleRateListener = nil
     }
 
@@ -3723,6 +3773,26 @@ private final class HardwareSampleRateTracker {
             ),
             "AudioObjectSetPropertyData NominalSampleRate"
         )
+    }
+
+    func requestRateChange(_ sampleRate: Double,
+                           for deviceID: AudioObjectID,
+                           onChange: @escaping (Double) -> Void) throws {
+        confirmationLock.lock()
+        confirmRateChange = onChange
+        confirmationLock.unlock()
+        do {
+            try Self.setNominalSampleRate(sampleRate, for: deviceID)
+        } catch {
+            cancelRateChangeConfirmation()
+            throw error
+        }
+    }
+
+    func cancelRateChangeConfirmation() {
+        confirmationLock.lock()
+        confirmRateChange = nil
+        confirmationLock.unlock()
     }
 
     static func rateCapabilities(for deviceID: AudioObjectID) throws -> RateCapabilities {
@@ -4258,6 +4328,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         let phaseStarted = Date()
 
         func finishPhase(_ nextPhase: RateMatchPhase) {
+            let elapsedMs = Date().timeIntervalSince(phaseStarted) * 1000
+            rateMatchLog("tid=\(transitionID) phase=\(nextPhase.rawValue) t=\(String(format: "%.0fms", elapsedMs))")
             rateMatchPhase = nextPhase
         }
 
@@ -4278,26 +4350,48 @@ private final class SystemAudioProcessor: @unchecked Sendable {
 
         finishPhase(.changingDeviceRate)
         do {
-            try HardwareSampleRateTracker.setNominalSampleRate(
+            let rateRequestStarted = Date()
+            let rateSemaphore = DispatchSemaphore(value: 0)
+            // Shared across the manager queue (reader) and the Core Audio
+            // listener queue (writer). Protect with a lock.
+            let confirmedBox = RateBox()
+            if let tracker = hardwareTracker {
+                try tracker.requestRateChange(targetRate, for: currentOutputDeviceID) { rate in
+                    confirmedBox.set(rate)
+                    rateSemaphore.signal()
+                }
+            } else {
+                try HardwareSampleRateTracker.setNominalSampleRate(
+                    targetRate,
+                    for: currentOutputDeviceID
+                )
+            }
+            defer {
+                hardwareTracker?.cancelRateChangeConfirmation()
+            }
+            let confirmed = try waitForNominalSampleRate(
                 targetRate,
-                for: currentOutputDeviceID
+                deviceID: currentOutputDeviceID,
+                semaphore: rateSemaphore,
+                confirmedRate: { confirmedBox.get() }
             )
-            let confirmedRate = try waitForNominalSampleRate(
-                targetRate,
-                deviceID: currentOutputDeviceID
-            )
+            rateMatchLog("tid=\(transitionID) device-rate-change t=\(String(format: "%.0fms", Date().timeIntervalSince(rateRequestStarted) * 1000)) signaled=\(confirmedBox.get() != nil)")
             finishPhase(.rebuilding)
+            let rebuildStarted = Date()
             try restartForHardwareFormat(
                 deviceID: currentOutputDeviceID,
-                hardwareSampleRate: confirmedRate
+                hardwareSampleRate: confirmed
             )
+            rateMatchLog("tid=\(transitionID) rebuild t=\(String(format: "%.0fms", Date().timeIntervalSince(rebuildStarted) * 1000))")
             ringWrittenAtTransitionStart = ringBuffer.totalWrittenSamples()
             ringReadAtTransitionStart = ringBuffer.totalReadSamples()
             finishPhase(.waitingForCapture)
-            let audioFlowRecovered = waitForAudioFlowRecovery(timeout: 1.5)
+            let flowStarted = Date()
+            let audioFlowRecovered = waitForAudioFlowRecovery(timeout: 0.5)
+            rateMatchLog("tid=\(transitionID) flow-recovery ok=\(audioFlowRecovered) t=\(String(format: "%.0fms", Date().timeIntervalSince(flowStarted) * 1000))")
             if !audioFlowRecovered {
                 throw AppError.message(
-                    "capture/output flow did not recover after \(Self.rateText(confirmedRate)) reconfigure"
+                    "capture/output flow did not recover after \(Self.rateText(confirmed)) reconfigure"
                 )
             }
             let ringFill = ringBuffer.availableSamples()
@@ -4306,7 +4400,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             requestOutputGain(1, duration: 0.08)
             guard waitForOutputGain(atLeast: 0.99, timeout: 0.5) else {
                 throw AppError.message(
-                    "output gain did not recover after \(Self.rateText(confirmedRate)) reconfigure"
+                    "output gain did not recover after \(Self.rateText(confirmed)) reconfigure"
                 )
             }
             publishFormatStatus()
@@ -4364,14 +4458,24 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     }
 
     private func waitForNominalSampleRate(_ targetRate: Double,
-                                          deviceID: AudioObjectID) throws -> Double {
-        var lastRate = try HardwareSampleRateTracker.nominalSampleRate(for: deviceID)
-        for _ in 0..<100 {
+                                          deviceID: AudioObjectID,
+                                          semaphore: DispatchSemaphore,
+                                          confirmedRate: () -> Double?) throws -> Double {
+        // Event-wait first; if the listener never fires, polls below will still confirm.
+        _ = semaphore.wait(timeout: .now() + .milliseconds(900))
+
+        let fastPollIterations = 30
+        let fastPollIntervalMicros: useconds_t = 2_000
+        var lastRate = (try? HardwareSampleRateTracker.nominalSampleRate(for: deviceID))
+            ?? confirmedRate()
+            ?? currentHardwareSampleRate
+        for _ in 0..<fastPollIterations {
             if abs(lastRate - targetRate) <= 1 {
                 return lastRate
             }
-            usleep(10_000)
-            lastRate = try HardwareSampleRateTracker.nominalSampleRate(for: deviceID)
+            usleep(fastPollIntervalMicros)
+            lastRate = (try? HardwareSampleRateTracker.nominalSampleRate(for: deviceID))
+                ?? lastRate
         }
         throw AppError.message(
             "DAC did not confirm \(Self.rateText(targetRate)); current \(Self.rateText(lastRate))."
@@ -4388,7 +4492,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             if captureAdvanced && outputAdvanced && engine.isRunning {
                 return true
             }
-            usleep(5_000)
+            usleep(2_000)
         }
         return ringBuffer.totalWrittenSamples() > ringWrittenAtTransitionStart
             && ringBuffer.totalReadSamples() > ringReadAtTransitionStart
@@ -4620,6 +4724,17 @@ private final class SystemAudioProcessor: @unchecked Sendable {
 
     private func rateMatchLog(_ message: String) {
         NSLog("[RateMatch] %@", message)
+        let line = "\(Date().timeIntervalSince1970) \(message)\n"
+        let path = NSTemporaryDirectory() + "lowend-ratematch.log"
+        if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: path)) {
+            handle.seekToEndOfFile()
+            if let data = line.data(using: .utf8) {
+                handle.write(data)
+            }
+            try? handle.close()
+        } else {
+            try? line.data(using: .utf8)?.write(to: URL(fileURLWithPath: path))
+        }
     }
 
     private func refreshTapSampleRate() {
