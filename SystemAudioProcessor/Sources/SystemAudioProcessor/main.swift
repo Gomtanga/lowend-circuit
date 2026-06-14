@@ -1696,7 +1696,9 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
 
         modelPopup = NSPopUpButton(frame: NSRect(x: 84, y: 545, width: 170, height: 30), pullsDown: false)
         modelPopup.addItems(withTitles: ["Clean", "Circuit", "HighExciter"])
-        modelPopup.selectItem(withTitle: "Circuit")
+        let savedModelIndex = UserDefaults.standard.integer(forKey: "selectedModel")
+        let initialModelIndex = (0...2).contains(savedModelIndex) ? savedModelIndex : 1
+        modelPopup.selectItem(at: initialModelIndex)
         modelPopup.target = self
         modelPopup.action = #selector(modelChanged)
         modelPopup.toolTip = "Clean은 DSP bypass, Circuit은 저역 회로 모델, HighExciter는 독립 고역 배음 모델입니다."
@@ -1957,6 +1959,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         bodySlider = makeSlider(value: 30, min: 0, max: 100)
         outputSlider = makeSlider(value: -1.5, min: -18, max: 6)
 
+        applySliderValues(loadSliderValues(for: selectedDSPModel()))
+
         intensityValueLabel = makeLabel("", size: 13, weight: .semibold)
         bodyValueLabel = makeLabel("", size: 13, weight: .semibold)
         outputValueLabel = makeLabel("", size: 13, weight: .semibold)
@@ -2024,7 +2028,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
 
         spatialEnabledButton = NSButton(checkboxWithTitle: "공간음향", target: self, action: #selector(spatialControlChanged))
         spatialEnabledButton.frame = NSRect(x: 310, y: 592, width: 96, height: 26)
-        spatialEnabledButton.state = .on
+        spatialEnabledButton.state = spatialControlModel.settings.enabled ? .on : .off
         spatialEnabledButton.toolTip = "3D 위치 기반 거리, 지연, 크로스피드 처리를 켜거나 끕니다."
         view.addSubview(spatialEnabledButton)
 
@@ -2124,10 +2128,21 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     @objc private func sliderChanged() {
         updateSliderLabels()
         updateOversamplingIndicator()
+        let model = selectedDSPModel()
+        if model != .clean {
+            saveSliderValues(
+                SliderValues(
+                    intensity: intensitySlider.doubleValue,
+                    body: bodySlider.doubleValue,
+                    outputDb: outputSlider.doubleValue
+                ),
+                for: model
+            )
+        }
         processor?.updateDSP(intensity: Float(intensitySlider.doubleValue),
                              body: Float(bodySlider.doubleValue),
                              outputDb: Float(outputSlider.doubleValue),
-                             dspModel: selectedDSPModel(),
+                             dspModel: model,
                              exciterOversamplingMode: exciterOversamplingMode)
     }
 
@@ -2198,10 +2213,13 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     }
 
     @objc private func modelChanged() {
+        let model = selectedDSPModel()
+        UserDefaults.standard.set(modelPopup.indexOfSelectedItem, forKey: "selectedModel")
+        applySliderValues(loadSliderValues(for: model))
         configureControlsForSelectedModel()
         sliderChanged()
         updateCompactFormatSummary()
-        statusLabel.stringValue = "모델 변경: \(selectedDSPModel().displayName)"
+        statusLabel.stringValue = "모델 변경: \(model.displayName)"
     }
 
     private func configureControlsForSelectedModel() {
@@ -2503,6 +2521,49 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         default:
             return .clean
         }
+    }
+
+    private struct SliderValues: Codable {
+        let intensity: Double
+        let body: Double
+        let outputDb: Double
+    }
+
+    private func defaultSliderValues(for model: Settings.DSPModel) -> SliderValues {
+        switch model {
+        case .clean: return SliderValues(intensity: 0, body: 0, outputDb: 0)
+        case .circuit: return SliderValues(intensity: 55, body: 30, outputDb: -1.5)
+        case .highExciter: return SliderValues(intensity: 12, body: 4, outputDb: 0)
+        }
+    }
+
+    private func sliderValuesKey(for model: Settings.DSPModel) -> String {
+        "sliders.\(model.rawValue)"
+    }
+
+    private func loadSliderValues(for model: Settings.DSPModel) -> SliderValues {
+        let fallback = defaultSliderValues(for: model)
+        guard let data = UserDefaults.standard.data(forKey: sliderValuesKey(for: model)) else {
+            return fallback
+        }
+        let decoder = JSONDecoder()
+        return (try? decoder.decode(SliderValues.self, from: data)) ?? fallback
+    }
+
+    private func saveSliderValues(_ values: SliderValues, for model: Settings.DSPModel) {
+        let encoder = JSONEncoder()
+        if let data = try? encoder.encode(values) {
+            UserDefaults.standard.set(data, forKey: sliderValuesKey(for: model))
+        }
+    }
+
+    private func applySliderValues(_ values: SliderValues) {
+        guard intensitySlider != nil,
+              bodySlider != nil,
+              outputSlider != nil else { return }
+        intensitySlider.doubleValue = values.intensity
+        bodySlider.doubleValue = values.body
+        outputSlider.doubleValue = values.outputDb
     }
 
     private func start(_ settings: Settings) {

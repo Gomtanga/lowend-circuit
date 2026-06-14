@@ -2,7 +2,7 @@ import Foundation
 import LowEndSupport
 
 struct SpatialSettings {
-    var enabled: Bool = true
+    var enabled: Bool = false
     var listenerX: Float = 0.0
     var listenerZ: Float = 0.0
     var speakerWidth: Float = 1.65
