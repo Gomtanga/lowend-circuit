@@ -238,12 +238,19 @@ reported by the current DAC. It prefers an exact match, otherwise the highest
 supported rate in the same 44.1 kHz or 48 kHz family. The preview is read-only:
 it does not change the DAC or Engine rate.
 
-`Automatic Rate Match` is a separate opt-in checkbox and is OFF by default.
-When enabled, two stable source observations are required before a change. The
-output follows a fixed fade-out, engine stop/reset, DAC and Engine rate update,
+`Automatic Rate Match` is an experimental opt-in checkbox, OFF by default and
+only exposed in the Settings page when Expert Mode is enabled. When enabled,
+two stable source observations are required before a change. The output
+follows a fixed fade-out, engine stop/reset, DAC and Engine rate update,
 capture-graph and output-engine recreation, verified input/output flow, and
-fade-in sequence. Turning the option off or quitting the app restores the rate
-that was active before the first automatic change. A failed device change is
+fade-in sequence, which takes roughly one to two seconds of silence on every
+track change because the hardware DAC has to relock at the new rate.
+
+For gapless playback, leave Automatic Rate Match off and keep the DAC at a
+fixed high rate (such as 96 kHz or 192 kHz). macOS will then handle sample
+rate conversion between source and DAC rate itself, with no track-change
+silence. Turning the option off or quitting the app restores the rate that
+was active before the first automatic change. A failed device change is
 rolled back and automatic matching is paused for that session.
 
 Source detection is intentionally outside the real-time audio path. Apple Music

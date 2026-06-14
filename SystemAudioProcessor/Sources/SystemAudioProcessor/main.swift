@@ -1747,17 +1747,6 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         stop.toolTip = "처리를 멈추고 원래 소리로 되돌립니다."
         page.addSubview(stop)
 
-        automaticRateMatchButton = NSButton(
-            checkboxWithTitle: "자동 Rate Match",
-            target: self,
-            action: #selector(automaticRateMatchChanged)
-        )
-        automaticRateMatchButton.frame = NSRect(x: 152, y: 562, width: 180, height: 24)
-        automaticRateMatchButton.autoresizingMask = [.minYMargin]
-        automaticRateMatchButton.state = automaticRateMatchingEnabled ? .on : .off
-        automaticRateMatchButton.toolTip = "감지된 Apple Music/TIDAL Source rate에 맞춰 기본 출력 DAC의 Nominal Sample Rate를 변경합니다. 기본값은 OFF입니다."
-        page.addSubview(automaticRateMatchButton)
-
         bundleField = NSTextField(frame: NSRect(x: 24, y: 500, width: 350, height: 32))
         bundleField.placeholderString = "예: com.tidal.desktop"
         bundleField.autoresizingMask = [.minYMargin, .width]
@@ -1844,6 +1833,27 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         note.frame = NSRect(x: 24, y: 426, width: 480, height: 20)
         note.autoresizingMask = [.minYMargin, .width]
         page.addSubview(note)
+
+        automaticRateMatchButton = NSButton(
+            checkboxWithTitle: "자동 Rate Match (실험적)",
+            target: self,
+            action: #selector(automaticRateMatchChanged)
+        )
+        automaticRateMatchButton.frame = NSRect(x: 24, y: 394, width: 320, height: 24)
+        automaticRateMatchButton.autoresizingMask = [.minYMargin]
+        automaticRateMatchButton.state = automaticRateMatchingEnabled ? .on : .off
+        automaticRateMatchButton.toolTip = "감지된 Apple Music/TIDAL Source rate에 맞춰 기본 출력 DAC의 Nominal Sample Rate를 변경합니다. 전환 시 하드웨어 relock으로 약 1~2초 무음이 발생합니다. 일반적으로는 DAC rate 고정 + macOS 시스템 SRC가 무음 없이 더 부드럽게 동작합니다."
+        automaticRateMatchButton.isEnabled = expertModeEnabled
+        page.addSubview(automaticRateMatchButton)
+
+        let rateMatchNote = makeLabel(
+            "트랙 전환 시 약 1~2초 무음 발생. 전문가 모드에서만 설정 가능.",
+            size: 11,
+            weight: .regular
+        )
+        rateMatchNote.frame = NSRect(x: 24, y: 372, width: 480, height: 18)
+        rateMatchNote.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(rateMatchNote)
         return page
     }
 
@@ -2147,6 +2157,15 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     @objc private func expertModeChanged() {
         expertModeEnabled = expertModeButton.state == .on
         UserDefaults.standard.set(expertModeEnabled, forKey: "expertModeEnabled")
+        automaticRateMatchButton.isEnabled = expertModeEnabled
+        if !expertModeEnabled && automaticRateMatchingEnabled {
+            automaticRateMatchingEnabled = false
+            automaticRateMatchButton.state = .off
+            UserDefaults.standard.set(false, forKey: "automaticRateMatchingEnabled")
+            rateMatchStatusText = "Auto OFF"
+            updateRateMatchPreview()
+            processor?.setAutomaticRateMatchingEnabled(false)
+        }
         updateFormatHeaderMode()
         layoutApplication()
     }
