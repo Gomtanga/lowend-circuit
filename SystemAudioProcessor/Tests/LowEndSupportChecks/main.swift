@@ -499,20 +499,35 @@ guard let ring = lc_ring_buffer_create(4) else {
     exit(1)
 }
 defer { lc_ring_buffer_destroy(ring) }
+require(lc_ring_buffer_total_written_samples(ring) == 0, "ring write total must start at zero")
+require(lc_ring_buffer_total_read_samples(ring) == 0, "ring read total must start at zero")
 var underflowDestination = Array(repeating: Float(1), count: 4)
 underflowDestination.withUnsafeMutableBufferPointer {
     _ = lc_ring_buffer_pop(ring, $0.baseAddress, UInt32($0.count))
 }
 require(lc_ring_buffer_underrun_samples(ring) == 4, "ring buffer must count output underruns")
+require(lc_ring_buffer_total_read_samples(ring) == 0, "underruns must not advance ring read total")
 
 let overflowSource: [Float] = [1, 2, 3, 4, 5, 6]
 overflowSource.withUnsafeBufferPointer {
     _ = lc_ring_buffer_push(ring, $0.baseAddress, UInt32($0.count))
 }
 require(lc_ring_buffer_dropped_write_samples(ring) == 2, "ring buffer must count dropped writes")
+require(lc_ring_buffer_total_written_samples(ring) == 4, "ring write total must count accepted samples")
+var readableDestination = Array(repeating: Float(0), count: 4)
+readableDestination.withUnsafeMutableBufferPointer {
+    _ = lc_ring_buffer_pop(ring, $0.baseAddress, UInt32($0.count))
+}
+require(readableDestination == [1, 2, 3, 4], "ring buffer must preserve accepted samples")
+require(lc_ring_buffer_total_read_samples(ring) == 4, "ring read total must count consumed samples")
 lc_ring_buffer_reset_diagnostics(ring)
 require(lc_ring_buffer_underrun_samples(ring) == 0, "underrun diagnostics must reset")
 require(lc_ring_buffer_dropped_write_samples(ring) == 0, "drop diagnostics must reset")
+require(lc_ring_buffer_total_written_samples(ring) == 4, "diagnostic reset must preserve ring write total")
+require(lc_ring_buffer_total_read_samples(ring) == 4, "diagnostic reset must preserve ring read total")
+lc_ring_buffer_clear(ring)
+require(lc_ring_buffer_total_written_samples(ring) == 4, "ring clear must preserve write progress")
+require(lc_ring_buffer_total_read_samples(ring) == 4, "ring clear must preserve read progress")
 
 guard let gainRamp = lc_output_gain_ramp_create(1) else {
     fputs("FAIL: output gain ramp allocation\n", stderr)

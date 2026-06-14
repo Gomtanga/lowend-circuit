@@ -2747,6 +2747,14 @@ private final class LockFreeFloatRingBuffer {
         lc_ring_buffer_underrun_samples(handle)
     }
 
+    func totalWrittenSamples() -> UInt64 {
+        lc_ring_buffer_total_written_samples(handle)
+    }
+
+    func totalReadSamples() -> UInt64 {
+        lc_ring_buffer_total_read_samples(handle)
+    }
+
     func resetDiagnostics() {
         lc_ring_buffer_reset_diagnostics(handle)
     }
@@ -3814,7 +3822,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private let scratchFrameCapacity = 8192
     private let inputScratch: UnsafeMutablePointer<Float>
     private let managerQueue = DispatchQueue(label: "com.codexaudiolab.lowendcircuit.audio-manager")
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
     private var hardwareTracker: HardwareSampleRateTracker?
     private var tapFormatListener: AudioObjectPropertyListenerBlock?
@@ -3849,8 +3857,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private var rateMatchLastTargetRate: Double?
     private var rateMatchCooldownUntil: Date = .distantPast
     private let rateMatchCooldownInterval: TimeInterval = 2.0
-    private var captureFrameCounter: UInt64 = 0
-    private var captureFrameCounterAtTransitionStart: UInt64 = 0
+    private var ringWrittenAtTransitionStart: UInt64 = 0
+    private var ringReadAtTransitionStart: UInt64 = 0
     private var currentSpatialSettings: SpatialSettings
     private var currentCaptureTargetSummary = "전체 시스템"
     private var engineRestartCount: UInt64 = 0
@@ -4262,7 +4270,6 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         waitForOutputGain(atMost: 0.001, timeout: 0.25)
         let gainAfterFadeOut = lc_output_gain_ramp_current(outputGainRamp)
 
-        captureFrameCounterAtTransitionStart = captureFrameCounter
         suspendForHardwareReconfigure()
 
         let priorDeviceID = currentOutputDeviceID
@@ -4284,25 +4291,33 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 deviceID: currentOutputDeviceID,
                 hardwareSampleRate: confirmedRate
             )
+            ringWrittenAtTransitionStart = ringBuffer.totalWrittenSamples()
+            ringReadAtTransitionStart = ringBuffer.totalReadSamples()
             finishPhase(.waitingForCapture)
-            let captureRecovered = waitForCaptureRecovery(timeout: 1.0)
-            if !captureRecovered {
+            let audioFlowRecovered = waitForAudioFlowRecovery(timeout: 1.5)
+            if !audioFlowRecovered {
                 throw AppError.message(
-                    "capture did not recover after \(Self.rateText(confirmedRate)) reconfigure"
+                    "capture/output flow did not recover after \(Self.rateText(confirmedRate)) reconfigure"
                 )
             }
             let ringFill = ringBuffer.availableSamples()
             rateMatchStatus = successStatus
             finishPhase(.fadingIn)
             requestOutputGain(1, duration: 0.08)
+            guard waitForOutputGain(atLeast: 0.99, timeout: 0.5) else {
+                throw AppError.message(
+                    "output gain did not recover after \(Self.rateText(confirmedRate)) reconfigure"
+                )
+            }
             publishFormatStatus()
             let engineRunning = engine.isRunning
             let gainAfterFadeIn = lc_output_gain_ramp_current(outputGainRamp)
             rateMatchPhase = .running
-            print("[RateMatch] tid=\(transitionID) OK src=\(Self.rateText(priorHardwareRate))→\(Self.rateText(targetRate)) device=\(priorDeviceID)→\(currentOutputDeviceID) restarts=\(engineRestartCount - priorEngineRestartCount) gainOut=\(gainAfterFadeOut) gainIn=\(gainAfterFadeIn) ringFill=\(ringFill) engineRunning=\(engineRunning) elapsed=\(String(format: "%.0fms", Date().timeIntervalSince(phaseStarted) * 1000))")
+            rateMatchLog("tid=\(transitionID) OK src=\(Self.rateText(priorHardwareRate))→\(Self.rateText(targetRate)) device=\(priorDeviceID)→\(currentOutputDeviceID) restarts=\(engineRestartCount - priorEngineRestartCount) gainOut=\(gainAfterFadeOut) gainIn=\(gainAfterFadeIn) ringFill=\(ringFill) engineRunning=\(engineRunning) elapsed=\(String(format: "%.0fms", Date().timeIntervalSince(phaseStarted) * 1000))")
         } catch {
             let engineRunningBeforeRecovery = engine.isRunning
-            let captureBeforeRecovery = captureFrameCounter
+            let writtenBeforeRecovery = ringBuffer.totalWrittenSamples()
+            let readBeforeRecovery = ringBuffer.totalReadSamples()
             if !engineRunningBeforeRecovery {
                 let recoveryRate =
                     (try? HardwareSampleRateTracker.nominalSampleRate(for: currentOutputDeviceID))
@@ -4312,10 +4327,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                     hardwareSampleRate: Self.validSampleRate(recoveryRate)
                 )
             }
-            _ = waitForCaptureRecovery(timeout: 0.5)
+            _ = waitForAudioFlowRecovery(timeout: 0.75)
             requestOutputGain(1, duration: 0.08)
             rateMatchPhase = .aborted
-            print("[RateMatch] tid=\(transitionID) FAIL src=\(Self.rateText(priorHardwareRate))→\(Self.rateText(targetRate)) engine=\(engineRunningBeforeRecovery) captureBefore=\(captureBeforeRecovery) captureAfter=\(captureFrameCounter) err=\(error)")
+            rateMatchLog("tid=\(transitionID) FAIL src=\(Self.rateText(priorHardwareRate))→\(Self.rateText(targetRate)) engine=\(engineRunningBeforeRecovery) written=\(writtenBeforeRecovery)→\(ringBuffer.totalWrittenSamples()) read=\(readBeforeRecovery)→\(ringBuffer.totalReadSamples()) err=\(error)")
             throw error
         }
     }
@@ -4336,6 +4351,18 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
     }
 
+    private func waitForOutputGain(atLeast minimumGain: Float,
+                                   timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if lc_output_gain_ramp_current(outputGainRamp) >= minimumGain {
+                return true
+            }
+            usleep(5_000)
+        }
+        return lc_output_gain_ramp_current(outputGainRamp) >= minimumGain
+    }
+
     private func waitForNominalSampleRate(_ targetRate: Double,
                                           deviceID: AudioObjectID) throws -> Double {
         var lastRate = try HardwareSampleRateTracker.nominalSampleRate(for: deviceID)
@@ -4351,16 +4378,21 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         )
     }
 
-    private func waitForCaptureRecovery(timeout: TimeInterval) -> Bool {
-        let baseline = captureFrameCounterAtTransitionStart
+    private func waitForAudioFlowRecovery(timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if captureFrameCounter > baseline {
+            let captureAdvanced =
+                ringBuffer.totalWrittenSamples() > ringWrittenAtTransitionStart
+            let outputAdvanced =
+                ringBuffer.totalReadSamples() > ringReadAtTransitionStart
+            if captureAdvanced && outputAdvanced && engine.isRunning {
                 return true
             }
             usleep(5_000)
         }
-        return captureFrameCounter > baseline
+        return ringBuffer.totalWrittenSamples() > ringWrittenAtTransitionStart
+            && ringBuffer.totalReadSamples() > ringReadAtTransitionStart
+            && engine.isRunning
     }
 
     private func disableAutomaticRateMatchingForSession(_ error: Error) {
@@ -4377,7 +4409,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 deviceID: currentOutputDeviceID,
                 hardwareSampleRate: Self.validSampleRate(recoveryRate)
             )
-            _ = waitForCaptureRecovery(timeout: 0.5)
+            _ = waitForAudioFlowRecovery(timeout: 0.75)
         }
         publishFormatStatus()
     }
@@ -4396,7 +4428,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 : "Auto OFF"
         }
 
-        print("[RateMatch] hardware-change device=\(deviceID) rate=\(Self.rateText(newHardwareSampleRate)) deviceChanged=\(deviceChanged) rateChanged=\(rateChanged) duringAuto=\(isAutomaticRateTransition) phase=\(rateMatchPhase.rawValue)")
+        rateMatchLog("hardware-change device=\(deviceID) rate=\(Self.rateText(newHardwareSampleRate)) deviceChanged=\(deviceChanged) rateChanged=\(rateChanged) duringAuto=\(isAutomaticRateTransition) phase=\(rateMatchPhase.rawValue)")
 
         guard isStarted else {
             currentOutputDeviceID = deviceID
@@ -4406,7 +4438,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
 
         if isAutomaticRateTransition {
-            print("[RateMatch] listener ignored during automatic transition (tid=\(rateMatchActiveTransitionID))")
+            rateMatchLog("listener ignored during automatic transition (tid=\(rateMatchActiveTransitionID))")
             publishFormatStatus()
             return
         }
@@ -4433,7 +4465,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
 
     private func suspendForHardwareReconfigure() {
         engine.stop()
-        stopCaptureForReconfigure()
+        stopCaptureAndDestroyAggregateDevice()
+        destroyProcessTap()
         ringBuffer.clear()
         visualizerRingBuffer.clear()
         controlQueue.drain()
@@ -4445,38 +4478,35 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                                           hardwareSampleRate: Double) throws {
         currentOutputDeviceID = deviceID
         currentHardwareSampleRate = hardwareSampleRate
+        try createProcessTapAndAggregateDevice()
         currentSampleRate = syncAggregateSampleRate(preferredSampleRate: hardwareSampleRate)
         refreshTapSampleRate()
         controlQueue.updateSampleRate(Float(currentSampleRate))
         applyCurrentSettingsDirectly()
 
-        try configureOutputGraph(sampleRate: currentSampleRate)
-        try engine.start()
-        try resumeCaptureAfterReconfigure()
+        do {
+            replaceOutputEngine()
+            try configureOutputGraph(sampleRate: currentSampleRate)
+            try engine.start()
+            try startCapture()
+        } catch {
+            engine.stop()
+            stopCaptureAndDestroyAggregateDevice()
+            destroyProcessTap()
+            throw error
+        }
         publishFormatStatus()
         print("Output format re-synced: \(makeFormatStatus().indicatorText)")
     }
 
-    private func stopCaptureForReconfigure() {
-        if aggregateDeviceID != kAudioObjectUnknown {
-            if let ioProcID {
-                let status = AudioDeviceStop(aggregateDeviceID, ioProcID)
-                if status != noErr {
-                    print("[RateMatch] AudioDeviceStop status=\(status) (aggregating=\(aggregateDeviceID))")
-                }
-            }
+    private func replaceOutputEngine() {
+        engine.stop()
+        if let sourceNode {
+            engine.disconnectNodeOutput(sourceNode)
+            engine.detach(sourceNode)
+            self.sourceNode = nil
         }
-    }
-
-    private func resumeCaptureAfterReconfigure() throws {
-        if aggregateDeviceID != kAudioObjectUnknown, let ioProcID {
-            do {
-                try check(AudioDeviceStart(aggregateDeviceID, ioProcID), "AudioDeviceStart")
-            } catch {
-                print("[RateMatch] AudioDeviceStart failed: \(error)")
-                throw error
-            }
-        }
+        engine = AVAudioEngine()
     }
 
     private func syncAggregateSampleRate(preferredSampleRate: Double) -> Double {
@@ -4586,6 +4616,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
 
     private static func rateText(_ sampleRate: Double) -> String {
         String(format: "%.1f kHz", sampleRate / 1_000)
+    }
+
+    private func rateMatchLog(_ message: String) {
+        NSLog("[RateMatch] %@", message)
     }
 
     private func refreshTapSampleRate() {
@@ -4841,34 +4875,52 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     }
 
     private func createProcessTapAndAggregateDevice() throws {
-        let tapDescription = try makeTapDescription()
-        try check(AudioHardwareCreateProcessTap(tapDescription, &tapID), "AudioHardwareCreateProcessTap")
-        refreshTapSampleRate()
-        do {
-            try installTapFormatListener()
-        } catch {
-            fputs("Tap format listener unavailable: \(error)\n", stderr)
+        guard tapID == kAudioObjectUnknown,
+              aggregateDeviceID == kAudioObjectUnknown,
+              ioProcID == nil else {
+            throw AppError.message("Capture graph must be fully destroyed before recreation.")
         }
 
-        let tapUID = tapDescription.uuid.uuidString
-        let aggregateUID = "com.codexaudiolab.lowendcircuit.aggregate.\(UUID().uuidString)"
-        let tapEntry: [String: Any] = [
-            kAudioSubTapUIDKey: tapUID,
-            kAudioSubTapDriftCompensationKey: true
-        ]
+        let tapDescription = try makeTapDescription()
+        do {
+            try check(
+                AudioHardwareCreateProcessTap(tapDescription, &tapID),
+                "AudioHardwareCreateProcessTap"
+            )
+            refreshTapSampleRate()
+            do {
+                try installTapFormatListener()
+            } catch {
+                fputs("Tap format listener unavailable: \(error)\n", stderr)
+            }
 
-        let aggregateDescription: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "LowEnd Native Audio",
-            kAudioAggregateDeviceUIDKey: aggregateUID,
-            kAudioAggregateDeviceIsPrivateKey: true,
-            kAudioAggregateDeviceTapListKey: [tapEntry],
-            kAudioAggregateDeviceTapAutoStartKey: true
-        ]
+            let tapUID = tapDescription.uuid.uuidString
+            let aggregateUID = "com.codexaudiolab.lowendcircuit.aggregate.\(UUID().uuidString)"
+            let tapEntry: [String: Any] = [
+                kAudioSubTapUIDKey: tapUID,
+                kAudioSubTapDriftCompensationKey: true
+            ]
 
-        try check(
-            AudioHardwareCreateAggregateDevice(aggregateDescription as CFDictionary, &aggregateDeviceID),
-            "AudioHardwareCreateAggregateDevice"
-        )
+            let aggregateDescription: [String: Any] = [
+                kAudioAggregateDeviceNameKey: "LowEnd Native Audio",
+                kAudioAggregateDeviceUIDKey: aggregateUID,
+                kAudioAggregateDeviceIsPrivateKey: true,
+                kAudioAggregateDeviceTapListKey: [tapEntry],
+                kAudioAggregateDeviceTapAutoStartKey: true
+            ]
+
+            try check(
+                AudioHardwareCreateAggregateDevice(
+                    aggregateDescription as CFDictionary,
+                    &aggregateDeviceID
+                ),
+                "AudioHardwareCreateAggregateDevice"
+            )
+        } catch {
+            stopCaptureAndDestroyAggregateDevice()
+            destroyProcessTap()
+            throw error
+        }
     }
 
     private func startCapture() throws {
@@ -4892,7 +4944,6 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         guard let first = buffers.first, first.mDataByteSize > 0 else { return }
 
         let frameCount = Int(first.mDataByteSize) / MemoryLayout<Float>.size
-        captureFrameCounter &+= UInt64(frameCount)
         applyPendingControlEvents()
 
         if buffers.count >= 2,

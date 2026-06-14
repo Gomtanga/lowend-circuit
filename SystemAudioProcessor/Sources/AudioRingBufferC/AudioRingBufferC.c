@@ -13,6 +13,8 @@ struct LCLockFreeRingBuffer {
     atomic_uint_fast64_t writeIndex;
     atomic_uint_fast64_t droppedWriteSamples;
     atomic_uint_fast64_t underrunSamples;
+    atomic_uint_fast64_t totalWrittenSamples;
+    atomic_uint_fast64_t totalReadSamples;
 };
 
 struct LCControlEventQueue {
@@ -97,6 +99,8 @@ LCLockFreeRingBuffer *lc_ring_buffer_create(uint32_t requestedCapacitySamples) {
     atomic_init(&ringBuffer->writeIndex, 0);
     atomic_init(&ringBuffer->droppedWriteSamples, 0);
     atomic_init(&ringBuffer->underrunSamples, 0);
+    atomic_init(&ringBuffer->totalWrittenSamples, 0);
+    atomic_init(&ringBuffer->totalReadSamples, 0);
     return ringBuffer;
 }
 
@@ -157,6 +161,11 @@ uint32_t lc_ring_buffer_push(LCLockFreeRingBuffer *ringBuffer, const float *samp
     }
 
     atomic_store_explicit(&ringBuffer->writeIndex, writeIndex + samplesToWrite, memory_order_release);
+    atomic_fetch_add_explicit(
+        &ringBuffer->totalWrittenSamples,
+        samplesToWrite,
+        memory_order_relaxed
+    );
     return samplesToWrite;
 }
 
@@ -177,6 +186,7 @@ uint32_t lc_ring_buffer_push_stereo_frame(LCLockFreeRingBuffer *ringBuffer, floa
     ringBuffer->storage[writeIndex & ringBuffer->mask] = left;
     ringBuffer->storage[(writeIndex + 1) & ringBuffer->mask] = right;
     atomic_store_explicit(&ringBuffer->writeIndex, writeIndex + 2, memory_order_release);
+    atomic_fetch_add_explicit(&ringBuffer->totalWrittenSamples, 2, memory_order_relaxed);
     return 2;
 }
 
@@ -202,6 +212,11 @@ uint32_t lc_ring_buffer_pop(LCLockFreeRingBuffer *ringBuffer, float *destination
     }
 
     atomic_store_explicit(&ringBuffer->readIndex, readIndex + readable, memory_order_release);
+    atomic_fetch_add_explicit(
+        &ringBuffer->totalReadSamples,
+        readable,
+        memory_order_relaxed
+    );
     return readable;
 }
 
@@ -233,6 +248,11 @@ uint32_t lc_ring_buffer_pop_deinterleaved_stereo(LCLockFreeRingBuffer *ringBuffe
     }
 
     atomic_store_explicit(&ringBuffer->readIndex, readIndex + readableFrames * 2, memory_order_release);
+    atomic_fetch_add_explicit(
+        &ringBuffer->totalReadSamples,
+        readableFrames * 2,
+        memory_order_relaxed
+    );
     return readableFrames;
 }
 
@@ -248,6 +268,20 @@ uint64_t lc_ring_buffer_underrun_samples(const LCLockFreeRingBuffer *ringBuffer)
         return 0;
     }
     return atomic_load_explicit(&ringBuffer->underrunSamples, memory_order_relaxed);
+}
+
+uint64_t lc_ring_buffer_total_written_samples(const LCLockFreeRingBuffer *ringBuffer) {
+    if (ringBuffer == NULL) {
+        return 0;
+    }
+    return atomic_load_explicit(&ringBuffer->totalWrittenSamples, memory_order_relaxed);
+}
+
+uint64_t lc_ring_buffer_total_read_samples(const LCLockFreeRingBuffer *ringBuffer) {
+    if (ringBuffer == NULL) {
+        return 0;
+    }
+    return atomic_load_explicit(&ringBuffer->totalReadSamples, memory_order_relaxed);
 }
 
 void lc_ring_buffer_reset_diagnostics(LCLockFreeRingBuffer *ringBuffer) {
