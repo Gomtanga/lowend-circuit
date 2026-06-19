@@ -13,6 +13,13 @@ import MetalKit
 import SceneKit
 import SwiftUI
 
+fileprivate extension Array {
+    /// Bounds-checked subscript used by the output-conditioning pickers.
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
 enum AppError: Error, CustomStringConvertible {
     case message(String)
     case osStatus(String, OSStatus)
@@ -158,10 +165,10 @@ private struct DynamicsMeterView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 14) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Dynamics")
+                    Text("다이내믹스")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
-                    Text("Crest Factor")
+                    Text("크레스트 팩터")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(Color(red: 0.58, green: 0.62, blue: 0.68))
                 }
@@ -444,7 +451,7 @@ private struct RightPanelContainerView: View {
     private var spatialTab: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                Text("Spatial Stage")
+                Text("공간 무대")
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(Color(red: 0.96, green: 0.75, blue: 0.31))
                 Spacer()
@@ -486,7 +493,7 @@ private struct RightPanelContainerView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .frame(minHeight: 330)
                 .overlay(alignment: .topLeading) {
-                    Text("Spectrum")
+                    Text("스펙트럼")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
                         .padding(.horizontal, 12)
@@ -571,7 +578,7 @@ private struct PersistentAnalysisView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("LIVE ANALYSIS")
+            Text("실시간 분석")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(Color(red: 0.55, green: 0.60, blue: 0.68))
 
@@ -579,7 +586,7 @@ private struct PersistentAnalysisView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .frame(minHeight: 250)
                 .overlay(alignment: .topLeading) {
-                    Text("Spectrum")
+                    Text("스펙트럼")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
                         .padding(10)
@@ -1279,6 +1286,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         case model
         case spatial
         case routing
+        case output
         case settings
 
         var title: String {
@@ -1286,6 +1294,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             case .model: return "모델"
             case .spatial: return "공간 음향"
             case .routing: return "오디오 적용"
+            case .output: return "출력 컨디셔닝"
             case .settings: return "설정"
             }
         }
@@ -1295,6 +1304,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             case .model: return "slider.horizontal.3"
             case .spatial: return "move.3d"
             case .routing: return "app.connected.to.app.below.fill"
+            case .output: return "waveform"
             case .settings: return "gearshape.fill"
             }
         }
@@ -1371,16 +1381,60 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     private var expertModeEnabled = UserDefaults.standard.bool(
         forKey: "expertModeEnabled"
     )
-    private var rateMatchStatusText = "Auto OFF"
+    private var rateMatchStatusText = "자동 꺼짐"
     private var exciterOversamplingMode: ExciterOversamplingMode = {
         let rawValue = UInt32(UserDefaults.standard.integer(forKey: "exciterOversamplingMode"))
         return ExciterOversamplingMode(rawValue: rawValue) ?? .auto
     }()
 
+    // Output Conditioning (experimental) UI state, persisted via UserDefaults.
+    private var outputConditioningEnabled = UserDefaults.standard.bool(
+        forKey: "outputConditioningEnabled"
+    )
+    private var outputConditioningModeRaw: UInt32 = {
+        let stored = UInt32(UserDefaults.standard.integer(forKey: "outputConditioningMode"))
+        return OutputConditioningMode(rawValue: stored)?.rawValue ?? OutputConditioningMode.bypass.rawValue
+    }()
+    private var outputConditioningFactor: Int = {
+        let stored = UserDefaults.standard.integer(forKey: "outputConditioningFactor")
+        return OutputConditioningParameters.allowedOversamplingFactors.contains(stored) ? stored : 2
+    }()
+    private var outputConditioningFilterRaw: UInt32 = {
+        let stored = UInt32(UserDefaults.standard.integer(forKey: "outputConditioningFilter"))
+        return ResamplingFilterMode(rawValue: stored)?.rawValue ?? ResamplingFilterMode.linearPhaseShort.rawValue
+    }()
+    private var outputConditioningHeadroomDB: Double = {
+        if let value = UserDefaults.standard.object(forKey: "outputConditioningHeadroomDB") as? Double {
+            return value
+        }
+        return -3.0
+    }()
+    private var outputConditioningDither = UserDefaults.standard.bool(
+        forKey: "outputConditioningDither"
+    )
+    private var outputConditioningNoiseShape = UserDefaults.standard.bool(
+        forKey: "outputConditioningNoiseShape"
+    )
+    private var outputConditioningDSDRaw: UInt32 = {
+        let stored = UInt32(UserDefaults.standard.integer(forKey: "outputConditioningDSD"))
+        return DSDMode(rawValue: stored)?.rawValue ?? DSDMode.off.rawValue
+    }()
+    private var outputConditioningCapability: OutputConditioningCapability?
+    private var outputConditioningEnableButton: NSButton!
+    private var outputConditioningModePopup: NSPopUpButton!
+    private var outputConditioningFactorPopup: NSPopUpButton!
+    private var outputConditioningFilterPopup: NSPopUpButton!
+    private var outputConditioningHeadroomSlider: NSSlider!
+    private var outputConditioningHeadroomValueLabel: NSTextField!
+    private var outputConditioningDitherButton: NSButton!
+    private var outputConditioningNoiseShapeButton: NSButton!
+    private var outputConditioningDSDPopup: NSPopUpButton!
+    private var outputConditioningStatusLabel: NSTextField!
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         rateMatchStatusText = automaticRateMatchingEnabled
-            ? "Auto ON: source 안정화 대기"
-            : "Auto OFF"
+            ? "자동 켜짐: 소스 안정화 대기"
+            : "자동 꺼짐"
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(audioFormatDidChange(_:)),
@@ -1389,6 +1443,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         )
         buildWindow()
         refreshRateMatchDeviceCapabilities()
+        refreshOutputConditioningCapability()
         startSourceFormatTracking()
     }
 
@@ -1553,6 +1608,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         pageViews[.spatial] = makeSpatialPage()
         pageViews[.routing] = makeRoutingPage()
         pageViews[.settings] = makeSettingsPage()
+        pageViews[.output] = makeOutputConditioningPage()
         for page in AppPage.allCases {
             guard let pageView = pageViews[page] else { continue }
             pageView.frame = pageContainerView.bounds
@@ -1689,7 +1745,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         diagnosticsLabel.autoresizingMask = [.minYMargin, .width]
         page.addSubview(diagnosticsLabel)
 
-        let modelLabel = makeLabel("Model", size: 12, weight: .semibold)
+        let modelLabel = makeLabel("모델", size: 12, weight: .semibold)
         modelLabel.frame = NSRect(x: 24, y: 548, width: 55, height: 26)
         modelLabel.autoresizingMask = [.minYMargin]
         page.addSubview(modelLabel)
@@ -1817,14 +1873,14 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         page.addSubview(displayTitle)
 
         expertModeButton = NSButton(
-            checkboxWithTitle: "전문가 모드",
+            checkboxWithTitle: "자세히 보기",
             target: self,
             action: #selector(expertModeChanged)
         )
         expertModeButton.frame = NSRect(x: 24, y: 454, width: 180, height: 24)
         expertModeButton.autoresizingMask = [.minYMargin]
         expertModeButton.state = expertModeEnabled ? .on : .off
-        expertModeButton.toolTip = "오른쪽 상단에 Source, Tap, Engine, DAC, 오버샘플링과 Rate Match 경로를 자세히 표시합니다."
+        expertModeButton.toolTip = "오른쪽 위 포맷 표시에 Source, Tap, Engine, DAC 샘플레이트와 오버샘플링 정보를 자세히 보여줍니다."
         page.addSubview(expertModeButton)
 
         let note = makeLabel(
@@ -1837,7 +1893,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         page.addSubview(note)
 
         automaticRateMatchButton = NSButton(
-            checkboxWithTitle: "자동 Rate Match (실험적)",
+            checkboxWithTitle: "자동 Rate Match",
             target: self,
             action: #selector(automaticRateMatchChanged)
         )
@@ -1845,11 +1901,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         automaticRateMatchButton.autoresizingMask = [.minYMargin]
         automaticRateMatchButton.state = automaticRateMatchingEnabled ? .on : .off
         automaticRateMatchButton.toolTip = "감지된 Apple Music/TIDAL Source rate에 맞춰 기본 출력 DAC의 Nominal Sample Rate를 변경합니다. 전환 시 하드웨어 relock으로 약 1~2초 무음이 발생합니다. 일반적으로는 DAC rate 고정 + macOS 시스템 SRC가 무음 없이 더 부드럽게 동작합니다."
-        automaticRateMatchButton.isEnabled = expertModeEnabled
         page.addSubview(automaticRateMatchButton)
 
         let rateMatchNote = makeLabel(
-            "트랙 전환 시 약 1~2초 무음 발생. 전문가 모드에서만 설정 가능.",
+            "트랙 전환 시 하드웨어 relock으로 약 1~2초 무음이 발생합니다.",
             size: 11,
             weight: .regular
         )
@@ -1857,6 +1912,308 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         rateMatchNote.autoresizingMask = [.minYMargin, .width]
         page.addSubview(rateMatchNote)
         return page
+    }
+
+    // MARK: - Output Conditioning page
+
+    private func makeOutputConditioningPage() -> NSView {
+        let page = NSView(frame: pageContainerView?.bounds ?? NSRect(x: 0, y: 0, width: 620, height: 700))
+        page.wantsLayer = true
+        page.layer?.backgroundColor = NSColor(calibratedRed: 0.08, green: 0.09, blue: 0.11, alpha: 1).cgColor
+
+        let title = makeLabel("출력 컨디셔닝", size: 24, weight: .bold)
+        title.textColor = .white
+        title.frame = NSRect(x: 24, y: 636, width: 320, height: 32)
+        title.autoresizingMask = [.minYMargin]
+        page.addSubview(title)
+
+        let enableTitle = makeLabel("활성화", size: 12, weight: .semibold)
+        enableTitle.frame = NSRect(x: 24, y: 596, width: 120, height: 20)
+        enableTitle.autoresizingMask = [.minYMargin]
+        page.addSubview(enableTitle)
+
+        outputConditioningEnableButton = NSButton(
+            checkboxWithTitle: "출력 컨디셔닝 사용",
+            target: self,
+            action: #selector(outputConditioningEnableChanged)
+        )
+        outputConditioningEnableButton.frame = NSRect(x: 24, y: 566, width: 320, height: 24)
+        outputConditioningEnableButton.autoresizingMask = [.minYMargin]
+        outputConditioningEnableButton.state = outputConditioningEnabled ? .on : .off
+        outputConditioningEnableButton.toolTip = "출력 직전 신호를 처리합니다. 기본값은 꺼짐(Bypass)이며, 켜더라도 이번 버전에서는 실시간 출력은 Bypass로 안전하게 동작합니다."
+        page.addSubview(outputConditioningEnableButton)
+
+        outputConditioningModePopup = makeConditioningPopup(
+            titles: OutputConditioningMode.allCases.map { $0.displayName },
+            action: #selector(outputConditioningModeChanged),
+            y: 512
+        )
+        page.addSubview(makeConditioningCaption("출력 모드", y: 536))
+        page.addSubview(outputConditioningModePopup)
+        selectConditioningPopup(outputConditioningModePopup, forRaw: outputConditioningModeRaw,
+                                in: OutputConditioningMode.allCases.map { $0.rawValue })
+
+        outputConditioningFactorPopup = makeConditioningPopup(
+            titles: OutputConditioningParameters.allowedOversamplingFactors.map { "\($0)x" },
+            action: #selector(outputConditioningFactorChanged),
+            y: 458
+        )
+        page.addSubview(makeConditioningCaption("오버샘플링 배수", y: 482))
+        page.addSubview(outputConditioningFactorPopup)
+        if let index = OutputConditioningParameters.allowedOversamplingFactors.firstIndex(of: outputConditioningFactor) {
+            outputConditioningFactorPopup.selectItem(at: index)
+        }
+
+        outputConditioningFilterPopup = makeConditioningPopup(
+            titles: ResamplingFilterMode.allCases.map { $0.displayName },
+            action: #selector(outputConditioningFilterChanged),
+            y: 404
+        )
+        page.addSubview(makeConditioningCaption("필터 모드", y: 428))
+        page.addSubview(outputConditioningFilterPopup)
+        selectConditioningPopup(outputConditioningFilterPopup, forRaw: outputConditioningFilterRaw,
+                                in: ResamplingFilterMode.allCases.map { $0.rawValue })
+
+        let headroomCaption = makeConditioningCaption("헤드룸", y: 374)
+        page.addSubview(headroomCaption)
+        outputConditioningHeadroomSlider = NSSlider(
+            value: outputConditioningHeadroomDB,
+            minValue: -12,
+            maxValue: 0,
+            target: self,
+            action: #selector(outputConditioningHeadroomChanged)
+        )
+        outputConditioningHeadroomSlider.frame = NSRect(x: 24, y: 348, width: 300, height: 24)
+        outputConditioningHeadroomSlider.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(outputConditioningHeadroomSlider)
+        outputConditioningHeadroomValueLabel = makeLabel(
+            String(format: "%.1f dB", outputConditioningHeadroomDB),
+            size: 12, weight: .regular
+        )
+        outputConditioningHeadroomValueLabel.alignment = .right
+        outputConditioningHeadroomValueLabel.frame = NSRect(x: 330, y: 348, width: 80, height: 20)
+        outputConditioningHeadroomValueLabel.autoresizingMask = [.minYMargin]
+        page.addSubview(outputConditioningHeadroomValueLabel)
+
+        outputConditioningDitherButton = NSButton(
+            checkboxWithTitle: "디더",
+            target: self,
+            action: #selector(outputConditioningDitherChanged)
+        )
+        outputConditioningDitherButton.frame = NSRect(x: 24, y: 314, width: 160, height: 24)
+        outputConditioningDitherButton.autoresizingMask = [.minYMargin]
+        outputConditioningDitherButton.state = outputConditioningDither ? .on : .off
+        page.addSubview(outputConditioningDitherButton)
+
+        outputConditioningNoiseShapeButton = NSButton(
+            checkboxWithTitle: "노이즈 셰이핑",
+            target: self,
+            action: #selector(outputConditioningNoiseShapeChanged)
+        )
+        outputConditioningNoiseShapeButton.frame = NSRect(x: 190, y: 314, width: 200, height: 24)
+        outputConditioningNoiseShapeButton.autoresizingMask = [.minYMargin]
+        outputConditioningNoiseShapeButton.state = outputConditioningNoiseShape ? .on : .off
+        page.addSubview(outputConditioningNoiseShapeButton)
+
+        page.addSubview(makeConditioningCaption("DSD 모드 (실험)", y: 282))
+        outputConditioningDSDPopup = makeConditioningPopup(
+            titles: DSDMode.allCases.map { $0.displayName },
+            action: #selector(outputConditioningDSDChanged),
+            y: 258
+        )
+        page.addSubview(outputConditioningDSDPopup)
+        selectConditioningPopup(outputConditioningDSDPopup, forRaw: outputConditioningDSDRaw,
+                                in: DSDMode.allCases.map { $0.rawValue })
+
+        let warning = makeLabel(
+            "DSD/DoP 출력은 DAC가 해당 carrier rate(176.4 / 352.8 / 705.6 kHz)를 지원해야 하며 CPU 부하가 큽니다. 장치가 필요한 carrier rate를 지원하지 않으면 자동으로 PCM으로 출력됩니다.",
+            size: 11, weight: .regular
+        )
+        warning.lineBreakMode = .byWordWrapping
+        warning.maximumNumberOfLines = 0
+        warning.frame = NSRect(x: 24, y: 206, width: 540, height: 44)
+        warning.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(warning)
+
+        outputConditioningStatusLabel = makeLabel("", size: 12, weight: .regular)
+        outputConditioningStatusLabel.textColor = NSColor(calibratedRed: 0.62, green: 0.68, blue: 0.75, alpha: 1)
+        outputConditioningStatusLabel.lineBreakMode = .byWordWrapping
+        outputConditioningStatusLabel.maximumNumberOfLines = 0
+        outputConditioningStatusLabel.frame = NSRect(x: 24, y: 150, width: 540, height: 44)
+        outputConditioningStatusLabel.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(outputConditioningStatusLabel)
+
+        applyOutputConditioningControlEnabledState()
+        updateOutputConditioningStatus()
+        return page
+    }
+
+    private func makeConditioningCaption(_ text: String, y: CGFloat) -> NSTextField {
+        let label = makeLabel(text, size: 12, weight: .semibold)
+        label.frame = NSRect(x: 24, y: y, width: 260, height: 20)
+        label.autoresizingMask = [.minYMargin]
+        return label
+    }
+
+    private func makeConditioningPopup(titles: [String], action: Selector, y: CGFloat) -> NSPopUpButton {
+        let popup = NSPopUpButton(frame: NSRect(x: 24, y: y, width: 300, height: 26), pullsDown: false)
+        popup.autoresizingMask = [.minYMargin, .width]
+        popup.addItems(withTitles: titles)
+        popup.target = self
+        popup.action = action
+        return popup
+    }
+
+    private func selectConditioningPopup(_ popup: NSPopUpButton, forRaw raw: UInt32, in rawValues: [UInt32]) {
+        if let index = rawValues.firstIndex(of: raw) {
+            popup.selectItem(at: index)
+        }
+    }
+
+    private func applyOutputConditioningControlEnabledState() {
+        let on = outputConditioningEnabled
+        outputConditioningModePopup?.isEnabled = on
+        outputConditioningFactorPopup?.isEnabled = on
+        outputConditioningFilterPopup?.isEnabled = on
+        outputConditioningHeadroomSlider?.isEnabled = on
+        outputConditioningDitherButton?.isEnabled = on
+        outputConditioningNoiseShapeButton?.isEnabled = on
+        // DSD gating depends on device capability (set in updateOutputConditioningStatus).
+    }
+
+    @objc private func outputConditioningEnableChanged() {
+        outputConditioningEnabled = outputConditioningEnableButton.state == .on
+        UserDefaults.standard.set(outputConditioningEnabled, forKey: "outputConditioningEnabled")
+        applyOutputConditioningControlEnabledState()
+        updateOutputConditioningStatus()
+        pushOutputConditioningSettings()
+    }
+
+    @objc private func outputConditioningModeChanged() {
+        let index = outputConditioningModePopup.indexOfSelectedItem
+        let mode = OutputConditioningMode.allCases[safe: index] ?? .bypass
+        outputConditioningModeRaw = mode.rawValue
+        UserDefaults.standard.set(Int(mode.rawValue), forKey: "outputConditioningMode")
+        updateOutputConditioningStatus()
+        pushOutputConditioningSettings()
+    }
+
+    @objc private func outputConditioningFactorChanged() {
+        let index = outputConditioningFactorPopup.indexOfSelectedItem
+        let factor = OutputConditioningParameters.allowedOversamplingFactors[safe: index] ?? 2
+        outputConditioningFactor = factor
+        UserDefaults.standard.set(factor, forKey: "outputConditioningFactor")
+        pushOutputConditioningSettings()
+    }
+
+    @objc private func outputConditioningFilterChanged() {
+        let index = outputConditioningFilterPopup.indexOfSelectedItem
+        let mode = ResamplingFilterMode.allCases[safe: index] ?? .linearPhaseShort
+        outputConditioningFilterRaw = mode.rawValue
+        UserDefaults.standard.set(Int(mode.rawValue), forKey: "outputConditioningFilter")
+        pushOutputConditioningSettings()
+    }
+
+    @objc private func outputConditioningHeadroomChanged() {
+        outputConditioningHeadroomDB = Double(outputConditioningHeadroomSlider.doubleValue)
+        UserDefaults.standard.set(outputConditioningHeadroomDB, forKey: "outputConditioningHeadroomDB")
+        outputConditioningHeadroomValueLabel.stringValue = String(format: "%.1f dB", outputConditioningHeadroomDB)
+        pushOutputConditioningSettings()
+    }
+
+    @objc private func outputConditioningDitherChanged() {
+        outputConditioningDither = outputConditioningDitherButton.state == .on
+        UserDefaults.standard.set(outputConditioningDither, forKey: "outputConditioningDither")
+        pushOutputConditioningSettings()
+    }
+
+    @objc private func outputConditioningNoiseShapeChanged() {
+        outputConditioningNoiseShape = outputConditioningNoiseShapeButton.state == .on
+        UserDefaults.standard.set(outputConditioningNoiseShape, forKey: "outputConditioningNoiseShape")
+        pushOutputConditioningSettings()
+    }
+
+    @objc private func outputConditioningDSDChanged() {
+        let index = outputConditioningDSDPopup.indexOfSelectedItem
+        let mode = DSDMode.allCases[safe: index] ?? .off
+        outputConditioningDSDRaw = mode.rawValue
+        UserDefaults.standard.set(Int(mode.rawValue), forKey: "outputConditioningDSD")
+        // The unsupported-mode warning depends on the selected mode, so refresh it.
+        updateOutputConditioningStatus()
+        pushOutputConditioningSettings()
+    }
+
+    private func currentOutputConditioningParameters() -> OutputConditioningParameters {
+        var params = OutputConditioningParameters()
+        params.isEnabled = outputConditioningEnabled
+        params.outputMode = OutputConditioningMode(rawValue: outputConditioningModeRaw) ?? .bypass
+        params.oversamplingFactor = outputConditioningFactor
+        params.filterMode = ResamplingFilterMode(rawValue: outputConditioningFilterRaw) ?? .linearPhaseShort
+        params.headroomDB = Float(outputConditioningHeadroomDB)
+        params.ditherEnabled = outputConditioningDither
+        params.noiseShapingEnabled = outputConditioningNoiseShape
+        params.dsdMode = DSDMode(rawValue: outputConditioningDSDRaw) ?? .off
+        return params
+    }
+
+    private func pushOutputConditioningSettings() {
+        processor?.updateOutputConditioning(currentOutputConditioningParameters())
+    }
+
+    private func refreshOutputConditioningCapability() {
+        outputConditioningCapability = OutputConditioningCapabilityQuery.queryDefaultOutput()
+        if isViewLoadedConditioningPage() {
+            updateOutputConditioningStatus()
+        }
+    }
+
+    private func isViewLoadedConditioningPage() -> Bool {
+        outputConditioningDSDPopup != nil
+    }
+
+    private func updateOutputConditioningStatus() {
+        guard let statusLabel = outputConditioningStatusLabel else { return }
+        let capability = outputConditioningCapability
+        var lines: [String] = []
+        if let capability {
+            let carrierText = [DSDMode.dsd64, .dsd128, .dsd256]
+                .map { "\($0.displayName) carrier \(Self.rateText(DoPCarrier.requiredCarrierRate(for: $0))): \(capability.canAttemptDoP($0) ? "지원" : "미지원")" }
+                .joined(separator: " / ")
+            lines.append(carrierText)
+        } else {
+            lines.append("DAC capability를 조회하지 못했습니다. DSD/DoP는 비활성화되며 PCM으로 출력됩니다.")
+        }
+        // Gate the DSD popup on capability + enable state. Enable it whenever the
+        // device supports ANY DSD family (not just the currently selected one), so
+        // a saved `.off` selection still lets the user pick a supported mode.
+        let anyDSDSupported = outputConditioningCapability.map { cap in
+            [DSDMode.dsd64, .dsd128, .dsd256].contains { cap.canAttemptDoP($0) }
+        } ?? false
+        let dsdEnabled = outputConditioningEnabled && anyDSDSupported
+        outputConditioningDSDPopup?.isEnabled = dsdEnabled
+
+        // Clear, specific warning when the CURRENTLY SELECTED DSD mode is not
+        // usable on this device — even if another mode is supported and the
+        // popup is enabled. This tells the user exactly why it will fall back.
+        let selectedMode = DSDMode(rawValue: outputConditioningDSDRaw) ?? .off
+        if selectedMode != .off {
+            let selectedAttemptable = outputConditioningCapability?.canAttemptDoP(selectedMode) ?? false
+            if !selectedAttemptable {
+                let reason = (capability?.supportsWideCarrierBitDepth ?? true)
+                    ? "이 장치가 \(selectedMode.displayName)의 carrier rate를 지원하지 않습니다."
+                    : "이 장치가 24/32-bit PCM carrier를 지원하지 않습니다."
+                lines.append("⚠ \(reason) \(selectedMode.displayName)는 PCM으로 폴백됩니다. 지원하는 모드를 선택하세요.")
+            }
+        } else if !anyDSDSupported, outputConditioningEnabled {
+            lines.append("⚠ 이 장치는 DSD/DoP carrier rate를 지원하지 않아 DSD 모드를 사용할 수 없습니다. PCM으로 출력됩니다.")
+        }
+        statusLabel.stringValue = lines.joined(separator: "\n")
+    }
+
+    private static func rateText(_ sampleRate: Double) -> String {
+        sampleRate >= 1000
+            ? String(format: "%.1f kHz", sampleRate / 1000)
+            : String(format: "%.0f Hz", sampleRate)
     }
 
     private func layoutModelPage() {
@@ -1969,7 +2326,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         bodyNameLabel = addSliderRow(to: view, y: 48, title: "Body", slider: bodySlider, valueLabel: bodyValueLabel)
         outputNameLabel = addSliderRow(to: view, y: 10, title: "Output", slider: outputSlider, valueLabel: outputValueLabel)
 
-        oversamplingModeLabel = makeLabel("Oversampling", size: 13, weight: .semibold)
+        oversamplingModeLabel = makeLabel("오버샘플링", size: 13, weight: .semibold)
         oversamplingModeLabel.frame = NSRect(x: 16, y: 10, width: 100, height: 24)
         oversamplingModeControl = NSSegmentedControl(
             labels: ExciterOversamplingMode.allCases.map(\.title),
@@ -2014,7 +2371,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         view.layer?.backgroundColor = NSColor(calibratedRed: 0.12, green: 0.14, blue: 0.17, alpha: 1).cgColor
         view.layer?.cornerRadius = 8
 
-        let title = makeLabel("Spatial Stage", size: 18, weight: .bold)
+        let title = makeLabel("공간 무대", size: 18, weight: .bold)
         title.textColor = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 1)
         title.frame = NSRect(x: 16, y: 594, width: 170, height: 26)
         view.addSubview(title)
@@ -2023,13 +2380,13 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         resetButton.bezelStyle = .rounded
         resetButton.font = .systemFont(ofSize: 12, weight: .semibold)
         resetButton.frame = NSRect(x: 220, y: 592, width: 78, height: 26)
-        resetButton.toolTip = "나 위치를 중앙 기준점으로 되돌립니다. Width와 Space 값은 유지됩니다."
+        resetButton.toolTip = "청취자 위치를 중앙 기준점으로 되돌립니다. 스피커 폭과 공간량 값은 유지됩니다."
         view.addSubview(resetButton)
 
         spatialEnabledButton = NSButton(checkboxWithTitle: "공간음향", target: self, action: #selector(spatialControlChanged))
         spatialEnabledButton.frame = NSRect(x: 310, y: 592, width: 96, height: 26)
         spatialEnabledButton.state = spatialControlModel.settings.enabled ? .on : .off
-        spatialEnabledButton.toolTip = "3D 위치 기반 거리, 지연, 크로스피드 처리를 켜거나 끕니다."
+        spatialEnabledButton.toolTip = "3D 위치 기반 거리, 지연, 크로스피드 처리를 켜거나 끕니다. 모델(Clean 포함)과 관계없이 독립적으로 적용됩니다."
         view.addSubview(spatialEnabledButton)
 
         let description = makeLabel("파란 점을 드래그하거나 아래 숫자를 입력하세요.", size: 12, weight: .regular)
@@ -2047,11 +2404,11 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         listenerXField = makeNumberField(value: 0.0)
         listenerZField = makeNumberField(value: 0.0)
         speakerWidthField = makeNumberField(value: 1.65)
-        addNumberRow(to: view, y: 180, title: "나 X", field: listenerXField, suffix: "m", tooltip: "좌우 위치입니다. 음수는 왼쪽, 양수는 오른쪽입니다.")
-        addNumberRow(to: view, y: 142, title: "나 Z", field: listenerZField, suffix: "m", tooltip: "앞뒤 위치입니다. 양수는 스피커 쪽, 음수는 뒤쪽입니다.")
-        addNumberRow(to: view, y: 104, title: "Width", field: speakerWidthField, suffix: "m", tooltip: "가상 좌우 스피커 사이의 거리입니다.")
+        addNumberRow(to: view, y: 180, title: "청취자 X", field: listenerXField, suffix: "m", tooltip: "좌우 위치입니다. 음수는 왼쪽, 양수는 오른쪽입니다.")
+        addNumberRow(to: view, y: 142, title: "청취자 Z", field: listenerZField, suffix: "m", tooltip: "앞뒤 위치입니다. 양수는 스피커 쪽, 음수는 뒤쪽입니다.")
+        addNumberRow(to: view, y: 104, title: "스피커 폭", field: speakerWidthField, suffix: "m", tooltip: "가상 좌우 스피커 사이의 거리입니다.")
 
-        let amountLabel = makeLabel("Space", size: 13, weight: .semibold)
+        let amountLabel = makeLabel("공간량", size: 13, weight: .semibold)
         amountLabel.frame = NSRect(x: 16, y: 66, width: 62, height: 24)
         view.addSubview(amountLabel)
 
@@ -2065,7 +2422,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         spatialAmountValueLabel.frame = NSRect(x: 342, y: 66, width: 56, height: 24)
         view.addSubview(spatialAmountValueLabel)
 
-        let spaceHelp = makeLabel("Space: 원본과 공간 처리 신호를 섞는 양입니다.", size: 11.5, weight: .regular)
+        let spaceHelp = makeLabel("공간량: 원본과 공간 처리 신호를 섞는 양입니다.", size: 11.5, weight: .regular)
         spaceHelp.frame = NSRect(x: 16, y: 32, width: 398, height: 18)
         view.addSubview(spaceHelp)
 
@@ -2164,7 +2521,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             automaticRateMatchingEnabled,
             forKey: "automaticRateMatchingEnabled"
         )
-        rateMatchStatusText = automaticRateMatchingEnabled ? "Auto ON: source 안정화 대기" : "Auto OFF"
+        rateMatchStatusText = automaticRateMatchingEnabled ? "자동 켜짐: 소스 안정화 대기" : "자동 꺼짐"
         updateRateMatchPreview()
         processor?.setAutomaticRateMatchingEnabled(automaticRateMatchingEnabled)
     }
@@ -2172,15 +2529,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     @objc private func expertModeChanged() {
         expertModeEnabled = expertModeButton.state == .on
         UserDefaults.standard.set(expertModeEnabled, forKey: "expertModeEnabled")
-        automaticRateMatchButton.isEnabled = expertModeEnabled
-        if !expertModeEnabled && automaticRateMatchingEnabled {
-            automaticRateMatchingEnabled = false
-            automaticRateMatchButton.state = .off
-            UserDefaults.standard.set(false, forKey: "automaticRateMatchingEnabled")
-            rateMatchStatusText = "Auto OFF"
-            updateRateMatchPreview()
-            processor?.setAutomaticRateMatchingEnabled(false)
-        }
+        // "자세히 보기" only toggles the detailed format header; 자동 Rate Match is
+        // independent and stays available regardless of this setting.
         updateFormatHeaderMode()
         layoutApplication()
     }
@@ -2238,9 +2588,9 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             intensitySlider.isEnabled = false
             bodySlider.isEnabled = false
             outputSlider.isEnabled = false
-            intensitySlider.toolTip = "Clean 모델에서는 DSP 처리를 완전히 우회합니다."
-            bodySlider.toolTip = "Clean 모델에서는 DSP 처리를 완전히 우회합니다."
-            outputSlider.toolTip = "Clean 모델에서는 출력 게인도 적용하지 않습니다."
+            intensitySlider.toolTip = "Clean 모델은 톤 DSP(회로/배음) 처리를 사용하지 않습니다."
+            bodySlider.toolTip = "Clean 모델은 톤 DSP(회로/배음) 처리를 사용하지 않습니다."
+            outputSlider.toolTip = "Clean 모델은 출력 게인을 적용하지 않습니다. 공간 음향은 모델과 관계없이 별도로 동작합니다."
             setOversamplingControlsVisible(false)
         case .circuit:
             intensityNameLabel.stringValue = "LowEnd"
@@ -2898,6 +3248,22 @@ private final class LockFreeControlEventQueue {
         var event = LCControlEvent()
         event.type = UInt32(LC_CONTROL_EVENT_SPATIAL)
         event.spatial = DSPPrecompute.makeSpatialSettings(sampleRate: sampleRate, settings: settings)
+        _ = withUnsafePointer(to: &event) { lc_control_event_queue_push(handle, $0) }
+    }
+
+    func pushConditioning(_ parameters: OutputConditioningParameters) {
+        var event = LCControlEvent()
+        event.type = UInt32(LC_CONTROL_EVENT_OUTPUT_CONDITIONING)
+        event.conditioning = LCOutputConditioningSettings(
+            enabled: parameters.isEnabled ? 1 : 0,
+            outputMode: parameters.outputMode.rawValue,
+            oversamplingFactor: UInt32(parameters.oversamplingFactor),
+            filterMode: parameters.filterMode.rawValue,
+            headroomGain: parameters.headroomGain,
+            ditherEnabled: parameters.ditherEnabled ? 1 : 0,
+            noiseShapingEnabled: parameters.noiseShapingEnabled ? 1 : 0,
+            dsdMode: parameters.dsdMode.rawValue
+        )
         _ = withUnsafePointer(to: &event) { lc_control_event_queue_push(handle, $0) }
     }
 
@@ -3642,7 +4008,7 @@ private final class RateBox {
     }
 }
 
-private final class HardwareSampleRateTracker {
+final class HardwareSampleRateTracker {
     struct RateCapabilities {
         let supportedRates: [Double]
         let isSettable: Bool
@@ -3987,6 +4353,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private let exciterDSP: HighExciterDSP
     private var activeDSPModelID: UInt32
     private let spatializer: Spatializer
+    /// Independent output-conditioning layer (oversampling / dither / experimental
+    /// DSD-DoP). Lives between the tonal DSP and the output ring buffer; defaults
+    /// to identity bypass on the live path. See ResamplingOutputConditioningEngine.
+    private let conditioningEngine: ResamplingOutputConditioningEngine
     private var currentIntensity: Float
     private var currentBody: Float
     private var currentOutputDb: Float
@@ -3998,7 +4368,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private var isAutomaticRateTransition = false
     private var originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var originalRateMatchSampleRate: Double?
-    private var rateMatchStatus = "Auto OFF"
+    private var rateMatchStatus = "자동 꺼짐"
     private var rateMatchPhase: RateMatchPhase = .idle
     private var rateMatchTransitionID: UInt64 = 0
     private var rateMatchActiveTransitionID: UInt64 = 0
@@ -4048,8 +4418,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         self.currentExciterOversamplingMode = settings.exciterOversamplingMode
         self.automaticRateMatchingEnabled = settings.automaticRateMatchingEnabled
         self.rateMatchStatus = settings.automaticRateMatchingEnabled
-            ? "Auto ON: source 안정화 대기"
-            : "Auto OFF"
+            ? "자동 켜짐: 소스 안정화 대기"
+            : "자동 꺼짐"
         self.currentSpatialSettings = settings.spatial
         self.ringBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)) * 4, channels: 2)
         self.visualizerRingBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)), channels: 2)
@@ -4071,6 +4441,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         )
         self.activeDSPModelID = settings.dspModel.controlID
         self.spatializer = Spatializer(sampleRate: Float(sampleRate), settings: settings.spatial)
+        self.conditioningEngine = ResamplingOutputConditioningEngine(maxInputFrames: scratchFrameCapacity)
         guard let outputGainRamp = lc_output_gain_ramp_create(1) else {
             inputScratch.deallocate()
             throw AppError.message("Could not allocate the output gain ramp.")
@@ -4136,6 +4507,39 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
     }
 
+    /// Push output-conditioning parameters to the audio thread through the same
+    /// lock-free control queue used by the DSP/spatial settings. The audio thread
+    /// drains it in `applyPendingControlEvents` and forwards it to the engine as a
+    /// plain struct copy.
+    func updateOutputConditioning(_ parameters: OutputConditioningParameters) {
+        managerQueue.async { [weak self] in
+            guard let self else { return }
+            controlQueue.pushConditioning(parameters)
+        }
+    }
+
+    /// Decode the flat C snapshot back into the Swift parameter value type.
+    /// Runs on the audio thread (from `applyPendingControlEvents`), so it must
+    /// stay allocation- and lock-free: no Swift collection APIs, no static-let
+    /// first-touch (which lazily initializes under a lock). All decoding is plain
+    /// scalar branching.
+    private static func parameters(from c: LCOutputConditioningSettings) -> OutputConditioningParameters {
+        var p = OutputConditioningParameters()
+        p.isEnabled = c.enabled != 0
+        p.outputMode = OutputConditioningMode(rawValue: c.outputMode) ?? .bypass
+        // Inline clamp — avoid touching the `allowedOversamplingFactors` static
+        // array (its lazy init takes a lock on first access) on the audio thread.
+        let factorValue = Int(c.oversamplingFactor)
+        p.oversamplingFactor = (factorValue == 8) ? 8 : (factorValue == 4) ? 4 : 2
+        p.filterMode = ResamplingFilterMode(rawValue: c.filterMode) ?? .linearPhaseShort
+        // c.headroomGain is always positive (it is 10^(headroomDB/20)); guard anyway.
+        p.headroomDB = c.headroomGain > 0 ? 20.0 * log10(c.headroomGain) : -120.0
+        p.ditherEnabled = c.ditherEnabled != 0
+        p.noiseShapingEnabled = c.noiseShapingEnabled != 0
+        p.dsdMode = DSDMode(rawValue: c.dsdMode) ?? .off
+        return p
+    }
+
     func setAutomaticRateMatchingEnabled(_ enabled: Bool) {
         managerQueue.async { [weak self] in
             guard let self else { return }
@@ -4146,12 +4550,12 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             rateMatchCooldownUntil = .distantPast
             rateMatchLastSourceRate = nil
             rateMatchLastTargetRate = nil
-            rateMatchStatus = enabled ? "Auto ON: source 안정화 대기" : "Auto OFF"
+            rateMatchStatus = enabled ? "자동 켜짐: 소스 안정화 대기" : "자동 꺼짐"
             if !enabled {
                 do {
                     try restoreOriginalRateMatchIfNeeded()
                 } catch {
-                    rateMatchStatus = "Auto OFF: 원래 rate 복구 실패"
+                    rateMatchStatus = "자동 꺼짐: 원래 샘플레이트 복구 실패"
                 }
             }
             publishFormatStatus()
@@ -4299,7 +4703,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         let now = Date()
         if now < rateMatchCooldownUntil {
             let remaining = rateMatchCooldownUntil.timeIntervalSince(now)
-            rateMatchStatus = "Auto cooldown: \(String(format: "%.1f", remaining))s"
+            rateMatchStatus = "자동 대기: \(String(format: "%.1f", remaining))s"
             publishFormatStatus()
             return
         }
@@ -4332,7 +4736,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         do {
             try performRateTransition(
                 to: targetRate,
-                successStatus: "Auto matched: \(Self.rateText(targetRate))",
+                successStatus: "자동 맞춤 완료: \(Self.rateText(targetRate))",
                 transitionID: transitionID
             )
         } catch {
@@ -4347,7 +4751,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                     rateMatchActiveTransitionID = rollbackID
                     try performRateTransition(
                         to: originalRate,
-                        successStatus: "Auto rollback: \(Self.rateText(originalRate))",
+                        successStatus: "자동 되돌리기: \(Self.rateText(originalRate))",
                         transitionID: rollbackID
                     )
                     rollbackSucceeded = true
@@ -4386,7 +4790,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             }
             try performRateTransition(
                 to: originalRate,
-                successStatus: "Auto OFF: \(Self.rateText(originalRate)) 복구",
+                successStatus: "자동 꺼짐: \(Self.rateText(originalRate)) 복구",
                 transitionID: restoreID
             )
         } else {
@@ -4403,7 +4807,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         guard !isAutomaticRateTransition else { return }
         isAutomaticRateTransition = true
         rateMatchPhase = .fadingOut
-        rateMatchStatus = "Auto switching: \(Self.rateText(targetRate))"
+        rateMatchStatus = "자동 전환 중: \(Self.rateText(targetRate))"
         publishFormatStatus()
         let phaseStarted = Date()
 
@@ -4583,7 +4987,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         rateMatchSessionDisabled = true
         rateMatchGate.reset()
         rateMatchPhase = .aborted
-        rateMatchStatus = "Auto paused: \(error)"
+        rateMatchStatus = "자동 일시정지: \(error)"
         requestOutputGain(1, duration: 0.08)
         if !engine.isRunning {
             let recoveryRate =
@@ -4608,8 +5012,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
             rateMatchGate.reset()
             rateMatchStatus = automaticRateMatchingEnabled
-                ? "Auto ON: 외부 장치 변경 감지"
-                : "Auto OFF"
+                ? "자동 켜짐: 외부 장치 변경 감지"
+                : "자동 꺼짐"
         }
 
         rateMatchLog("hardware-change device=\(deviceID) rate=\(Self.rateText(newHardwareSampleRate)) deviceChanged=\(deviceChanged) rateChanged=\(rateChanged) duringAuto=\(isAutomaticRateTransition) phase=\(rateMatchPhase.rawValue)")
@@ -5160,6 +5564,8 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         var hasDSP = false
         var latestSpatial = LCSpatialSettings()
         var hasSpatial = false
+        var latestConditioning = LCOutputConditioningSettings()
+        var hasConditioning = false
 
         while controlQueue.pop(into: &event) {
             switch event.type {
@@ -5169,6 +5575,9 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             case UInt32(LC_CONTROL_EVENT_SPATIAL):
                 latestSpatial = event.spatial
                 hasSpatial = true
+            case UInt32(LC_CONTROL_EVENT_OUTPUT_CONDITIONING):
+                latestConditioning = event.conditioning
+                hasConditioning = true
             default:
                 break
             }
@@ -5189,6 +5598,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         if hasSpatial {
             spatializer.update(latestSpatial)
         }
+
+        if hasConditioning {
+            conditioningEngine.updateSettings(Self.parameters(from: latestConditioning))
+        }
     }
 
     private func processAndPushStereo(left: UnsafePointer<Float>,
@@ -5207,6 +5620,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 inputScratch[frame * 2 + 1] = output.1
             }
 
+            // Output-conditioning layer. Identity bypass in this iteration, but
+            // wired here so the post-tonal signal flows through it before the
+            // output ring buffer. No-op when bypass (see processLive docs).
+            conditioningEngine.processLive(interleaved: inputScratch, frames: chunkFrames)
             ringBuffer.push(inputScratch, count: chunkFrames * 2)
             visualizerRingBuffer.push(inputScratch, count: chunkFrames * 2)
             offset += chunkFrames
@@ -5226,6 +5643,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 inputScratch[frame * 2 + 1] = output.1
             }
 
+            // Output-conditioning layer. Identity bypass in this iteration, but
+            // wired here so the post-tonal signal flows through it before the
+            // output ring buffer. No-op when bypass (see processLive docs).
+            conditioningEngine.processLive(interleaved: inputScratch, frames: chunkFrames)
             ringBuffer.push(inputScratch, count: chunkFrames * 2)
             visualizerRingBuffer.push(inputScratch, count: chunkFrames * 2)
             offset += chunkFrames
@@ -5245,6 +5666,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 inputScratch[frame * 2 + 1] = output.1
             }
 
+            // Output-conditioning layer. Identity bypass in this iteration, but
+            // wired here so the post-tonal signal flows through it before the
+            // output ring buffer. No-op when bypass (see processLive docs).
+            conditioningEngine.processLive(interleaved: inputScratch, frames: chunkFrames)
             ringBuffer.push(inputScratch, count: chunkFrames * 2)
             visualizerRingBuffer.push(inputScratch, count: chunkFrames * 2)
             offset += chunkFrames
@@ -5266,9 +5691,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     }
 
     private func processPostModel(left: Float, right: Float) -> (Float, Float) {
-        if activeDSPModelID == DSPModelID.clean {
-            return (left, right)
-        }
+        // Spatial audio is an INDEPENDENT stage. The model bypass (Clean) only
+        // skips the tonal DSP (Circuit / HighExciter); it must not silence the
+        // spatializer. The spatializer itself no-ops when its `enabled` flag is
+        // off or its amount is ~0, so Clean + spatial-off stays a pure pass-through.
         return spatializer.process(left: left, right: right)
     }
 }
@@ -5289,6 +5715,7 @@ do {
     }
     if case .selfTest = settings.mode {
         try runDSPParityChecks()
+        try runOutputConditioningChecks()
         exit(0)
     }
 
