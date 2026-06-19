@@ -37,6 +37,14 @@ let package = Package(
             name: "LowEndSupportChecks",
             dependencies: ["AudioRingBufferC", "LowEndDSPCoreC", "LowEndSupport"],
             path: "Tests/LowEndSupportChecks"
+        ),
+        .executableTarget(
+            name: "RateMatchBench",
+            dependencies: [],
+            path: "Tests/RateMatchBench",
+            linkerSettings: [
+                .linkedFramework("CoreAudio")
+            ]
         )
     ]
 )

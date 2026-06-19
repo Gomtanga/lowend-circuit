@@ -19,7 +19,11 @@ enum {
 
 enum {
     LC_CONTROL_EVENT_DSP = 1,
-    LC_CONTROL_EVENT_SPATIAL = 2
+    LC_CONTROL_EVENT_SPATIAL = 2,
+    // Output conditioning parameter snapshot (headroom / oversampling / dither / DSD-DoP).
+    // Purely additive variant; the control event queue stores events by sizeof(LCControlEvent),
+    // so extending the struct is safe and does not touch the DSP/spatial paths.
+    LC_CONTROL_EVENT_OUTPUT_CONDITIONING = 4
 };
 
 typedef struct {
@@ -75,10 +79,25 @@ typedef struct {
     LCSpatialPathSettings rr;
 } LCSpatialSettings;
 
+// Flat snapshot of the output-conditioning parameters. Carried through the same
+// lock-free SPSC control event queue as the DSP/spatial settings, so the audio
+// thread reads it without locks or allocation.
+typedef struct {
+    uint32_t enabled;
+    uint32_t outputMode;
+    uint32_t oversamplingFactor;
+    uint32_t filterMode;
+    float headroomGain;
+    uint32_t ditherEnabled;
+    uint32_t noiseShapingEnabled;
+    uint32_t dsdMode;
+} LCOutputConditioningSettings;
+
 typedef struct {
     uint32_t type;
     LCDSPSettings dsp;
     LCSpatialSettings spatial;
+    LCOutputConditioningSettings conditioning;
 } LCControlEvent;
 
 LCLockFreeRingBuffer *lc_ring_buffer_create(uint32_t requestedCapacitySamples);
