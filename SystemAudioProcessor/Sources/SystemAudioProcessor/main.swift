@@ -1288,6 +1288,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         case routing
         case output
         case settings
+        case diagnostics
 
         var title: String {
             switch self {
@@ -1296,6 +1297,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             case .routing: return "오디오 적용"
             case .output: return "출력 컨디셔닝"
             case .settings: return "설정"
+            case .diagnostics: return "진단"
             }
         }
 
@@ -1306,6 +1308,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             case .routing: return "app.connected.to.app.below.fill"
             case .output: return "waveform"
             case .settings: return "gearshape.fill"
+            case .diagnostics: return "stethoscope"
             }
         }
     }
@@ -1373,6 +1376,12 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     private var currentSourcePlayerName: String?
     private var currentSourceBitDepth: Int?
     private var currentOutputSampleFormat = "32-bit Float"
+
+    // Live pipeline state mirrored from AudioFormatNotifications for the
+    // read-only Diagnostics panel. Populated in audioFormatDidChange (main).
+    private var currentTapSampleRate: Double?
+    private var currentLivePCM2xActive = false
+    private var currentLivePCM2xFallback = ""
     private var supportedDeviceSampleRates: [Double] = []
     private var isDeviceSampleRateSettable = false
     private var automaticRateMatchingEnabled = UserDefaults.standard.bool(
@@ -1430,6 +1439,24 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     private var outputConditioningNoiseShapeButton: NSButton!
     private var outputConditioningDSDPopup: NSPopUpButton!
     private var outputConditioningStatusLabel: NSTextField!
+
+    // Diagnostics panel — read-only value labels, updated by refreshDiagnosticsPanel.
+    private var diagTapValue: NSTextField!
+    private var diagEngineValue: NSTextField!
+    private var diagDeviceValue: NSTextField!
+    private var diagFormatValue: NSTextField!
+    private var diagConditioningValue: NSTextField!
+    private var diagFallbackValue: NSTextField!
+    private var diagHighExciterValue: NSTextField!
+    private var diagXRunValue: NSTextField!
+    private var diagRestartValue: NSTextField!
+    private var diagDeviceNameValue: NSTextField!
+    private var diagCaptureValue: NSTextField!
+
+    // Device name is resolved from CoreAudio only when the device changes (it
+    // rarely does mid-session), avoiding a main-thread IPC on every 1 Hz tick.
+    private var diagCachedDeviceID: AudioObjectID = kAudioObjectUnknown
+    private var diagCachedDeviceName: String = "—"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         rateMatchStatusText = automaticRateMatchingEnabled
@@ -1609,6 +1636,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         pageViews[.routing] = makeRoutingPage()
         pageViews[.settings] = makeSettingsPage()
         pageViews[.output] = makeOutputConditioningPage()
+        pageViews[.diagnostics] = makeDiagnosticsPage()
         for page in AppPage.allCases {
             guard let pageView = pageViews[page] else { continue }
             pageView.frame = pageContainerView.bounds
@@ -1857,14 +1885,22 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         let buildVersion =
             Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
             ?? "9"
+        let buildID =
+            Bundle.main.object(forInfoDictionaryKey: "LCBuildID") as? String ?? ""
+        // Show the monotonic build number (git commit count) plus the commit
+        // hash and build time, so two builds with the same 0.2.x marketing
+        // version are still distinguishable in Settings.
+        let versionText = buildID.isEmpty
+            ? "LowEnd Native Audio \(shortVersion) (build \(buildVersion))"
+            : "LowEnd Native Audio \(shortVersion) (build \(buildVersion) · \(buildID))"
         let version = makeLabel(
-            "LowEnd Native Audio \(shortVersion) (\(buildVersion))",
-            size: 15,
+            versionText,
+            size: 12,
             weight: .semibold
         )
         version.textColor = .white
-        version.frame = NSRect(x: 24, y: 544, width: 360, height: 24)
-        version.autoresizingMask = [.minYMargin]
+        version.frame = NSRect(x: 24, y: 544, width: 560, height: 24)
+        version.autoresizingMask = [.minYMargin, .width]
         page.addSubview(version)
 
         let displayTitle = makeLabel("표시", size: 12, weight: .semibold)
@@ -1940,11 +1976,15 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         outputConditioningEnableButton.frame = NSRect(x: 24, y: 566, width: 320, height: 24)
         outputConditioningEnableButton.autoresizingMask = [.minYMargin]
         outputConditioningEnableButton.state = outputConditioningEnabled ? .on : .off
-        outputConditioningEnableButton.toolTip = "출력 직전 신호를 처리합니다. 기본값은 꺼짐(Bypass)이며, 켜더라도 이번 버전에서는 실시간 출력은 Bypass로 안전하게 동작합니다."
+        outputConditioningEnableButton.toolTip = "출력 직전 신호를 처리합니다. 기본값은 꺼짐(Bypass)입니다. PCM Oversampling 2×는 실험적 기능으로 출력 장치를 2배 샘플레이트로 전환합니다(44.1k→88.2k, 48k→96k만 지원). 전환 시 짧은 무음이 발생하며, 미지원 장치/샘플레이트에서는 안전하게 PCM으로 폴백됩니다."
         page.addSubview(outputConditioningEnableButton)
 
         outputConditioningModePopup = makeConditioningPopup(
-            titles: OutputConditioningMode.allCases.map { $0.displayName },
+            titles: OutputConditioningMode.allCases.map { mode in
+                mode == .experimentalDSD
+                    ? "\(mode.displayName) (오프라인/테스트 전용)"
+                    : mode.displayName
+            },
             action: #selector(outputConditioningModeChanged),
             y: 512
         )
@@ -1954,7 +1994,9 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
                                 in: OutputConditioningMode.allCases.map { $0.rawValue })
 
         outputConditioningFactorPopup = makeConditioningPopup(
-            titles: OutputConditioningParameters.allowedOversamplingFactors.map { "\($0)x" },
+            titles: OutputConditioningParameters.allowedOversamplingFactors.map { factor in
+                factor == 2 ? "2× (Live 가능)" : "\(factor)× (오프라인 전용)"
+            },
             action: #selector(outputConditioningFactorChanged),
             y: 458
         )
@@ -2015,7 +2057,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         outputConditioningNoiseShapeButton.state = outputConditioningNoiseShape ? .on : .off
         page.addSubview(outputConditioningNoiseShapeButton)
 
-        page.addSubview(makeConditioningCaption("DSD 모드 (실험)", y: 282))
+        page.addSubview(makeConditioningCaption("DSD 모드 (오프라인/테스트 전용 — 실시간 미지원)", y: 282))
         outputConditioningDSDPopup = makeConditioningPopup(
             titles: DSDMode.allCases.map { $0.displayName },
             action: #selector(outputConditioningDSDChanged),
@@ -2026,7 +2068,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
                                 in: DSDMode.allCases.map { $0.rawValue })
 
         let warning = makeLabel(
-            "DSD/DoP 출력은 DAC가 해당 carrier rate(176.4 / 352.8 / 705.6 kHz)를 지원해야 하며 CPU 부하가 큽니다. 장치가 필요한 carrier rate를 지원하지 않으면 자동으로 PCM으로 출력됩니다.",
+            "DSD/DoP는 현재 오프라인/테스트 전용이며 실시간 출력에 연결되어 있지 않습니다. 아래 carrier 표시는 DAC가 해당 rate(176.4 / 352.8 / 705.6 kHz)를 지원하는지의 참고용이며, 실제 DSD 출력으로 전환되지는 않습니다. 실시간 출력은 PCM(PCM Oversampling 2× 지원)으로만 동작합니다.",
             size: 11, weight: .regular
         )
         warning.lineBreakMode = .byWordWrapping
@@ -2046,6 +2088,157 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         applyOutputConditioningControlEnabledState()
         updateOutputConditioningStatus()
         return page
+    }
+
+    /// Read-only Diagnostics/Status page. Every value is sourced from existing
+    /// off-callback state (NotificationCenter mirror + diagnosticsSnapshot() +
+    /// ExciterOversamplingPolicy.resolve + a CoreAudio device-name query). The
+    /// realtime render callback is never touched.
+    private func makeDiagnosticsPage() -> NSView {
+        let page = NSView(frame: pageContainerView?.bounds ?? NSRect(x: 0, y: 0, width: 620, height: 700))
+        page.wantsLayer = true
+        page.layer?.backgroundColor = NSColor(calibratedRed: 0.08, green: 0.09, blue: 0.11, alpha: 1).cgColor
+
+        let title = makeLabel("진단 / 상태", size: 24, weight: .bold)
+        title.textColor = .white
+        title.frame = NSRect(x: 24, y: 636, width: 320, height: 32)
+        title.autoresizingMask = [.minYMargin]
+        page.addSubview(title)
+
+        let intro = makeLabel(
+            "오디오 콜백에 영향을 주지 않고 기존 상태 스냅샷을 읽어 표시합니다. 1초마다 갱신됩니다.",
+            size: 11, weight: .regular
+        )
+        intro.textColor = NSColor(calibratedRed: 0.55, green: 0.60, blue: 0.67, alpha: 1)
+        intro.lineBreakMode = .byWordWrapping
+        intro.maximumNumberOfLines = 0
+        intro.frame = NSRect(x: 24, y: 614, width: 540, height: 28)
+        intro.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(intro)
+
+        page.addSubview(makeDiagSection("샘플레이트 · 포맷", y: 584))
+        diagTapValue = addDiagRow(to: page, caption: "Tap 샘플레이트", value: "—", y: 560)
+        diagEngineValue = addDiagRow(to: page, caption: "엔진(처리) 샘플레이트", value: "—", y: 536)
+        diagDeviceValue = addDiagRow(to: page, caption: "출력 장치 샘플레이트", value: "—", y: 512)
+        diagFormatValue = addDiagRow(to: page, caption: "출력 포맷(비트 깊이/샘플 타입)", value: "—", y: 488)
+
+        page.addSubview(makeDiagSection("Output Conditioning", y: 452))
+        diagConditioningValue = addDiagRow(to: page, caption: "상태", value: "Off", y: 428)
+        diagFallbackValue = addDiagRow(to: page, caption: "폴백 사유", value: "—", y: 404)
+        diagFallbackValue.lineBreakMode = .byWordWrapping
+        diagFallbackValue.maximumNumberOfLines = 0
+        diagFallbackValue.frame = NSRect(x: 224, y: 392, width: 360, height: 36)
+
+        page.addSubview(makeDiagSection("HighExciter 오버샘플링", y: 372))
+        diagHighExciterValue = addDiagRow(to: page, caption: "실제 적용 모드", value: "—", y: 348)
+
+        page.addSubview(makeDiagSection("XRun 카운터", y: 312))
+        diagXRunValue = addDiagRow(to: page, caption: "underrun / drop / 분석 drop", value: "0 / 0 / 0", y: 288)
+        diagRestartValue = addDiagRow(to: page, caption: "엔진 재시작", value: "0", y: 264)
+
+        page.addSubview(makeDiagSection("출력 장치", y: 224))
+        diagDeviceNameValue = addDiagRow(to: page, caption: "이름 · ID", value: "—", y: 200)
+
+        page.addSubview(makeDiagSection("캡처 대상", y: 160))
+        diagCaptureValue = addDiagRow(to: page, caption: "실제 캡처 프로세스", value: "—", y: 136)
+
+        refreshDiagnosticsPanel()
+        return page
+    }
+
+    private func makeDiagSection(_ text: String, y: CGFloat) -> NSTextField {
+        let label = makeLabel(text, size: 13, weight: .semibold)
+        label.textColor = NSColor(calibratedRed: 0.55, green: 0.78, blue: 0.96, alpha: 1)
+        label.frame = NSRect(x: 24, y: y, width: 540, height: 20)
+        label.autoresizingMask = [.minYMargin, .width]
+        return label
+    }
+
+    @discardableResult
+    private func addDiagRow(to page: NSView, caption: String, value: String, y: CGFloat) -> NSTextField {
+        let cap = makeLabel(caption, size: 12, weight: .regular)
+        cap.textColor = NSColor(calibratedRed: 0.62, green: 0.66, blue: 0.72, alpha: 1)
+        cap.frame = NSRect(x: 24, y: y, width: 200, height: 18)
+        cap.autoresizingMask = [.minYMargin]
+        page.addSubview(cap)
+        let val = makeLabel(value, size: 12, weight: .regular)
+        val.frame = NSRect(x: 224, y: y, width: 360, height: 18)
+        val.autoresizingMask = [.minYMargin, .width]
+        val.lineBreakMode = .byTruncatingTail
+        page.addSubview(val)
+        return val
+    }
+
+    /// Refresh the format / conditioning / HighExciter rows of the Diagnostics
+    /// panel from main-cached state. Safe to call before the page is built and
+    /// before the engine starts. Counters + device identity are filled by
+    /// updateDiagnostics (1 Hz); this handles the notification-driven rows.
+    private func refreshDiagnosticsPanel() {
+        guard diagTapValue != nil else { return }
+        diagTapValue.stringValue = formatDiagRate(currentTapSampleRate)
+        diagEngineValue.stringValue = formatDiagRate(currentProcessingSampleRate)
+        diagDeviceValue.stringValue = formatDiagRate(currentDeviceSampleRate)
+        diagFormatValue.stringValue =
+            currentProcessingSampleRate == nil ? "—" : currentOutputSampleFormat
+
+        // Output Conditioning status: off / PCM 2× active / fallback.
+        // 2× is only "armed" when PCM Oversampling ×2 is the selected mode; any
+        // other enabled config (bypass, ×4/8, dither, DSD) is just "On".
+        let isPCM2xArmed = outputConditioningEnabled
+            && OutputConditioningMode(rawValue: outputConditioningModeRaw) == .pcmOversampling
+            && outputConditioningFactor == 2
+        // A fallback reason only applies to the 2×-armed path; if the user has
+        // since switched to a non-2× selection, drop the stale reason so it does
+        // not linger on the panel.
+        if !isPCM2xArmed, !currentLivePCM2xFallback.isEmpty {
+            currentLivePCM2xFallback = ""
+        }
+        let conditioningText: String
+        if !outputConditioningEnabled {
+            conditioningText = "Off"
+        } else if currentLivePCM2xActive {
+            conditioningText = "PCM 2× active"
+        } else if !currentLivePCM2xFallback.isEmpty {
+            conditioningText = "Fallback → PCM"
+        } else {
+            conditioningText = isPCM2xArmed ? "활성화됨(2× 대기)" : "활성화됨"
+        }
+        diagConditioningValue.stringValue = conditioningText
+        let hasFallback = !currentLivePCM2xFallback.isEmpty
+        diagFallbackValue.stringValue = hasFallback ? currentLivePCM2xFallback : "—"
+        diagFallbackValue.textColor = hasFallback
+            ? NSColor(calibratedRed: 0.95, green: 0.76, blue: 0.40, alpha: 1)
+            : NSColor(calibratedRed: 0.62, green: 0.66, blue: 0.72, alpha: 1)
+
+        diagHighExciterValue.stringValue = highExciterDiagnosticsText()
+    }
+
+    /// HighExciter resolved oversampling mode (1× / 2× / 4× / safety-limited),
+    /// computed from the cached engine sample rate + the selected oversampling
+    /// mode via the same pure policy used by updateOversamplingIndicator.
+    private func highExciterDiagnosticsText() -> String {
+        guard selectedDSPModel() == .highExciter else { return "—" }
+        guard let sampleRate = currentProcessingSampleRate else { return "포맷 대기 중" }
+        let resolution = ExciterOversamplingPolicy.resolve(
+            processingSampleRate: sampleRate,
+            mode: exciterOversamplingMode
+        )
+        let internalText = formatDiagRate(resolution.internalSampleRate)
+        if resolution.isSafetyLimited {
+            return "safety-limited · 요청 \(resolution.requestedFactor)× → 적용 \(resolution.effectiveFactor)× (\(internalText))"
+        }
+        return "\(resolution.effectiveFactor)× (\(internalText))"
+    }
+
+    private func formatDiagRate(_ rate: Double?) -> String {
+        AudioFormatStatus.rateText(rate)
+    }
+
+    /// Single source for the XRun row format (underrun / drop / analysis-drop),
+    /// shared by updateDiagnostics (live) and stopAudio (zero reset) so the two
+    /// cannot drift.
+    private func formatXRunCounts(underrun: UInt64, drop: UInt64, vis: UInt64) -> String {
+        "\(underrun) / \(drop) / \(vis)"
     }
 
     private func makeConditioningCaption(_ text: String, y: CGFloat) -> NSTextField {
@@ -2176,37 +2369,42 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         let capability = outputConditioningCapability
         var lines: [String] = []
         if let capability {
+            // DSD/DoP is offline/test-only — these carrier figures are DAC
+            // capability checks shown for reference, NOT as live output support.
             let carrierText = [DSDMode.dsd64, .dsd128, .dsd256]
-                .map { "\($0.displayName) carrier \(Self.rateText(DoPCarrier.requiredCarrierRate(for: $0))): \(capability.canAttemptDoP($0) ? "지원" : "미지원")" }
+                .map { "\($0.displayName) \(Self.rateText(DoPCarrier.requiredCarrierRate(for: $0))): \(capability.canAttemptDoP($0) ? "DAC 지원(참고용)" : "DAC 미지원")" }
                 .joined(separator: " / ")
-            lines.append(carrierText)
+            lines.append("DSD/DoP (오프라인/테스트 전용, 실시간 출력 미지원): \(carrierText)")
+            // Live PCM 2× (experimental, real-time) capability for the eligible rates.
+            let live44 = capability.canAttemptLivePCM2x(tapRate: 44_100)
+            let live48 = capability.canAttemptLivePCM2x(tapRate: 48_000)
+            lines.append("Live PCM 2×(실험, 실시간 지원): 44.1k→88.2k \(live44 ? "지원" : "미지원") / 48k→96k \(live48 ? "지원" : "미지원")")
         } else {
-            lines.append("DAC capability를 조회하지 못했습니다. DSD/DoP는 비활성화되며 PCM으로 출력됩니다.")
+            lines.append("DAC capability를 조회하지 못했습니다. 실시간 출력은 PCM으로만 동작합니다.")
         }
-        // Gate the DSD popup on capability + enable state. Enable it whenever the
-        // device supports ANY DSD family (not just the currently selected one), so
-        // a saved `.off` selection still lets the user pick a supported mode.
-        let anyDSDSupported = outputConditioningCapability.map { cap in
-            [DSDMode.dsd64, .dsd128, .dsd256].contains { cap.canAttemptDoP($0) }
-        } ?? false
-        let dsdEnabled = outputConditioningEnabled && anyDSDSupported
-        outputConditioningDSDPopup?.isEnabled = dsdEnabled
+        // DSD/DoP is offline/test-only — the picker is never enabled for live
+        // output; selecting a family has no effect on the real-time path.
+        outputConditioningDSDPopup?.isEnabled = false
 
-        // Clear, specific warning when the CURRENTLY SELECTED DSD mode is not
-        // usable on this device — even if another mode is supported and the
-        // popup is enabled. This tells the user exactly why it will fall back.
+        // A selected DSD family is informational only: it does not change the
+        // real-time output, which stays PCM. State that plainly instead of
+        // implying a fallback from an active DSD output.
         let selectedMode = DSDMode(rawValue: outputConditioningDSDRaw) ?? .off
         if selectedMode != .off {
-            let selectedAttemptable = outputConditioningCapability?.canAttemptDoP(selectedMode) ?? false
-            if !selectedAttemptable {
-                let reason = (capability?.supportsWideCarrierBitDepth ?? true)
-                    ? "이 장치가 \(selectedMode.displayName)의 carrier rate를 지원하지 않습니다."
-                    : "이 장치가 24/32-bit PCM carrier를 지원하지 않습니다."
-                lines.append("⚠ \(reason) \(selectedMode.displayName)는 PCM으로 폴백됩니다. 지원하는 모드를 선택하세요.")
-            }
-        } else if !anyDSDSupported, outputConditioningEnabled {
-            lines.append("⚠ 이 장치는 DSD/DoP carrier rate를 지원하지 않아 DSD 모드를 사용할 수 없습니다. PCM으로 출력됩니다.")
+            lines.append("ℹ \(selectedMode.displayName)는 오프라인/테스트 전용이며 실시간 출력에 적용되지 않습니다. 현재 PCM으로 출력됩니다.")
         }
+
+        // PCM Oversampling 2× selected but the device cannot run it → will fall
+        // back to PCM bypass on activation.
+        let pcmOSActive = outputConditioningEnabled
+            && (OutputConditioningMode(rawValue: outputConditioningModeRaw) == .pcmOversampling)
+            && outputConditioningFactor == 2
+        if pcmOSActive,
+           let capability,
+           !(capability.canAttemptLivePCM2x(tapRate: 44_100) || capability.canAttemptLivePCM2x(tapRate: 48_000)) {
+            lines.append("⚠ 이 장치가 2× 출력 샘플레이트(88.2/96kHz)를 지원하지 않아 PCM Oversampling이 PCM으로 폴백됩니다.")
+        }
+
         statusLabel.stringValue = lines.joined(separator: "\n")
     }
 
@@ -2923,6 +3121,11 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             let processor = try SystemAudioProcessor(settings: settings)
             try processor.start()
             self.processor = processor
+            // Apply any saved output-conditioning selection (e.g. live PCM 2×)
+            // now that the processor is started. Without this the engine stays in
+            // default bypass even though the UI shows the saved selection, until a
+            // control is toggled.
+            processor.updateOutputConditioning(currentOutputConditioningParameters())
             let analyzer = processor.makeSpectrumAnalyzer(
                 dynamicsModel: dynamicsMeterModel,
                 spectrumModel: spectrumModel
@@ -2955,6 +3158,16 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         }
         diagnosticsLabel?.stringValue = "XRuns 대기 중"
         currentProcessingSampleRate = nil
+        currentTapSampleRate = nil
+        currentLivePCM2xActive = false
+        currentLivePCM2xFallback = ""
+        diagXRunValue?.stringValue = formatXRunCounts(underrun: 0, drop: 0, vis: 0)
+        diagRestartValue?.stringValue = "0"
+        diagCachedDeviceID = kAudioObjectUnknown
+        diagCachedDeviceName = "—"
+        diagDeviceNameValue?.stringValue = "—"
+        diagCaptureValue?.stringValue = "—"
+        refreshDiagnosticsPanel()
         updateOversamplingIndicator()
         updateCompactFormatSummary()
     }
@@ -3002,6 +3215,31 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         let snapshot = processor.diagnosticsSnapshot()
         diagnosticsLabel.stringValue = snapshot.displayText
         diagnosticsLabel.toolTip = snapshot.displayText
+
+        // Diagnostics panel — counters + device identity, refreshed at the 1 Hz
+        // timer cadence (these values are not notification-driven). deviceName is
+        // a single off-thread CoreAudio query; outputDeviceID reads via the
+        // proven managerQueue.sync accessor — never the realtime audio callback.
+        if diagXRunValue != nil {
+            diagXRunValue.stringValue = formatXRunCounts(
+                underrun: snapshot.outputUnderrunSamples,
+                drop: snapshot.outputDroppedSamples,
+                vis: snapshot.visualizerDroppedSamples
+            )
+            diagRestartValue.stringValue = "\(snapshot.engineRestartCount)"
+            diagCaptureValue.stringValue = snapshot.captureTarget
+            // Resolve the device name only when the device changes (it rarely
+            // does mid-session) to avoid a CoreAudio IPC on the main thread every
+            // tick. outputDeviceID reads off the audio thread via managerQueue.
+            let devID = processor.outputDeviceID
+            if devID != diagCachedDeviceID {
+                diagCachedDeviceID = devID
+                diagCachedDeviceName = HardwareSampleRateTracker.deviceName(for: devID)
+            }
+            diagDeviceNameValue.stringValue =
+                "\(diagCachedDeviceName) · 0x\(String(devID, radix: 16))"
+        }
+        refreshDiagnosticsPanel()
     }
 
     @objc private func refreshApps() {
@@ -3016,36 +3254,53 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     }
 
     @objc private func audioFormatDidChange(_ notification: Notification) {
-        guard let text = notification.userInfo?[AudioFormatNotifications.indicatorTextKey] as? String else {
-            return
+        let userInfo = notification.userInfo
+        if let text = userInfo?[AudioFormatNotifications.indicatorTextKey] as? String {
+            formatLabel?.stringValue = text
         }
-        formatLabel?.stringValue = text
 
-        if let sampleRate = notification.userInfo?[AudioFormatNotifications.processingSampleRateKey] as? Double {
+        if let sampleRate = userInfo?[AudioFormatNotifications.processingSampleRateKey] as? Double {
             currentProcessingSampleRate = sampleRate
             spectrumAnalyzer?.updateSampleRate(Float(sampleRate))
         }
-        currentDeviceSampleRate = notification.userInfo?[AudioFormatNotifications.sampleRateKey] as? Double
-        currentOutputSampleFormat =
-            notification.userInfo?[AudioFormatNotifications.sampleFormatKey] as? String
-            ?? currentOutputSampleFormat
+        if let tapRate = userInfo?[AudioFormatNotifications.tapSampleRateKey] as? Double {
+            currentTapSampleRate = tapRate
+        }
+        if let deviceRate = userInfo?[AudioFormatNotifications.sampleRateKey] as? Double {
+            currentDeviceSampleRate = deviceRate
+        }
+        if let format = userInfo?[AudioFormatNotifications.sampleFormatKey] as? String {
+            currentOutputSampleFormat = format
+        }
         supportedDeviceSampleRates =
-            notification.userInfo?[AudioFormatNotifications.supportedSampleRatesKey] as? [Double]
+            userInfo?[AudioFormatNotifications.supportedSampleRatesKey] as? [Double]
             ?? supportedDeviceSampleRates
         isDeviceSampleRateSettable =
-            notification.userInfo?[AudioFormatNotifications.isSampleRateSettableKey] as? Bool
+            userInfo?[AudioFormatNotifications.isSampleRateSettableKey] as? Bool
             ?? isDeviceSampleRateSettable
         if let enabled =
-            notification.userInfo?[AudioFormatNotifications.automaticRateMatchingEnabledKey] as? Bool {
+            userInfo?[AudioFormatNotifications.automaticRateMatchingEnabledKey] as? Bool {
             automaticRateMatchingEnabled = enabled
             automaticRateMatchButton?.state = enabled ? .on : .off
         }
         rateMatchStatusText =
-            notification.userInfo?[AudioFormatNotifications.rateMatchStatusKey] as? String
+            userInfo?[AudioFormatNotifications.rateMatchStatusKey] as? String
             ?? rateMatchStatusText
+
+        // Live PCM 2× conditioning state is posted separately by
+        // publishLivePCM2xStatus WITHOUT an indicatorTextKey, so it must be
+        // consumed here regardless of whether the format indicator is present.
+        if let active = userInfo?[AudioFormatNotifications.livePCM2xActiveKey] as? Bool {
+            currentLivePCM2xActive = active
+        }
+        if let fallback = userInfo?[AudioFormatNotifications.livePCM2xFallbackKey] as? String {
+            currentLivePCM2xFallback = fallback
+        }
+
         updateCompactFormatSummary()
         updateRateMatchPreview()
         updateOversamplingIndicator()
+        refreshDiagnosticsPanel()
     }
 
     private func refreshRateMatchDeviceCapabilities() {
@@ -4201,6 +4456,24 @@ final class HardwareSampleRateTracker {
         return Double(sampleRate)
     }
 
+    /// Best-effort device display name. Runs on the caller's (non-audio) thread;
+    /// returns "—" when the device is unknown or the property cannot be read.
+    /// Used by the read-only Diagnostics panel to label the current output device.
+    static func deviceName(for deviceID: AudioObjectID) -> String {
+        guard deviceID != kAudioObjectUnknown else { return "—" }
+        var name: CFString = "" as CFString
+        var dataSize = UInt32(MemoryLayout<CFString>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = withUnsafeMutablePointer(to: &name) { ptr in
+            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, ptr)
+        }
+        return status == noErr ? (name as String) : "—"
+    }
+
     static func setNominalSampleRate(_ sampleRate: Double, for deviceID: AudioObjectID) throws {
         guard deviceID != kAudioObjectUnknown else {
             throw AppError.message("Audio device is unknown.")
@@ -4337,6 +4610,11 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private let controlQueue: LockFreeControlEventQueue
     private let scratchFrameCapacity = 8192
     private let inputScratch: UnsafeMutablePointer<Float>
+    /// Output-conditioning scratch. `processLive` writes its (possibly 2×)
+    /// result here so the live path is never in-place — a rate-changing output
+    /// cannot overwrite its own input. Sized for the 2× interleaved-stereo case
+    /// (`scratchFrameCapacity * 2 * 2`); allocated once, reused every callback.
+    private let conditioningOutputScratch: UnsafeMutablePointer<Float>
     private let managerQueue = DispatchQueue(label: "com.codexaudiolab.lowendcircuit.audio-manager")
     private var engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
@@ -4346,6 +4624,18 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     private var currentHardwareSampleRate: Double
     private var currentTapSampleRate: Double
     private var currentSampleRate: Double
+    /// Live PCM 2× oversampling. When active, the output device runs at 2× the
+    /// capture (tap) rate while the aggregate/tap stays at the source rate, and
+    /// `ResamplingOutputConditioningEngine.processLive` polyphase-upsamples the
+    /// captured signal 2× before it reaches the output ring buffer. Off by
+    /// default; activating it is a device-rate negotiation that runs on the
+    /// manager queue (never inside the audio callback).
+    private var livePCM2xActive = false
+    private var livePCM2xOutputRate: Double = 0
+    /// Hardware rate/device captured before activating 2×, used to restore PCM
+    /// bypass on disable or on negotiation failure. nil while 2× is not active.
+    private var preLivePCM2xHardwareRate: Double?
+    private var preLivePCM2xDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
@@ -4388,6 +4678,13 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         managerQueue.sync { currentCaptureTargetSummary }
     }
 
+    /// Current output device ID, read off the audio thread. Used by the
+    /// read-only Diagnostics panel (mirrors `captureTargetSummary` / the
+    /// `diagnosticsSnapshot()` managerQueue.sync pattern).
+    var outputDeviceID: AudioObjectID {
+        managerQueue.sync { currentOutputDeviceID }
+    }
+
     func diagnosticsSnapshot() -> AudioDiagnosticsSnapshot {
         let managerState = managerQueue.sync {
             (engineRestartCount, currentCaptureTargetSummary)
@@ -4425,6 +4722,9 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         self.visualizerRingBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)), channels: 2)
         self.controlQueue = try LockFreeControlEventQueue(sampleRate: Float(sampleRate))
         self.inputScratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrameCapacity * 2)
+        self.conditioningOutputScratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrameCapacity * 2 * 2)
+        inputScratch.initialize(repeating: 0, count: scratchFrameCapacity * 2)
+        conditioningOutputScratch.initialize(repeating: 0, count: scratchFrameCapacity * 2 * 2)
         self.circuitDSP = VirtualCircuitBassDSP(
             sampleRate: Float(sampleRate),
             intensity: settings.intensity,
@@ -4453,6 +4753,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         stop()
         lc_output_gain_ramp_destroy(outputGainRamp)
         inputScratch.deallocate()
+        conditioningOutputScratch.deallocate()
     }
 
     func start() throws {
@@ -4462,7 +4763,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             try createProcessTapAndAggregateDevice()
             currentSampleRate = syncAggregateSampleRate(preferredSampleRate: currentHardwareSampleRate)
             refreshTapSampleRate()
-            controlQueue.updateSampleRate(Float(currentSampleRate))
+            controlQueue.updateSampleRate(Float(currentTapSampleRate))
             applyCurrentSettingsDirectly()
             try startOutput(sampleRate: currentSampleRate)
             try startCapture()
@@ -4507,14 +4808,271 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         }
     }
 
-    /// Push output-conditioning parameters to the audio thread through the same
-    /// lock-free control queue used by the DSP/spatial settings. The audio thread
-    /// drains it in `applyPendingControlEvents` and forwards it to the engine as a
-    /// plain struct copy.
+    /// Push output-conditioning parameters, after first performing any device-
+    /// rate negotiation the parameters require. Live PCM 2× (enabled +
+    /// pcmOversampling + 2×) switches the output device to 2× the capture rate;
+    /// every other configuration restores PCM bypass. The negotiation runs on
+    /// the manager queue (never inside the audio callback); the engine only
+    /// receives its snapshot once the device rate has settled — or, on an
+    /// unsupported device/rate or a failed transition, after falling back to a
+    /// bypass snapshot so it never upsamples into a device still running at 1×.
     func updateOutputConditioning(_ parameters: OutputConditioningParameters) {
         managerQueue.async { [weak self] in
             guard let self else { return }
+            self.applyLivePCM2xState(for: parameters)
+        }
+    }
+
+    /// Whether the output device can actually run live PCM 2× for the current
+    /// capture (tap) rate. Queries the device off the audio thread.
+    private func canDeviceRunLivePCM2x(tapRate: Double) -> Bool {
+        guard let capabilities = try? HardwareSampleRateTracker.rateCapabilities(for: currentOutputDeviceID) else {
+            return false
+        }
+        let capability = OutputConditioningCapability(
+            supportedCarriers: [:],
+            supportsWideCarrierBitDepth: true,
+            supportedRates: capabilities.supportedRates,
+            isRateSettable: capabilities.isSettable,
+            deviceID: currentOutputDeviceID
+        )
+        return capability.canAttemptLivePCM2x(tapRate: tapRate)
+    }
+
+    /// Decide whether the parameters activate live PCM 2×, then negotiate the
+    /// device rate (or restore bypass) accordingly.
+    private func applyLivePCM2xState(for parameters: OutputConditioningParameters) {
+        let requested = isStarted
+            && parameters.isEnabled
+            && parameters.outputMode == .pcmOversampling
+            && parameters.oversamplingFactor == 2
+
+        if requested {
+            activateLivePCM2x(parameters: parameters)
+        } else {
+            deactivateLivePCM2x(parameters: parameters)
+        }
+    }
+
+    /// Returns a bypass snapshot (same params, mode forced to bypass) used when
+    /// the device/rate cannot run 2× — the live path must stay a PCM identity.
+    private func bypassConditioning(from parameters: OutputConditioningParameters) -> OutputConditioningParameters {
+        var bypass = parameters
+        bypass.outputMode = .bypass
+        return bypass
+    }
+
+    private func activateLivePCM2x(parameters: OutputConditioningParameters) {
+        if livePCM2xActive {
             controlQueue.pushConditioning(parameters)
+            return
+        }
+        guard isStarted else {
+            controlQueue.pushConditioning(parameters)
+            return
+        }
+        // Live 2× and automatic rate matching both change the output device
+        // rate and cannot coexist; rate matching yields to the explicit 2× mode.
+        if automaticRateMatchingEnabled {
+            automaticRateMatchingEnabled = false
+            try? restoreOriginalRateMatchIfNeeded()
+        }
+
+        let tapRate = currentTapSampleRate
+        guard tapRate > 1,
+              let target = OutputConditioningCapability.livePCM2xTargetRate(forTapRate: tapRate),
+              canDeviceRunLivePCM2x(tapRate: tapRate) else {
+            fputs("[Live2x] fallback (unsupported): tap=\(Self.rateText(tapRate)) device=\(currentOutputDeviceID)\n", stderr)
+            controlQueue.pushConditioning(bypassConditioning(from: parameters))
+            publishLivePCM2xStatus(active: false,
+                                   fallbackReason: "이 장치/샘플레이트에서는 2× 출력을 지원하지 않아 PCM으로 출력됩니다.")
+            return
+        }
+        do {
+            try performLivePCM2xTransition(tapRate: tapRate, outputRate: target, parameters: parameters)
+            livePCM2xActive = true
+            livePCM2xOutputRate = target
+            fputs("[Live2x] activated: tap \(Self.rateText(tapRate)) → output \(Self.rateText(target)) on device \(currentOutputDeviceID)\n", stderr)
+            publishLivePCM2xStatus(active: true, fallbackReason: nil)
+        } catch {
+            // The transition already rolled the device back to 1×. Clear the
+            // saved pre-2× snapshot so a later device/rate change (or a future
+            // 2× session) does not restore a stale rate from this failed attempt.
+            preLivePCM2xHardwareRate = nil
+            preLivePCM2xDeviceID = kAudioObjectUnknown
+            livePCM2xOutputRate = 0
+            controlQueue.pushConditioning(bypassConditioning(from: parameters))
+            publishLivePCM2xStatus(active: false,
+                                   fallbackReason: "2× 전환 실패(\(error.localizedDescription)): PCM으로 출력됩니다.")
+        }
+    }
+
+    private func deactivateLivePCM2x(parameters: OutputConditioningParameters) {
+        guard livePCM2xActive else {
+            controlQueue.pushConditioning(parameters)
+            return
+        }
+        // Drop the engine to bypass BEFORE rebuilding the 1× graph. performRate-
+        // Transition suspends (stops) the graph before rebuilding, so no audio
+        // callback is running here — setting the engine directly is race-free and
+        // guarantees the restarted callbacks never write doubled-rate frames into
+        // the 1× ring buffer during the restart window.
+        conditioningEngine.updateSettings(bypassConditioning(from: parameters))
+        // Restore the pre-2× hardware rate/device via the proven rate-match
+        // transition (aggregate + output at the same rate again).
+        if let rate = preLivePCM2xHardwareRate,
+           preLivePCM2xDeviceID != kAudioObjectUnknown,
+           abs(rate - currentHardwareSampleRate) > 1 {
+            rateMatchTransitionID &+= 1
+            do {
+                try performRateTransition(
+                    to: rate,
+                    successStatus: "2× 해제: \(Self.rateText(rate))",
+                    transitionID: rateMatchTransitionID
+                )
+            } catch {
+                let recoveryRate = (try? HardwareSampleRateTracker.nominalSampleRate(for: currentOutputDeviceID)) ?? rate
+                try? restartForHardwareFormat(
+                    deviceID: currentOutputDeviceID,
+                    hardwareSampleRate: Self.validSampleRate(recoveryRate)
+                )
+                _ = waitForAudioFlowRecovery(timeout: 0.75)
+            }
+        }
+        livePCM2xActive = false
+        livePCM2xOutputRate = 0
+        preLivePCM2xHardwareRate = nil
+        preLivePCM2xDeviceID = kAudioObjectUnknown
+        controlQueue.pushConditioning(parameters)
+        fputs("[Live2x] deactivated → \(Self.rateText(currentHardwareSampleRate))\n", stderr)
+        publishLivePCM2xStatus(active: false, fallbackReason: nil)
+    }
+
+    /// Device-rate negotiation for live PCM 2×: fade out, suspend, switch the
+    /// output DAC to `outputRate`, reconfigure with the aggregate/tap held at
+    /// `tapRate` and the output graph at `outputRate`, recover flow, fade in.
+    /// Mirrors `performRateTransition`'s safety shape but keeps the tap at 1×
+    /// while the output runs at 2×. On any failure it restores the pre-2× rate.
+    private func performLivePCM2xTransition(tapRate: Double, outputRate: Double,
+                                            parameters: OutputConditioningParameters) throws {
+        guard !isAutomaticRateTransition else { return }
+        isAutomaticRateTransition = true
+        defer { isAutomaticRateTransition = false }
+
+        if preLivePCM2xHardwareRate == nil {
+            preLivePCM2xHardwareRate = currentHardwareSampleRate
+            preLivePCM2xDeviceID = currentOutputDeviceID
+        }
+
+        requestOutputGain(0, duration: 0.05)
+        waitForOutputGain(atMost: 0.001, timeout: 0.25)
+
+        suspendForHardwareReconfigure()
+
+        do {
+            if let tracker = hardwareTracker {
+                let semaphore = DispatchSemaphore(value: 0)
+                let confirmedBox = RateBox()
+                try tracker.requestRateChange(outputRate, for: currentOutputDeviceID) { rate in
+                    confirmedBox.set(rate)
+                    semaphore.signal()
+                }
+                defer { hardwareTracker?.cancelRateChangeConfirmation() }
+                let confirmed = try waitForNominalSampleRate(
+                    outputRate,
+                    deviceID: currentOutputDeviceID,
+                    semaphore: semaphore,
+                    confirmedRate: { confirmedBox.get() }
+                )
+                currentHardwareSampleRate = confirmed
+                try restartForLivePCM2x(tapRate: tapRate, outputRate: confirmed, parameters: parameters)
+            } else {
+                try HardwareSampleRateTracker.setNominalSampleRate(outputRate, for: currentOutputDeviceID)
+                currentHardwareSampleRate = outputRate
+                try restartForLivePCM2x(tapRate: tapRate, outputRate: outputRate, parameters: parameters)
+            }
+            ringWrittenAtTransitionStart = ringBuffer.totalWrittenSamples()
+            ringReadAtTransitionStart = ringBuffer.totalReadSamples()
+            let recovered = waitForAudioFlowRecovery(timeout: 0.5)
+            if !recovered {
+                throw AppError.message("2× 전환 후 캡처/출력 흐름이 회복되지 않았습니다.")
+            }
+            requestOutputGain(1, duration: 0.08)
+            guard waitForOutputGain(atLeast: 0.99, timeout: 0.5) else {
+                throw AppError.message("2× 전환 후 출력 게인이 회복되지 않았습니다.")
+            }
+            publishFormatStatus()
+        } catch {
+            // Roll back UNCONDITIONALLY. A late failure (flow recovery or fade-in
+            // timeout) can happen AFTER restartForLivePCM2x already started the
+            // 2× graph (engine running), and the caller will then enqueue a bypass
+            // snapshot. We must restore the output device's nominal rate AND
+            // reconfigure the engine/aggregate/output at the pre-2× 1× rate so the
+            // device and the (bypass) engine agree — otherwise a 1× producer feeds
+            // a 2× output device and the audio plays at half speed.
+            if let rate = preLivePCM2xHardwareRate {
+                try? HardwareSampleRateTracker.setNominalSampleRate(rate, for: currentOutputDeviceID)
+                currentHardwareSampleRate = rate
+            }
+            engine.stop()
+            let recoveryRate = preLivePCM2xHardwareRate ?? currentHardwareSampleRate
+            try? restartForHardwareFormat(
+                deviceID: currentOutputDeviceID,
+                hardwareSampleRate: Self.validSampleRate(recoveryRate)
+            )
+            _ = waitForAudioFlowRecovery(timeout: 0.75)
+            requestOutputGain(1, duration: 0.08)
+            throw error
+        }
+    }
+
+    /// Reconfigure for live PCM 2×: the aggregate (tap) stays at the source rate
+    /// so the tap captures the 1× signal, while the output graph runs at 2×.
+    /// `currentSampleRate` (output rate) and `currentTapSampleRate` (capture
+    /// rate) therefore differ while 2× is active — the tonal DSP and the ring-
+    /// buffer push both key off the capture rate, and `processLive` doubles it.
+    private func restartForLivePCM2x(tapRate: Double, outputRate: Double,
+                                     parameters: OutputConditioningParameters) throws {
+        try createProcessTapAndAggregateDevice()
+        // Aggregate/tap at the source rate (1× capture).
+        _ = syncAggregateSampleRate(preferredSampleRate: tapRate)
+        refreshTapSampleRate()
+        // Output device/graph at 2×.
+        currentSampleRate = outputRate
+        controlQueue.updateSampleRate(Float(currentTapSampleRate))
+        applyCurrentSettingsDirectly()
+
+        do {
+            replaceOutputEngine()
+            try configureOutputGraph(sampleRate: currentSampleRate)
+            // Push the 2× conditioning snapshot BEFORE capture starts so the first
+            // audio callback drains it: the engine enters 2× mode the instant the
+            // output graph begins running at 2× — device rate and engine state
+            // switch together, with no bypass-into-2× gap or underrun.
+            controlQueue.pushConditioning(parameters)
+            try engine.start()
+            try startCapture()
+        } catch {
+            engine.stop()
+            stopCaptureAndDestroyAggregateDevice()
+            destroyProcessTap()
+            throw error
+        }
+        publishFormatStatus()
+    }
+
+    /// Publish live PCM 2× activation / fallback state to the UI. Runs on the
+    /// manager queue; hops to main for the notification.
+    private func publishLivePCM2xStatus(active: Bool, fallbackReason: String?) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: AudioFormatNotifications.didChange,
+                object: nil,
+                userInfo: [
+                    AudioFormatNotifications.livePCM2xActiveKey: active,
+                    AudioFormatNotifications.livePCM2xFallbackKey: fallbackReason ?? ""
+                ]
+            )
         }
     }
 
@@ -4630,6 +5188,16 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             if originalRateMatchSampleRate != nil {
                 try? restoreOriginalRateMatchIfNeeded(reconfigureEngine: false)
             }
+            // If live PCM 2× left the output device at 2×, restore its rate so a
+            // subsequent launch / other apps see the device's normal rate.
+            if livePCM2xActive, let rate = preLivePCM2xHardwareRate,
+               preLivePCM2xDeviceID != kAudioObjectUnknown {
+                try? HardwareSampleRateTracker.setNominalSampleRate(rate, for: preLivePCM2xDeviceID)
+            }
+            livePCM2xActive = false
+            livePCM2xOutputRate = 0
+            preLivePCM2xHardwareRate = nil
+            preLivePCM2xDeviceID = kAudioObjectUnknown
             isStarted = false
             isAutomaticRateTransition = false
             rateMatchPhase = .idle
@@ -5006,6 +5574,7 @@ private final class SystemAudioProcessor: @unchecked Sendable {
         let newHardwareSampleRate = Self.validSampleRate(sampleRate)
         let deviceChanged = deviceID != currentOutputDeviceID
         let rateChanged = abs(newHardwareSampleRate - currentHardwareSampleRate) > 0.5
+        var droppedLivePCM2x = false
 
         if (deviceChanged || rateChanged) && !isAutomaticRateTransition {
             originalRateMatchSampleRate = nil
@@ -5014,6 +5583,23 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             rateMatchStatus = automaticRateMatchingEnabled
                 ? "자동 켜짐: 외부 장치 변경 감지"
                 : "자동 꺼짐"
+            // An external device/rate change invalidates the live PCM 2× split
+            // (tap 1× / output 2×). Drop back to PCM bypass and let the normal
+            // reconfigure run the aggregate and output at the device's new rate.
+            if livePCM2xActive {
+                livePCM2xActive = false
+                livePCM2xOutputRate = 0
+                preLivePCM2xHardwareRate = nil
+                preLivePCM2xDeviceID = kAudioObjectUnknown
+                // Defer the bypass push to AFTER the reconfigure below —
+                // reconfigureForHardwareFormat's suspend drains the control queue,
+                // which would discard a push made here before the callback pops it.
+                droppedLivePCM2x = true
+                publishLivePCM2xStatus(
+                    active: false,
+                    fallbackReason: "출력 장치가 변경되어 2× 모드가 해제되었습니다. PCM으로 출력됩니다."
+                )
+            }
         }
 
         rateMatchLog("hardware-change device=\(deviceID) rate=\(Self.rateText(newHardwareSampleRate)) deviceChanged=\(deviceChanged) rateChanged=\(rateChanged) duringAuto=\(isAutomaticRateTransition) phase=\(rateMatchPhase.rawValue)")
@@ -5040,6 +5626,12 @@ private final class SystemAudioProcessor: @unchecked Sendable {
             try reconfigureForHardwareFormat(deviceID: deviceID, hardwareSampleRate: newHardwareSampleRate)
         } catch {
             fputs("Output format reconfigure failed: \(error)\n", stderr)
+        }
+        // Now that the reconfigure (and its control-queue drain) is done, push
+        // the bypass snapshot so the restarted engine drains it on its next
+        // callback instead of carrying stale live-2× settings into a 1× graph.
+        if droppedLivePCM2x {
+            controlQueue.pushConditioning(OutputConditioningParameters())
         }
     }
 
@@ -5145,7 +5737,10 @@ private final class SystemAudioProcessor: @unchecked Sendable {
     }
 
     private func applyCurrentSettingsDirectly() {
-        let sampleRate = Float(currentSampleRate)
+        // DSP/capture runs at the tap rate (the captured signal's rate). This is
+        // distinct from the *output* rate (`currentSampleRate`) once live PCM 2×
+        // is active — the tonal DSP still operates on the 1× captured signal.
+        let sampleRate = Float(currentTapSampleRate)
         let dspSettings = DSPPrecompute.makeDSPSettings(
             sampleRate: sampleRate,
             intensity: currentIntensity,
@@ -5620,12 +6215,18 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 inputScratch[frame * 2 + 1] = output.1
             }
 
-            // Output-conditioning layer. Identity bypass in this iteration, but
-            // wired here so the post-tonal signal flows through it before the
-            // output ring buffer. No-op when bypass (see processLive docs).
-            conditioningEngine.processLive(interleaved: inputScratch, frames: chunkFrames)
-            ringBuffer.push(inputScratch, count: chunkFrames * 2)
-            visualizerRingBuffer.push(inputScratch, count: chunkFrames * 2)
+            // Output-conditioning layer. Bypass (verbatim copy) unless the live
+            // PCM 2× mode is active, in which case this upsamples 2× and the
+            // returned frame count is 2× the input. Never in-place: it writes into
+            // conditioningOutputScratch so a rate-changing output cannot overwrite
+            // its own input. Push the produced frames at the *output* rate.
+            let conditioningFrames = conditioningEngine.processLive(
+                input: inputScratch,
+                inputFrames: chunkFrames,
+                output: conditioningOutputScratch
+            )
+            ringBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
+            visualizerRingBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
             offset += chunkFrames
         }
     }
@@ -5643,12 +6244,18 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 inputScratch[frame * 2 + 1] = output.1
             }
 
-            // Output-conditioning layer. Identity bypass in this iteration, but
-            // wired here so the post-tonal signal flows through it before the
-            // output ring buffer. No-op when bypass (see processLive docs).
-            conditioningEngine.processLive(interleaved: inputScratch, frames: chunkFrames)
-            ringBuffer.push(inputScratch, count: chunkFrames * 2)
-            visualizerRingBuffer.push(inputScratch, count: chunkFrames * 2)
+            // Output-conditioning layer. Bypass (verbatim copy) unless the live
+            // PCM 2× mode is active, in which case this upsamples 2× and the
+            // returned frame count is 2× the input. Never in-place: it writes into
+            // conditioningOutputScratch so a rate-changing output cannot overwrite
+            // its own input. Push the produced frames at the *output* rate.
+            let conditioningFrames = conditioningEngine.processLive(
+                input: inputScratch,
+                inputFrames: chunkFrames,
+                output: conditioningOutputScratch
+            )
+            ringBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
+            visualizerRingBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
             offset += chunkFrames
         }
     }
@@ -5666,12 +6273,18 @@ private final class SystemAudioProcessor: @unchecked Sendable {
                 inputScratch[frame * 2 + 1] = output.1
             }
 
-            // Output-conditioning layer. Identity bypass in this iteration, but
-            // wired here so the post-tonal signal flows through it before the
-            // output ring buffer. No-op when bypass (see processLive docs).
-            conditioningEngine.processLive(interleaved: inputScratch, frames: chunkFrames)
-            ringBuffer.push(inputScratch, count: chunkFrames * 2)
-            visualizerRingBuffer.push(inputScratch, count: chunkFrames * 2)
+            // Output-conditioning layer. Bypass (verbatim copy) unless the live
+            // PCM 2× mode is active, in which case this upsamples 2× and the
+            // returned frame count is 2× the input. Never in-place: it writes into
+            // conditioningOutputScratch so a rate-changing output cannot overwrite
+            // its own input. Push the produced frames at the *output* rate.
+            let conditioningFrames = conditioningEngine.processLive(
+                input: inputScratch,
+                inputFrames: chunkFrames,
+                output: conditioningOutputScratch
+            )
+            ringBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
+            visualizerRingBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
             offset += chunkFrames
         }
     }

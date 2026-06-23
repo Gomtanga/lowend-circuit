@@ -15,10 +15,17 @@ struct AudioFormatStatus {
         return "Tap \(Self.rateText(tapSampleRate)) / Engine \(Self.rateText(processingSampleRate)) / DAC \(Self.rateText(sampleRate))"
     }
 
-    private static func rateText(_ sampleRate: Double) -> String {
+    static func rateText(_ sampleRate: Double) -> String {
         sampleRate >= 1000
             ? String(format: "%.1f kHz", sampleRate / 1000)
             : String(format: "%.0f Hz", sampleRate)
+    }
+
+    /// Optional convenience used by the read-only Diagnostics panel: returns
+    /// "—" for nil / non-positive so unbuilt/stopped rows render cleanly.
+    static func rateText(_ sampleRate: Double?) -> String {
+        guard let sampleRate, sampleRate > 0 else { return "—" }
+        return rateText(sampleRate)
     }
 }
 
@@ -35,4 +42,7 @@ enum AudioFormatNotifications {
     static let automaticRateMatchingEnabledKey = "automaticRateMatchingEnabled"
     static let rateMatchStatusKey = "rateMatchStatus"
     static let rateMatchPhaseKey = "rateMatchPhase"
+    /// Live PCM 2× oversampling activation + fallback state (Output Conditioning).
+    static let livePCM2xActiveKey = "livePCM2xActive"
+    static let livePCM2xFallbackKey = "livePCM2xFallback"
 }

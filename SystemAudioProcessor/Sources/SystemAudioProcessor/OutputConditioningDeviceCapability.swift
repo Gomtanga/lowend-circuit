@@ -28,6 +28,34 @@ struct OutputConditioningCapability: Equatable {
         return carrierOK && supportsWideCarrierBitDepth
     }
 
+    /// PCM 2× live oversampling doubles the eligible input rate. Returns the
+    /// target output rate for a given tap (input) rate, or nil if that rate is
+    /// not eligible — this PR supports only 44.1k→88.2k and 48k→96k. Any other
+    /// input rate bypasses live oversampling entirely.
+    static func livePCM2xTargetRate(forTapRate tapRate: Double) -> Double? {
+        if abs(tapRate - 44_100) < 0.5 { return 88_200 }
+        if abs(tapRate - 48_000) < 0.5 { return 96_000 }
+        return nil
+    }
+
+    /// Whether the output device can run the live PCM 2× path for the given tap
+    /// rate: the doubled output rate must be advertised AND the device rate must
+    /// be settable (the reconfigure path switches the DAC to 2×). If not, the
+    /// mode cannot activate and must fall back to PCM bypass.
+    func canAttemptLivePCM2x(tapRate: Double) -> Bool {
+        guard let target = Self.livePCM2xTargetRate(forTapRate: tapRate) else { return false }
+        return isRateSettable
+            && supportedRates.contains { abs($0 - target) < 0.5 }
+    }
+
+    /// The target output rate for the current tap rate when the device supports
+    /// live PCM 2×, otherwise nil. Convenience for the UI / negotiation path.
+    func livePCM2xTargetRateIfSupported(tapRate: Double) -> Double? {
+        canAttemptLivePCM2x(tapRate: tapRate)
+            ? Self.livePCM2xTargetRate(forTapRate: tapRate)
+            : nil
+    }
+
     /// Conservative empty result used when the device cannot be queried.
     static func unknown(deviceID: AudioObjectID) -> OutputConditioningCapability {
         OutputConditioningCapability(

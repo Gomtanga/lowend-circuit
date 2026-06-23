@@ -177,26 +177,81 @@ func runOutputConditioningChecks() throws {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // SECTION 5 — Bypass == disabled (processLive must be identity in both cases)
+    // SECTION 5 — Live path: bypass cases are identity; 2× is rate-changing
     // ─────────────────────────────────────────────────────────────────────
+    // The live path must be a verbatim identity copy for every configuration that
+    // is NOT enabled + pcmOversampling + 2×: disabled, bypass, dither, and
+    // pcmOversampling at 4×/8× (live allows 2× only). Only the 2× configuration
+    // produces a 2× output — that is exercised in Section 5b below.
     try checkProcessLiveIdentity(engine: engine, reference: sine44, inputFrames: inputFrames,
-                                 enabled: false, mode: .bypass, label: "disabled")
+                                 enabled: false, mode: .bypass, factor: 2, label: "disabled")
     try checkProcessLiveIdentity(engine: engine, reference: sine44, inputFrames: inputFrames,
-                                 enabled: true, mode: .bypass, label: "enabled+bypass")
-    // Enabling a rate-changing mode must STILL be identity on the live path in
-    // this iteration (device-format switching is deferred), and equal to disabled.
+                                 enabled: true, mode: .bypass, factor: 2, label: "enabled+bypass")
     try checkProcessLiveIdentity(engine: engine, reference: sine44, inputFrames: inputFrames,
-                                 enabled: true, mode: .pcmOversampling, label: "enabled+oversample")
-    let disabledCopy = processLiveCopy(engine: engine,
-                                       settings: OutputConditioningParameters(),
-                                       input: sine44, inputFrames: inputFrames)
-    var oversampleParams = OutputConditioningParameters()
-    oversampleParams.isEnabled = true
-    oversampleParams.outputMode = .pcmOversampling
-    let oversampleCopy = processLiveCopy(engine: engine, settings: oversampleParams,
-                                         input: sine44, inputFrames: inputFrames)
-    try check(disabledCopy == oversampleCopy && oversampleCopy == sine44,
-              "Live path (disabled / bypass / oversample) must all equal the original buffer.")
+                                 enabled: true, mode: .pcmOversampling, factor: 4, label: "enabled+4x(live=2x-only)")
+    try checkProcessLiveIdentity(engine: engine, reference: sine44, inputFrames: inputFrames,
+                                 enabled: true, mode: .pcmOversampling, factor: 8, label: "enabled+8x(live=2x-only)")
+    try checkProcessLiveIdentity(engine: engine, reference: sine44, inputFrames: inputFrames,
+                                 enabled: true, mode: .pcmWithDither, factor: 2, label: "enabled+dither")
+
+    // ─────────────────────────────────────────────────────────────────────
+    // SECTION 5b — Live PCM 2× oversampling: frame count doubles, finite, continuous
+    // ─────────────────────────────────────────────────────────────────────
+    var live2x = OutputConditioningParameters()
+    live2x.isEnabled = true
+    live2x.outputMode = .pcmOversampling
+    live2x.oversamplingFactor = 2
+    let out2x = processLiveCopy(engine: engine, settings: live2x,
+                                input: sine44, inputFrames: inputFrames)
+    // Output is exactly 2× the input frame count (interleaved stereo: frames·2·2).
+    try check(out2x.count == inputFrames * 2 * 2,
+              "Live 2× output length \(out2x.count) != \(inputFrames * 2 * 2).")
+    for value in out2x where !value.isFinite {
+        try check(false, "Live 2× non-finite output \(value).")
+    }
+    // It is a genuine 2× rate change, not an identity-length copy.
+    try check(out2x.count != sine44.count,
+              "Live 2× produced an identity-length output — it must double the frame count.")
+
+    // State reset leaves the path finite and well-formed.
+    engine.resetAll()
+    let out2xAfterReset = processLiveCopy(engine: engine, settings: live2x,
+                                          input: sine44, inputFrames: inputFrames)
+    try check(out2xAfterReset.count == inputFrames * 2 * 2,
+              "Live 2× post-reset length \(out2xAfterReset.count) mismatch.")
+    for value in out2xAfterReset where !value.isFinite {
+        try check(false, "Live 2× post-reset non-finite \(value).")
+    }
+
+    // Block-split continuity: two consecutive half-blocks (no reset between them)
+    // must match the whole-block output in steady state — the FIR history carries
+    // across calls, so splitting must not change the result.
+    engine.resetAll()
+    let whole2x = processLiveCopy(engine: engine, settings: live2x,
+                                  input: sine44, inputFrames: inputFrames)
+    engine.resetAll()
+    let half = inputFrames / 2
+    var aHalf = [Float](repeating: 0, count: half * 2)
+    var bHalf = [Float](repeating: 0, count: half * 2)
+    for i in 0..<(half * 2) { aHalf[i] = sine44[i] }
+    for i in 0..<(half * 2) { bHalf[i] = sine44[half * 2 + i] }
+    let partA2x = processLiveCopy(engine: engine, settings: live2x,
+                                  input: aHalf, inputFrames: half)
+    let partB2x = processLiveCopy(engine: engine, settings: live2x,
+                                  input: bHalf, inputFrames: half)
+    try check(partA2x.count == half * 2 * 2 && partB2x.count == half * 2 * 2,
+              "Live 2× split length mismatch: \(partA2x.count), \(partB2x.count).")
+    let joined2x = partA2x + partB2x
+    try check(joined2x.count == whole2x.count,
+              "Live 2× split-join length \(joined2x.count) != whole \(whole2x.count).")
+    // Compare past the startup transient (taps·2 output frames per channel).
+    let transient = ResamplingFilterMode.linearPhaseShort.tapsPerPhase * 2 * 2
+    var maxDelta: Float = 0
+    for i in (transient..<whole2x.count) {
+        maxDelta = max(maxDelta, abs(joined2x[i] - whole2x[i]))
+    }
+    try check(maxDelta < 1e-5,
+              "Live 2× block-split delta \(maxDelta) exceeds tolerance (history broken).")
 
     // ─────────────────────────────────────────────────────────────────────
     // SECTION 6 — Headroom gain accuracy (-3 dB ≈ 0.7079)
@@ -384,19 +439,32 @@ func runOutputConditioningChecks() throws {
               "Unknown/unsupported DAC must report no DSD family attemptable (UI disables DSD → PCM fallback).")
 
     // ─────────────────────────────────────────────────────────────────────
-    // SECTION 12 — Real-time structure: processLive is stateless identity
+    // SECTION 12 — Real-time structure: bypass copies verbatim; 2× is deterministic
     // ─────────────────────────────────────────────────────────────────────
-    // 200 consecutive calls must leave the buffer bit-identical. This is the
-    // structural proof that the live audio callback path performs no work.
-    var live = sine44
-    let liveSnapshot = live
-    for _ in 0..<200 {
-        live.withUnsafeMutableBufferPointer { ptr in
-            _ = engine.processLive(interleaved: ptr.baseAddress!, frames: inputFrames)
+    // The bypass path is a plain copy — output equals input every call. The 2×
+    // path is deterministic given a fixed state: two runs from a reset state on
+    // the same input must be bit-identical (no hidden nondeterminism).
+    engine.updateSettings(OutputConditioningParameters())  // bypass
+    var bypassOut = [Float](repeating: 0, count: inputFrames * 2 * 2)
+    let bypassFrames = sine44.withUnsafeBufferPointer { ip in
+        bypassOut.withUnsafeMutableBufferPointer { op in
+            engine.processLive(input: ip.baseAddress!, inputFrames: inputFrames,
+                               output: op.baseAddress!)
         }
     }
-    try check(live == liveSnapshot,
-              "processLive mutated the buffer — it must be a stateless identity bypass.")
+    try check(bypassFrames == inputFrames,
+              "Bypass processLive returned \(bypassFrames) frames, expected \(inputFrames).")
+    try check(Array(bypassOut.prefix(inputFrames * 2)) == sine44,
+              "Bypass processLive did not copy the input verbatim.")
+
+    engine.resetAll()
+    let run1 = processLiveCopy(engine: engine, settings: live2x,
+                               input: sine44, inputFrames: inputFrames)
+    engine.resetAll()
+    let run2 = processLiveCopy(engine: engine, settings: live2x,
+                               input: sine44, inputFrames: inputFrames)
+    try check(run1 == run2,
+              "Live 2× is not deterministic across identical reset runs (hidden nondeterminism).")
 
     // ─────────────────────────────────────────────────────────────────────
     // Benchmark (informational; offline only — never runs on the audio thread)
@@ -412,9 +480,10 @@ func runOutputConditioningChecks() throws {
 
     print("Output conditioning checks passed: resampler finite (44.1k/48k × 1/10/18/20k × 2/4/8 "
           + "+ near-Nyquist + swept), DC unity + passband + impulse, vDSP==direct, "
-          + "bypass==disabled, headroom, block continuity 2/4/8, DSD stable (DC/sine/silence/"
-          + "clipped, 1st+2nd order, overload guard verified to fire), DoP interleave+markers, "
-          + "carrier math, capability gating, live identity, image rejection.")
+          + "bypass==identity (disabled/bypass/dither/4x/8x), live PCM 2× frame-doubling + finite "
+          + "+ deterministic + block-split continuity, headroom, offline block continuity 2/4/8, "
+          + "DSD stable (DC/sine/silence/clipped, 1st+2nd order, overload guard verified to fire), "
+          + "DoP interleave+markers, carrier math, capability gating, image rejection.")
 }
 
 // MARK: - Signal generators
@@ -540,11 +609,16 @@ private func processLiveCopy(engine: ResamplingOutputConditioningEngine,
                              input: [Float],
                              inputFrames: Int) -> [Float] {
     engine.updateSettings(settings)
-    var copy = input
-    copy.withUnsafeMutableBufferPointer { ptr in
-        _ = engine.processLive(interleaved: ptr.baseAddress!, frames: inputFrames)
+    // 2× headroom so the buffer always holds the largest possible output.
+    var output = [Float](repeating: 0, count: inputFrames * 2 * 2)
+    let frames = input.withUnsafeBufferPointer { ip in
+        output.withUnsafeMutableBufferPointer { op in
+            engine.processLive(input: ip.baseAddress!,
+                               inputFrames: inputFrames,
+                               output: op.baseAddress!)
+        }
     }
-    return copy
+    return Array(output.prefix(frames * 2))
 }
 
 private func checkProcessLiveIdentity(engine: ResamplingOutputConditioningEngine,
@@ -552,14 +626,16 @@ private func checkProcessLiveIdentity(engine: ResamplingOutputConditioningEngine
                                       inputFrames: Int,
                                       enabled: Bool,
                                       mode: OutputConditioningMode,
+                                      factor: Int,
                                       label: String) throws {
     var params = OutputConditioningParameters()
     params.isEnabled = enabled
     params.outputMode = mode
+    params.oversamplingFactor = factor
     let result = processLiveCopy(engine: engine, settings: params,
                                  input: reference, inputFrames: inputFrames)
     try check(result == reference,
-              "processLive (\(label)) mutated the buffer — must be identity.")
+              "processLive (\(label)) was not identity — len \(result.count) vs \(reference.count).")
 }
 
 private func check(_ condition: Bool, _ message: String) throws {
