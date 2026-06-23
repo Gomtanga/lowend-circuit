@@ -38,3 +38,8 @@ private/
 .claude/todos/
 .claude/statsig/
 .claude/workflows/
+
+# Working / session artifacts
+.omo/
+.sisyphus/
+dist/

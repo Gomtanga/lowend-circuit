@@ -10,6 +10,19 @@ RESOURCES_DIR="$APP_DIR/Contents/Resources"
 SHADER_SOURCE="$PACKAGE_DIR/Shaders/SpectrumShaders.metal"
 ICON_SOURCE="$PACKAGE_DIR/Assets/LowEndNativeAudioIcon.icns"
 
+# Derive a build identity from git so every build is distinguishable even when
+# CFBundleShortVersionString is unchanged: commit count (monotonic/comparable),
+# short hash (+ -dirty for uncommitted changes), and UTC build time. These are
+# injected into Info.plist and shown in the Settings page.
+BUILD_NUMBER=$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 0)
+GIT_COMMIT=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
+GIT_DIRTY=""
+if ! git -C "$ROOT" diff --quiet HEAD 2>/dev/null; then
+    GIT_DIRTY="-dirty"
+fi
+BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILD_ID="${GIT_COMMIT}${GIT_DIRTY} · ${BUILD_DATE}"
+
 swift build \
     --package-path "$PACKAGE_DIR" \
     -c release \
@@ -31,7 +44,7 @@ cp "$BUILD_DIR/.build/release/SystemAudioProcessor" "$MACOS_DIR/LowEnd Native Au
 cp "$SHADER_SOURCE" "$RESOURCES_DIR/SpectrumShaders.metal"
 cp "$ICON_SOURCE" "$RESOURCES_DIR/LowEndNativeAudioIcon.icns"
 
-cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -52,7 +65,13 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
     <key>CFBundleShortVersionString</key>
     <string>0.2.7</string>
     <key>CFBundleVersion</key>
-    <string>9</string>
+    <string>${BUILD_NUMBER}</string>
+    <key>LCBuildCommit</key>
+    <string>${GIT_COMMIT}${GIT_DIRTY}</string>
+    <key>LCBuildDate</key>
+    <string>${BUILD_DATE}</string>
+    <key>LCBuildID</key>
+    <string>${BUILD_ID}</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.4</string>
     <key>NSAudioCaptureUsageDescription</key>
