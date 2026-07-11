@@ -45,7 +45,7 @@ typedef struct {
     float virtualFeedbackGain;
     float bodyInjectionGain;
     float circuitHeadroomGain;
-    float drive;
+    float circuitMakeupGain;
     float wetMix;
     float bassAlpha;
     float subAlpha;

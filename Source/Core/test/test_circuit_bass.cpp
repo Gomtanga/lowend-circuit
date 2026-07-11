@@ -215,6 +215,44 @@ static void test_body_effect() {
     TEST("high body changes output", std::fabs(lLow - lHigh) > 0.001f);
 }
 
+// ============================================================
+// 10. High controls retain headroom
+//     A hot low-frequency signal must not spend sustained time at the final
+//     hard clamp, which is heard as broadband crackle on bass transients.
+// ============================================================
+static void test_high_control_headroom() {
+    constexpr float sampleRate = 48000.0f;
+    constexpr float frequency = 55.0f;
+    constexpr float amplitude = 0.95f;
+    constexpr int frameCount = 48000;
+    const float levels[] = { 50.0f, 75.0f, 100.0f };
+
+    for (float level : levels) {
+        auto settings = lowend::DSPPrecompute::makeDSPSettings(
+            sampleRate, level, level, 0.0f, 1);
+        lowend::CircuitBass cb;
+        cb.update(settings);
+
+        int clampedSamples = 0;
+        bool finite = true;
+        for (int i = 0; i < frameCount; ++i) {
+            float input = amplitude * std::sin(
+                2.0f * 3.14159265358979323846f * frequency
+                * static_cast<float>(i) / sampleRate);
+            float left = 0.0f, right = 0.0f;
+            cb.process(input, input, left, right);
+            finite = finite && std::isfinite(left) && std::isfinite(right);
+            if (std::fabs(left) >= 0.9999f || std::fabs(right) >= 0.9999f) {
+                ++clampedSamples;
+            }
+        }
+
+        TEST("high-control output remains finite", finite);
+        TEST("high-control output avoids sustained hard clipping",
+             clampedSamples < frameCount / 1000);
+    }
+}
+
 int main() {
     std::printf("=== CircuitBass Golden Tests ===\n\n");
 
@@ -227,6 +265,7 @@ int main() {
     test_stability();
     test_sample_rate_dependence();
     test_body_effect();
+    test_high_control_headroom();
 
     std::printf("\n%d tests, %d failures\n", tests, failures);
     return failures > 0 ? 1 : 0;

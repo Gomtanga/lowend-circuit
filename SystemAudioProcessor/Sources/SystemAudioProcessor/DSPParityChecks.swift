@@ -160,7 +160,7 @@ private func settingsValues(_ settings: LCDSPSettings) -> [Float] {
         settings.virtualFeedbackGain,
         settings.bodyInjectionGain,
         settings.circuitHeadroomGain,
-        settings.drive,
+        settings.circuitMakeupGain,
         settings.wetMix,
         settings.bassAlpha,
         settings.subAlpha,
