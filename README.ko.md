@@ -28,9 +28,9 @@ LowEnd Circuit는 저역 보강, 배음 생성, 헤드폰 공간음향, 실시�
 
 | 플랫폼 | 파일 | 용도 |
 | --- | --- | --- |
-| macOS 14.4 이상 | `LowEnd-Native-Audio-macOS-v0.2.8.zip` | 전체 시스템 및 특정 앱 처리 |
-| Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.8.zip` | 일반 데스크톱 오디오 앱 |
-| Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.8.zip` | DAW/플러그인 호스트 |
+| macOS 14.4 이상 | `LowEnd-Native-Audio-macOS-v0.2.9.zip` | 전체 시스템 및 특정 앱 처리 |
+| Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.9.zip` | 일반 데스크톱 오디오 앱 |
+| Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.9.zip` | DAW/플러그인 호스트 |
 
 > **Windows Native System Audio Processor**: macOS Native 앱의 전체 시스템 및
 > 특정 앱 오디오 처리 기능은 Windows에서 아직 지원되지 않습니다. Windows
@@ -46,7 +46,7 @@ macOS 릴리스는 임시 서명되어 있으며 Apple 공증을 받지 않았�
 
 ### macOS LowEnd Native Audio
 
-현재 `v0.2.8` 릴리스 최소 사양:
+현재 `v0.2.9` 릴리스 최소 사양:
 
 - macOS 14.4 이상
 - Apple Silicon Mac (`arm64`), M1 이상
@@ -64,7 +64,7 @@ Apple M5 테스트 환경에서는 FFT, Metal, SwiftUI 최적화 후 Analysis �
 사용률이 한 자릿수 범위로 측정됐습니다. 이는 참고 결과이며 장치, 샘플레이트,
 재생 환경에 따라 동일한 성능을 보장하는 수치는 아닙니다.
 
-현재 배포 중인 macOS `v0.2.8` 바이너리는 arm64 전용입니다. 해당 ZIP은 Intel
+현재 배포 중인 macOS `v0.2.9` 바이너리는 arm64 전용입니다. 해당 ZIP은 Intel
 Mac을 지원하지 않습니다.
 
 ### Windows Standalone 및 VST3
@@ -78,7 +78,7 @@ Windows 빌드에는 전체 시스템 및 특정 앱 Native 캡처 기능이 포
 
 ## macOS Native 앱 빠른 시작
 
-1. `LowEnd-Native-Audio-macOS-v0.2.8.zip`의 압축을 풉니다.
+1. `LowEnd-Native-Audio-macOS-v0.2.9.zip`의 압축을 풉니다.
 2. `LowEnd Native Audio.app`을 응용 프로그램 폴더로 옮깁니다.
 3. 앱을 실행하고 macOS가 요청하는 시스템 오디오 녹음 권한을 허용합니다.
 4. `Circuit`, `HighExciter`, `Clean` 중 모델을 선택합니다.
@@ -97,7 +97,7 @@ ID를 확인할 수 있습니다. 일치하는 Core Audio 프로세스를 찾지
 
 ### Standalone
 
-1. `LowEnd-Circuit-Standalone-Windows-v0.2.8.zip`의 압축을 풉니다.
+1. `LowEnd-Circuit-Standalone-Windows-v0.2.9.zip`의 압축을 풉니다.
 2. `LowEnd Circuit.exe`를 일반 데스크톱 오디오 앱으로 실행합니다.
 3. JUCE 설정 패널에서 오디오 입력/출력 장치를 선택합니다.
 4. `LowEnd`, `Body`, `Output` 슬라이더를 조절합니다.
@@ -107,7 +107,7 @@ ID를 확인할 수 있습니다. 일치하는 Core Audio 프로세스를 찾지
 
 ### VST3
 
-1. `LowEnd-Circuit-VST3-Windows-v0.2.8.zip`의 압축을 풉니다.
+1. `LowEnd-Circuit-VST3-Windows-v0.2.9.zip`의 압축을 풉니다.
 2. `LowEnd Circuit.vst3` 폴더를 VST3 플러그인 디렉터리에 복사합니다:
    ```
    C:\Program Files\Common Files\VST3
@@ -282,11 +282,25 @@ Lock-free SPSC 제어 큐로 전달되고, 콜백은 최신 패킷을 꺼내 필
 채 필드 대입만 수행합니다. 오디오 출력과 비주얼라이저는 서로 분리된 Lock-free
 링 버퍼를 사용합니다.
 
-### v0.2.8 개발 상태
+### v0.2.9 개발 상태
 
-`v0.2.8`은 `v0.2.7` 출력 컨디셔닝 엔진 위에 실험적 **라이브 PCM 2× 출력 컨디셔닝**과
-읽기 전용 **진단/상태 패널**을 추가하며, 기존 DSP 음색과 사이드바 UI, 자동 DAC
-레이트 전환의 안정성을 유지합니다.
+`v0.2.9`는 `v0.2.8`의 라이브 PCM 출력 컨디셔닝 및 진단 구조를 유지하면서,
+Circuit 모델의 높은 LowEnd·Body 설정에서 발생하던 지속적인 하드 클리핑을
+수정합니다.
+
+- Low-shelf, Body 주입, Virtual feedback의 합산 이득으로 Circuit 헤드룸을
+  계산합니다.
+- Transformer 포화 분기뿐 아니라 최종 shaped blend 전체에 헤드룸을 적용합니다.
+- 최대 3 dB의 제한된 자동 makeup gain으로 체감 음량 감소를 완화합니다.
+- Full scale 부근의 갑작스러운 하드 클리핑 대신 연속적인 soft-knee 피크 보호를
+  적용해 저역 트랜지언트의 거친 광대역 왜곡을 줄입니다.
+- Swift Native와 공통 C++ Core의 설정 및 처리식을 동일하게 유지하고
+  44.1/48/96/192/768 kHz에서 parity를 검증했습니다.
+- 0으로 반올림되는 dB 값이 `-0.0 dB`로 표시되지 않도록 정리했습니다.
+- 실시간 콜백의 무할당, 무락, 무로그, 계수 및 초월함수 계산 금지 원칙은
+  그대로 유지됩니다.
+
+기존 자동 DAC rate 전환 보호 구조도 변경 없이 유지됩니다.
 
 - 자동 전환을 fade, 정지, 장치 rate 변경, 재구축, 흐름 검증, fade-in의
   명시적인 상태 순서로 처리합니다.

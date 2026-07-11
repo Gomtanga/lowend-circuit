@@ -157,8 +157,21 @@ LCDSPSettings DSPPrecompute::makeDSPSettings(float sampleRate,
     s.warmthAmount = 0.008f * normalIntensity + 0.004f * normalBody;
     s.virtualFeedbackGain = 0.16f * normalIntensity;
     s.bodyInjectionGain = (0.46f + 0.06f * normalIntensity) * normalBody;
-    s.circuitHeadroomGain = std::pow(10.0f, (-1.2f * normalIntensity - 0.4f * normalBody) / 20.0f);
-    s.drive = 1.0f + 0.10f * normalIntensity + 0.04f * normalBody;
+    // Reserve enough headroom for the summed low-shelf, body injection and
+    // feedback paths before they reach the transformer stage.  The previous
+    // fixed -1.6 dB maximum only protected the saturation branch; the shaped
+    // blend could still hit the final hard clamp at moderate control values.
+    const float shelfLinearGain = std::pow(10.0f, shelfDb / 20.0f);
+    const float estimatedCircuitGain = shelfLinearGain
+        + s.bodyInjectionGain
+        + s.virtualFeedbackGain;
+    s.circuitHeadroomGain = 1.0f / std::fmax(estimatedCircuitGain, 1.0f);
+    // Restore part of the perceived loudness lost to conservative headroom,
+    // capped at +3 dB so transient protection remains occasional rather than
+    // becoming a permanent limiter.
+    s.circuitMakeupGain = std::fmin(
+        std::sqrt(std::fmax(estimatedCircuitGain, 1.0f)),
+        1.4125376f);
     s.wetMix = std::fmin(std::fmax(0.32f * normalIntensity + 0.18f * normalBody, 0.0f), 0.54f);
     s.bassAlpha = OnePole::makeRcAlpha(sampleRate, 72.0f + normalIntensity * 36.0f);
     s.subAlpha = OnePole::makeRcAlpha(sampleRate, 38.0f + normalBody * 26.0f);

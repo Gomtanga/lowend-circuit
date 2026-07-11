@@ -173,7 +173,7 @@ private struct DynamicsMeterView: View {
                         .foregroundStyle(Color(red: 0.58, green: 0.62, blue: 0.68))
                 }
                 Spacer(minLength: 8)
-                Text(String(format: "%.1f dB", model.levels.crestFactor))
+                Text(formatDbText(model.levels.crestFactor))
                     .font(.system(size: 30, weight: .heavy, design: .monospaced))
                     .foregroundStyle(Color(red: 0.96, green: 0.75, blue: 0.31))
                     .lineLimit(1)
@@ -208,7 +208,7 @@ private struct DynamicsMeterView: View {
             }
             .frame(height: showValue ? 14 : 6)
             if showValue {
-                Text(String(format: "%.1f dB", db))
+                Text(formatDbText(db))
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white)
                     .frame(width: 72, alignment: .trailing)
@@ -740,6 +740,21 @@ private func check(_ status: OSStatus, _ label: String) throws {
 
 private func clamp(_ value: Float, _ lower: Float, _ upper: Float) -> Float {
     min(max(value, lower), upper)
+}
+
+/// Format a dB value to one decimal place, collapsing negative zero so that a
+/// value which rounds to zero renders as "0.0 dB" instead of "-0.0 dB". This
+/// matters for sliders that span 0 (e.g. Output -18…+6, headroom -12…0): a
+/// reading like -0.04 would otherwise print "-0.0 dB" alongside "0.0 dB".
+/// Display-only — the gain path (pow(10, db/20)) is unaffected.
+private func formatDbText(_ db: Double) -> String {
+    let tenths = (db * 10).rounded(.toNearestOrAwayFromZero)
+    let normalized = tenths == 0 ? 0.0 : tenths / 10
+    return String(format: "%.1f dB", normalized)
+}
+
+private func formatDbText(_ db: Float) -> String {
+    formatDbText(Double(db))
 }
 
 private func parseArguments() throws -> Settings {
@@ -2029,7 +2044,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         outputConditioningHeadroomSlider.autoresizingMask = [.minYMargin, .width]
         page.addSubview(outputConditioningHeadroomSlider)
         outputConditioningHeadroomValueLabel = makeLabel(
-            String(format: "%.1f dB", outputConditioningHeadroomDB),
+            formatDbText(outputConditioningHeadroomDB),
             size: 12, weight: .regular
         )
         outputConditioningHeadroomValueLabel.alignment = .right
@@ -2310,7 +2325,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     @objc private func outputConditioningHeadroomChanged() {
         outputConditioningHeadroomDB = Double(outputConditioningHeadroomSlider.doubleValue)
         UserDefaults.standard.set(outputConditioningHeadroomDB, forKey: "outputConditioningHeadroomDB")
-        outputConditioningHeadroomValueLabel.stringValue = String(format: "%.1f dB", outputConditioningHeadroomDB)
+        outputConditioningHeadroomValueLabel.stringValue = formatDbText(outputConditioningHeadroomDB)
         pushOutputConditioningSettings()
     }
 
@@ -2900,7 +2915,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         case .circuit:
             intensityValueLabel.stringValue = "\(Int(intensitySlider.doubleValue.rounded()))%"
             bodyValueLabel.stringValue = "\(Int(bodySlider.doubleValue.rounded()))%"
-            outputValueLabel.stringValue = String(format: "%.1f dB", outputSlider.doubleValue)
+            outputValueLabel.stringValue = formatDbText(outputSlider.doubleValue)
         case .highExciter:
             intensityValueLabel.stringValue = String(format: "%.2f", intensitySlider.doubleValue / 100)
             bodyValueLabel.stringValue = String(format: "%.2f", bodySlider.doubleValue / 100)
@@ -3563,6 +3578,13 @@ enum DSPPrecompute {
         let butterworthQ1: Float = 0.5411961
         let butterworthQ2: Float = 1.306563
 
+        let bodyInjectionGain = (0.46 + 0.06 * normalIntensity) * normalBody
+        let virtualFeedbackGain = 0.16 * normalIntensity
+        let shelfLinearGain = pow(10, shelfDb / 20)
+        let estimatedCircuitGain = shelfLinearGain + bodyInjectionGain + virtualFeedbackGain
+        let circuitHeadroomGain: Float = 1 / max(estimatedCircuitGain, 1)
+        let circuitMakeupGain = min(sqrt(max(estimatedCircuitGain, 1)), 1.4125376)
+
         return LCDSPSettings(
             intensity: normalIntensity,
             body: normalBody,
@@ -3571,10 +3593,10 @@ enum DSPPrecompute {
             dspModel: dspModel.controlID,
             shelf: makeLowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb),
             warmthAmount: 0.008 * normalIntensity + 0.004 * normalBody,
-            virtualFeedbackGain: 0.16 * normalIntensity,
-            bodyInjectionGain: (0.46 + 0.06 * normalIntensity) * normalBody,
-            circuitHeadroomGain: pow(10, (-1.2 * normalIntensity - 0.4 * normalBody) / 20),
-            drive: 1 + 0.10 * normalIntensity + 0.04 * normalBody,
+            virtualFeedbackGain: virtualFeedbackGain,
+            bodyInjectionGain: bodyInjectionGain,
+            circuitHeadroomGain: circuitHeadroomGain,
+            circuitMakeupGain: circuitMakeupGain,
             wetMix: min(max(0.32 * normalIntensity + 0.18 * normalBody, 0), 0.54),
             bassAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 72 + normalIntensity * 36),
             subAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 38 + normalBody * 26),
@@ -3911,6 +3933,7 @@ final class VirtualCircuitBassDSP: BassProcessor {
         private var virtualFeedbackGain: Float = 0
         private var bodyInjectionGain: Float = 0
         private var headroomGain: Float = 1
+        private var makeupGain: Float = 1
         private var wetMix: Float = 0
         private var transformerDrive: Float = 1
         private var transformerAsymmetry: Float = 0
@@ -3936,6 +3959,7 @@ final class VirtualCircuitBassDSP: BassProcessor {
             self.virtualFeedbackGain = settings.virtualFeedbackGain
             self.bodyInjectionGain = settings.bodyInjectionGain
             self.headroomGain = settings.circuitHeadroomGain
+            self.makeupGain = settings.circuitMakeupGain
             self.wetMix = settings.wetMix
             self.transformerDrive = settings.transformerDrive
             self.transformerAsymmetry = settings.transformerAsymmetry
@@ -3965,12 +3989,13 @@ final class VirtualCircuitBassDSP: BassProcessor {
             let bassNode = bassPole.process(input)
             let subNode = subPole.process(input)
             let shaped = bassShaped + subNode * bodyInjectionGain
-            let circuitInput = (shaped + bassNode * virtualFeedbackGain) * headroomGain
+            let headroomShaped = shaped * headroomGain
+            let circuitInput = headroomShaped + bassNode * virtualFeedbackGain * headroomGain
             let emphasized = preEmphasis.process(circuitInput)
             let saturated = asymmetricSaturate(emphasized)
             let deEmphasized = deEmphasis.process(saturated)
-            let blended = shaped + (deEmphasized - shaped) * wetMix
-            return fastClamp(blended * outputGain)
+            let blended = headroomShaped + (deEmphasized - headroomShaped) * wetMix
+            return fastClamp(softProtect(blended * makeupGain * outputGain))
         }
 
         private func asymmetricSaturate(_ input: Float) -> Float {
@@ -3987,6 +4012,24 @@ final class VirtualCircuitBassDSP: BassProcessor {
             }
 
             return (clipped - transformerBiasOffset) * transformerMakeupGain
+        }
+
+        private func softProtect(_ input: Float) -> Float {
+            if !input.isFinite {
+                return 0
+            }
+
+            let magnitude = abs(input)
+            if magnitude <= 0.8 {
+                return input
+            }
+            if magnitude >= 1.2 {
+                return input < 0 ? -1 : 1
+            }
+
+            let t = (magnitude - 0.8) / 0.4
+            let curved = 0.8 + 0.2 * (2 * t - t * t)
+            return input < 0 ? -curved : curved
         }
 
         private func fastClamp(_ input: Float) -> Float {

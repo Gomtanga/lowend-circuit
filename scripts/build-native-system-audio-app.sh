@@ -63,7 +63,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.2.8</string>
+    <string>0.2.9</string>
     <key>CFBundleVersion</key>
     <string>${BUILD_NUMBER}</string>
     <key>LCBuildCommit</key>

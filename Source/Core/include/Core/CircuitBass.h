@@ -47,6 +47,7 @@ private:
         float virtualFeedbackGain = 0.0f;
         float bodyInjectionGain = 0.0f;
         float headroomGain = 1.0f;
+        float makeupGain = 1.0f;
         float wetMix = 0.0f;
         float transformerDrive = 1.0f;
         float transformerAsymmetry = 0.0f;
@@ -55,6 +56,7 @@ private:
 
         float processSample(float input);
         float asymmetricSaturate(float input) const;
+        static float softProtect(float value);
         static float fastClamp(float value);
     };
 

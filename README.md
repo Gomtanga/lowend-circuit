@@ -28,9 +28,9 @@ Get the latest binaries from
 
 | Platform | Download | Purpose |
 | --- | --- | --- |
-| macOS 14.4+ | `LowEnd-Native-Audio-macOS-v0.2.8.zip` | Whole-system and per-app processing |
-| Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.8.zip` | Normal desktop audio application |
-| Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.8.zip` | DAW/plugin-host use |
+| macOS 14.4+ | `LowEnd-Native-Audio-macOS-v0.2.9.zip` | Whole-system and per-app processing |
+| Windows x64 | `LowEnd-Circuit-Standalone-Windows-v0.2.9.zip` | Normal desktop audio application |
+| Windows x64 | `LowEnd-Circuit-VST3-Windows-v0.2.9.zip` | DAW/plugin-host use |
 
 > **Windows Native System Audio Processor**: The system-wide and per-application
 > audio processing features available in the macOS Native app are not yet
@@ -46,7 +46,7 @@ also request system-audio recording permission when capture starts.
 
 ### LowEnd Native Audio for macOS
 
-Current `v0.2.8` release:
+Current `v0.2.9` release:
 
 - macOS 14.4 or newer
 - Apple Silicon Mac (`arm64`); M1 or newer
@@ -64,7 +64,7 @@ An Apple M5 test system kept Analysis-mode CPU use in the single-digit range
 after the FFT, Metal, and SwiftUI optimizations. This is a reference result,
 not a guaranteed benchmark for every device, sample rate, or audio workload.
 
-The downloadable macOS `v0.2.8` binary is arm64-only. Intel Macs are not
+The downloadable macOS `v0.2.9` binary is arm64-only. Intel Macs are not
 supported by that archive.
 
 ### Windows Standalone and VST3
@@ -78,7 +78,7 @@ Windows builds do not include native whole-system or per-application capture.
 
 ## Quick Start: macOS Native App
 
-1. Extract `LowEnd-Native-Audio-macOS-v0.2.8.zip`.
+1. Extract `LowEnd-Native-Audio-macOS-v0.2.9.zip`.
 2. Move `LowEnd Native Audio.app` to Applications.
 3. Open the app and allow system-audio recording when macOS asks.
 4. Select `Circuit`, `HighExciter`, or `Clean`.
@@ -97,7 +97,7 @@ and apply the target again.
 
 ### Standalone
 
-1. Extract `LowEnd-Circuit-Standalone-Windows-v0.2.8.zip`.
+1. Extract `LowEnd-Circuit-Standalone-Windows-v0.2.9.zip`.
 2. Run `LowEnd Circuit.exe` as a normal desktop audio application.
 3. Select your audio input and output device in the JUCE settings panel.
 4. Adjust `LowEnd`, `Body`, and `Output` sliders.
@@ -107,7 +107,7 @@ and apply the target again.
 
 ### VST3
 
-1. Extract `LowEnd-Circuit-VST3-Windows-v0.2.8.zip`.
+1. Extract `LowEnd-Circuit-VST3-Windows-v0.2.9.zip`.
 2. Copy the `LowEnd Circuit.vst3` folder to your VST3 plugin directory,
    usually:
    ```
@@ -287,12 +287,26 @@ drains the latest packet and performs assignment-only DSP updates while
 preserving filter state. Audio and visualizer samples use separate lock-free
 ring buffers.
 
-### Development Status in v0.2.8
+### Development Status in v0.2.9
 
-The `v0.2.8` line adds experimental **live PCM 2× output conditioning** and a
-read-only **Diagnostics/Status panel** on top of the `v0.2.7` output-conditioning
-engine, while keeping the DSP voicing, the compact sidebar UI, and the
-stabilized automatic DAC rate transitions:
+The `v0.2.9` line fixes sustained hard clipping in the Circuit model at high
+LowEnd and Body settings while retaining the `v0.2.8` live PCM output
+conditioning and diagnostics infrastructure:
+
+- Circuit headroom is derived from the combined low-shelf, Body injection,
+  and virtual-feedback gain instead of a small fixed attenuation
+- the headroom now covers the complete shaped blend, not only the transformer
+  saturation branch
+- a bounded automatic makeup stage restores up to 3 dB of perceived level
+- a continuous soft-knee peak protector replaces abrupt clipping near full
+  scale, reducing harsh broadband distortion on bass transients
+- Swift Native and the portable C++ Core use matching settings and processing
+  equations, verified at 44.1/48/96/192/768 kHz
+- dB readouts normalize values that round to zero, avoiding `-0.0 dB`
+- the real-time callback remains allocation-free, lock-free, log-free, and
+  free of coefficient or transcendental calculations
+
+The established automatic DAC rate-transition safeguards remain unchanged:
 
 - automatic transitions use an explicit fade, stop, device-rate change,
   rebuild, flow-verification, and fade-in state sequence
