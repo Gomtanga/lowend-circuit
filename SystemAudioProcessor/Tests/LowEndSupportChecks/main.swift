@@ -331,6 +331,98 @@ require(
     "missing TIDAL player evidence must preserve the fallback path"
 )
 
+// Real TIDAL transitions can publish the new active state a few milliseconds
+// before CoreaudioSink::open. The parser must still associate the later sink
+// format with the currently active track.
+let tidalActiveBeforeSinkEntries = [
+    SourceFormatLogEntry(
+        date: now,
+        message: #"SIGNAL: {"signal": "media.state", "state": "completed"}"#
+    ),
+    SourceFormatLogEntry(
+        date: now.addingTimeInterval(0.001),
+        message: #"SIGNAL: {"signal": "media.state", "state": "active"}"#
+    ),
+    SourceFormatLogEntry(
+        date: now.addingTimeInterval(0.002),
+        message: "CoreaudioSink::open, rate: 192000, type: int24"
+    )
+]
+let tidalActiveBeforeSink = SourceFormatParser.parseTIDALPlayerLog(
+    entries: tidalActiveBeforeSinkEntries,
+    observedAt: now.addingTimeInterval(0.003)
+)
+require(
+    tidalActiveBeforeSink?.sampleRate == 192_000,
+    "TIDAL active-before-sink transition must publish the new sample rate"
+)
+require(
+    tidalActiveBeforeSink?.bitDepth == 24,
+    "TIDAL active-before-sink transition must publish the new bit depth"
+)
+
+// Gapless same-rate transitions do not always reopen CoreAudio. Retaining the
+// latest sink format is correct once the new track reports active.
+let tidalSameRateGaplessEntries = [
+    SourceFormatLogEntry(
+        date: now,
+        message: "CoreaudioSink::open, rate: 96000, type: int24"
+    ),
+    SourceFormatLogEntry(
+        date: now.addingTimeInterval(0.001),
+        message: #"SIGNAL: {"signal": "media.state", "state": "active"}"#
+    ),
+    SourceFormatLogEntry(
+        date: now.addingTimeInterval(1),
+        message: #"SIGNAL: {"signal": "media.state", "state": "completed"}"#
+    ),
+    SourceFormatLogEntry(
+        date: now.addingTimeInterval(1.001),
+        message: #"SIGNAL: {"signal": "media.state", "state": "active"}"#
+    )
+]
+require(
+    SourceFormatParser.parseTIDALPlayerLog(entries: tidalSameRateGaplessEntries)?.sampleRate
+        == 96_000,
+    "gapless same-rate TIDAL transition must retain the active sink format"
+)
+
+// TIDAL occasionally omits media.state=active after starting Core Audio. The
+// sink start itself is sufficient proof that the newly opened format is live.
+let tidalMissingActiveEntries = [
+    SourceFormatLogEntry(
+        date: now,
+        message: #"SIGNAL: {"signal": "media.state", "state": "paused"}"#
+    ),
+    SourceFormatLogEntry(
+        date: now.addingTimeInterval(0.001),
+        message: "CoreaudioSink::open, rate: 44100, type: int16"
+    ),
+    SourceFormatLogEntry(
+        date: now.addingTimeInterval(0.002),
+        message: "CoreaudioSink::start"
+    )
+]
+let tidalMissingActive = SourceFormatParser.parseTIDALPlayerLog(
+    entries: tidalMissingActiveEntries,
+    observedAt: now.addingTimeInterval(0.003)
+)
+require(
+    tidalMissingActive?.sampleRate == 44_100 && tidalMissingActive?.bitDepth == 16,
+    "TIDAL sink start must activate a format when media.state=active is missing"
+)
+
+let tidalClosedSinkEntries = tidalMissingActiveEntries + [
+    SourceFormatLogEntry(
+        date: now.addingTimeInterval(0.004),
+        message: "CoreaudioSink::close"
+    )
+]
+require(
+    SourceFormatParser.parseTIDALPlayerLogResult(entries: tidalClosedSinkEntries) == .inactive,
+    "TIDAL sink close must invalidate playback when no later start exists"
+)
+
 let newerOutputEntry = SourceFormatLogEntry(
     date: now.addingTimeInterval(2),
     message: "device sampleRate = 96000, 32-bit Float"

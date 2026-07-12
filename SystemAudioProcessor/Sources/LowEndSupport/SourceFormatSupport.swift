@@ -174,6 +174,16 @@ public enum SourceFormatParser {
                 latestFormat = (sampleRate, bitDepth)
             }
 
+            // Some TIDAL Desktop builds omit the final media.state=active
+            // signal after a track switch even though Core Audio has already
+            // started. Treat the sink lifecycle as authoritative playback
+            // evidence so a newly opened format is not held indefinitely.
+            if message.contains("CoreaudioSink::start") {
+                playbackIsActive = true
+            } else if message.contains("CoreaudioSink::close") {
+                playbackIsActive = false
+            }
+
             if message.contains(#""signal": "media.state""#) {
                 if message.contains(#""state": "active""#) {
                     playbackIsActive = true
