@@ -1,10 +1,7 @@
-# LowEnd Core — Cross-platform DSP Library
+# LowEnd Core — macOS DSP Library
 
-Cross-platform C++ DSP core shared by:
-
-- **macOS Native App** (SystemAudioProcessor/) — via ObjC++ bridging
-- **JUCE Plugin** (Source/) — via C++ include
-- **Windows Native App** (WindowsAdapter/, future) — via C++ include
+C++ DSP core used by the **macOS Native App** (`SystemAudioProcessor/`)
+via the `LowEndDSPCoreC` C bridge.
 
 ## Processing API
 
@@ -50,7 +47,7 @@ cd build && ctest --output-on-failure
 
 ## Design Rules
 
-- **float** only (no double) — matches both Swift and JUCE implementations
+- **float** only (no double) — matches the Swift implementation
 - **No heap allocation** after construction — realtime-safe
 - **Sample-rate-aware** — all coefficient generators take `sampleRate`
 - **No global state** — all instances are independent
