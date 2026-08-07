@@ -1,7 +1,7 @@
 // Core.h — Cross-platform DSP core umbrella header
 //
-// This header is the single entry point for the macOS Native App
-// (via the LowEndDSPCoreC C bridge) to use the shared DSP core.
+// This header is the single entry point for all platform adapters
+// (macOS Swift, JUCE C++, Windows C++) to use the shared DSP core.
 //
 // The C ABI types (LCBiquadCoefficients, LCDSPSettings, LCSpatialSettings,
 // LCSpatialPathSettings, LCControlEvent) come from AudioRingBufferC.h,

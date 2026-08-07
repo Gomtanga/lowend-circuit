@@ -11,7 +11,7 @@
   <img src="SystemAudioProcessor/Assets/LowEndNativeAudioIcon.png" width="180" alt="LowEnd Native Audio app icon">
 </p>
 
-LowEnd Circuit is an open-source audio DSP project for bass enhancement, high-frequency harmonic generation, headphone spatial processing, and real-time signal analysis. The repository includes a macOS system-audio application and a portable C++ DSP core (`Source/Core/`).
+LowEnd Circuit is an open-source audio DSP project for bass enhancement, high-frequency harmonic generation, headphone spatial processing, and real-time signal analysis. The repository includes a macOS system-audio application and JUCE Standalone and plugin targets for Windows and macOS.
 
 This is an original DSP design. It is not affiliated with or endorsed by any hardware or software manufacturer, and it does not claim to reproduce a third party's proprietary circuit.
 
@@ -24,13 +24,21 @@ The current macOS interface uses Korean control labels. This guide includes thei
 | What you want to do | Choose | Availability | Important detail |
 |---|---|---|---|
 | Process all Mac audio or one application | **LowEnd Native Audio** | Prebuilt macOS app | macOS 14.4 or newer; Apple Silicon only |
+| Use the effect in a Windows DAW | **LowEnd Circuit VST3** | Prebuilt Windows plugin | Requires a DAW or VST3 host |
+| Process a microphone, line, or virtual input on Windows | **LowEnd Circuit Standalone** | Prebuilt Windows app | Processes the selected input; does not capture system output by itself |
+| Use the effect in a macOS DAW | **LowEnd Circuit VST3 or AU** | Build from source | macOS plugin binaries are not included in the current release |
+| Capture all Windows system audio directly | Not supported | — | LowEnd Native Audio's Process Tap path is not available on Windows |
 
 The project is organized as follows:
 
 ```text
 LowEnd Circuit
-└─ LowEnd Native Audio
-   └─ System-wide or per-application processing on macOS
+├─ LowEnd Native Audio
+│  └─ System-wide or per-application processing on macOS
+└─ LowEnd Circuit JUCE
+   ├─ Standalone
+   ├─ VST3
+   └─ AU (source build on macOS)
 ```
 
 ## Download
@@ -42,6 +50,8 @@ The latest release is [v0.2.9](https://github.com/Gomtanga/lowend-circuit/releas
 | Platform | File | Purpose |
 |---|---|---|
 | macOS 14.4 or newer, Apple Silicon | [`LowEnd-Native-Audio-macOS-v0.2.9.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.9/LowEnd-Native-Audio-macOS-v0.2.9.zip) | System-wide or per-application processing |
+| Windows 10/11 x64 | [`LowEnd-Circuit-Standalone-Windows-v0.2.9.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.9/LowEnd-Circuit-Standalone-Windows-v0.2.9.zip) | Microphone, line, or virtual-input processing |
+| Windows 10/11 x64 | [`LowEnd-Circuit-VST3-Windows-v0.2.9.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.9/LowEnd-Circuit-VST3-Windows-v0.2.9.zip) | DAW or plugin host use |
 
 Previous versions are available from [GitHub Releases](https://github.com/Gomtanga/lowend-circuit/releases).
 
@@ -49,6 +59,8 @@ Previous versions are available from [GitHub Releases](https://github.com/Gomtan
 
 - The downloadable macOS build is `arm64` only. There is no Intel Mac binary.
 - The macOS app is signed ad hoc and is not notarized by Apple.
+- Windows releases contain only the Standalone and VST3 builds.
+- The source supports Standalone, VST3, and AU on macOS, but those macOS JUCE binaries are not included in the current release. [Build them from source](#build-from-source) if needed.
 
 ## Start in one minute
 
@@ -72,13 +84,33 @@ Press **중지 (Stop)** before changing the output device. If audio becomes sile
 
 The running-app list near the bottom of the window helps identify bundle IDs. Entering a main ID such as `com.tidal.desktop` also lets the app find an active child audio process. If no matching Core Audio process exists, start playback and apply the target again.
 
+### Windows: Standalone
+
+1. Extract the Standalone ZIP file.
+2. Run `LowEnd Circuit.exe`.
+3. Select the input and output devices in the JUCE settings panel.
+4. Adjust `LowEnd`, `Body`, and `Output`.
+
+Standalone processes a microphone, line input, or separately configured virtual or loopback input. It does not capture the sound currently playing across Windows by itself. Use VST3 when you want to process a DAW track.
+
+### Windows: VST3
+
+1. Extract the VST3 ZIP file.
+2. Copy the `LowEnd Circuit.vst3` folder to the usual VST3 location:
+
+   ```text
+   C:\Program Files\Common Files\VST3
+   ```
+
+3. Restart your DAW and load `LowEnd Circuit` as an audio effect.
+
 ## Core features
 
 | Feature | What it does | Available in |
 |---|---|---|
-| **Clean** | Bypasses model DSP and spatial processing for comparison with the unprocessed dry signal. | LowEnd Native Audio |
-| **Circuit** | Combines `LowEnd`, `Body`, a parallel wet path, asymmetric saturation, and output protection to shape bass weight and texture. | LowEnd Native Audio |
-| **HighExciter** | Generates harmonics from content above roughly 11 kHz and adapts nonlinear-stage oversampling to the sample rate. | LowEnd Native Audio |
+| **Clean** | Bypasses model DSP and spatial processing for comparison with the unprocessed dry signal. | LowEnd Native Audio, Standalone, plugins |
+| **Circuit** | Combines `LowEnd`, `Body`, a parallel wet path, asymmetric saturation, and output protection to shape bass weight and texture. | LowEnd Native Audio, Standalone, plugins |
+| **HighExciter** | Generates harmonics from content above roughly 11 kHz and adapts nonlinear-stage oversampling to the sample rate. | LowEnd Native Audio, Standalone, plugins |
 | **Spatial Stage** | Uses virtual-speaker width, listener position, distance gain, interaural timing, and crossfeed to shape headphone space. | LowEnd Native Audio |
 | **Analysis** | Displays a 16,384-point FFT, 128 spectrum bars, Peak, RMS, and Crest Factor. | LowEnd Native Audio |
 | **Source and Rate Match** | Conservatively derives source-format information from player metadata or logs and previews a matching DAC rate. | LowEnd Native Audio |
@@ -142,6 +174,7 @@ For gapless playback, leave Automatic Rate Match off and keep the DAC at a fixed
 - TIDAL provides no public source-format API. `Source` may remain `unknown` when the installed player emits no recognized message.
 - The Apple Music metadata fallback may request macOS Automation permission.
 - The target application's Core Audio output process must be active when per-application capture starts.
+- Windows has no native system-wide or per-application capture path.
 - The macOS app is not Developer ID signed or notarized by Apple.
 - Spatial Stage is not an individualized HRTF.
 
@@ -150,6 +183,7 @@ For gapless playback, leave Automatic Rate Match off and keep the DAC at a fixed
 | Target | Minimum | Recommended or additional condition |
 |---|---|---|
 | LowEnd Native Audio | macOS 14.4 or newer, Apple Silicon M1 or newer, 8 GB memory, Metal-capable GPU, roughly 100 MB free space | Apple M2 or newer and 16 GB memory for combined 96/192 kHz processing and Analysis |
+| Windows Standalone and VST3 | 64-bit Windows 10 or 11, four-core x64 processor, 8 GB memory | Compatible audio device, DAW, or plugin host |
 
 These requirements do not guarantee identical performance across every device, sample rate, and buffer size.
 
@@ -157,6 +191,7 @@ These requirements do not guarantee identical performance across every device, s
 
 | Document | Subject |
 |---|---|
+| [Using It on a Regular Computer](docs/general-computer-use.md) | Common Standalone routing |
 | [System-Wide and Per-App Use](docs/system-wide-and-per-app.md) | macOS system-wide and per-application processing |
 | [Rate Matching](docs/rate-matching.md) | Automatic sample-rate transitions and recovery |
 | [HighExciter Oversampling](docs/high-exciter-oversampling.md) | Factor policy, filters, and real-time constraints |
@@ -188,9 +223,29 @@ The following helpers can start system-wide or per-application modes from the co
 ./scripts/run-app-lowend.sh com.spotify.client
 ```
 
+### JUCE Standalone and plugins
+
+You need:
+
+- CMake 3.22 or newer
+- a C++17 toolchain
+- internet access during configuration to fetch JUCE 8.0.13 and CLI11 2.6.2
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
+```
+
+| Platform | Generated targets |
+|---|---|
+| Windows | Standalone, VST3 |
+| macOS | Standalone, VST3, AU |
+
+JUCE Standalone uses ordinary input and output device routing. It does not contain LowEnd Native Audio's Core Audio Process Tap system-capture path.
+
 ## Verification
 
-The repository CI checks the portable C++ Core, Swift support cases, Swift and C++ DSP parity, and the LowEnd Native Audio build separately. Run the commands that match your change.
+The repository CI checks the portable C++ Core, Swift support cases, Swift and C++ DSP parity, the LowEnd Native Audio build, and Windows JUCE builds separately. Run the commands that match your change.
 
 ```sh
 cmake -S Source/Core -B build/core-tests -DLOWEND_CORE_BUILD_TESTING=ON
@@ -216,7 +271,7 @@ Report bugs and feature requests in [GitHub Issues](https://github.com/Gomtanga/
 - input and output devices, including the DAC model
 - sample rate and buffer settings
 - selected model and preset
-- system-wide or per-application use
+- system-wide, per-application, Standalone, or plugin use
 - exclusive-mode and Automatic Rate Match state
 - reproduction steps and expected result
 - relevant logs or screenshots
@@ -228,6 +283,7 @@ When proposing a change, state the affected platform, the checks you ran, and an
 ## Repository layout
 
 ```text
+Source/                         JUCE plugin and Standalone sources
 Source/Core/                    Testable portable Circuit and HighExciter DSP
 SystemAudioProcessor/           Native macOS Swift and C engine
 SystemAudioProcessor/Shaders/   Metal spectrum shader
@@ -239,5 +295,7 @@ docs/                           Usage, design, and validation records
 ## License and third-party terms
 
 This repository is distributed under [GNU AGPL-3.0-or-later](LICENSE).
+
+JUCE is downloaded during configuration and remains subject to its own dual-license terms. Review the [JUCE license](https://juce.com/legal/juce-8-licence/) before redistributing binaries or using JUCE targets commercially.
 
 Third-party names and trademarks belong to their respective owners. The project does not use another company's product name as its brand or claim an exact emulation of a proprietary circuit.

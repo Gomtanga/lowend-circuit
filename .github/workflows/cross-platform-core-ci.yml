@@ -1,4 +1,4 @@
-name: Core CI
+name: Cross-Platform Core CI
 
 on:
   push:
@@ -7,7 +7,10 @@ on:
 
 jobs:
   portable-core:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -20,3 +23,18 @@ jobs:
 
       - name: Run Core tests
         run: ctest --test-dir build/core-tests -C Release --output-on-failure
+
+  windows-juce:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        shared_core: [OFF, ON]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure JUCE
+        run: cmake -S . -B build/juce -G "Visual Studio 17 2022" -A x64 -DLOWEND_JUCE_SHARED_CORE=${{ matrix.shared_core }}
+
+      - name: Build JUCE
+        run: cmake --build build/juce --config Release --parallel

@@ -11,7 +11,7 @@
   <img src="SystemAudioProcessor/Assets/LowEndNativeAudioIcon.png" width="180" alt="LowEnd Native Audio 앱 아이콘">
 </p>
 
-LowEnd Circuit는 저역 보강, 고역 배음 생성, 헤드폰 공간 처리, 실시간 신호 분석을 제공하는 오픈소스 오디오 DSP 프로젝트입니다. 한 저장소에서 macOS 시스템 오디오 앱과 휴대용 C++ DSP 코어(`Source/Core/`)를 함께 개발합니다.
+LowEnd Circuit는 저역 보강, 고역 배음 생성, 헤드폰 공간 처리, 실시간 신호 분석을 제공하는 오픈소스 오디오 DSP 프로젝트입니다. 한 저장소에서 macOS 시스템 오디오 앱과 Windows·macOS용 JUCE 스탠드얼론 및 플러그인을 함께 개발합니다.
 
 이 프로젝트는 독자적으로 설계한 DSP입니다. 특정 하드웨어 또는 소프트웨어 제조사와 제휴하거나 승인을 받은 제품이 아니며, 타사의 독점 회로를 그대로 재현한다고 주장하지 않습니다.
 
@@ -22,13 +22,21 @@ LowEnd Circuit는 저역 보강, 고역 배음 생성, 헤드폰 공간 처리, 
 | 하고 싶은 일 | 선택할 프로그램 | 제공 방식 | 알아둘 점 |
 |---|---|---|---|
 | Mac 전체 소리 또는 특정 앱의 소리 처리 | **LowEnd Native Audio** | 미리 빌드된 macOS 앱 | macOS 14.4 이상, Apple Silicon 전용 |
+| Windows DAW에서 이펙트 사용 | **LowEnd Circuit VST3** | 미리 빌드된 Windows 플러그인 | DAW 또는 VST3 호스트 필요 |
+| Windows에서 마이크·라인·가상 입력 처리 | **LowEnd Circuit Standalone** | 미리 빌드된 Windows 앱 | 선택한 입력만 처리하며 시스템 출력은 직접 캡처하지 않음 |
+| macOS DAW에서 이펙트 사용 | **LowEnd Circuit VST3 또는 AU** | 소스에서 직접 빌드 | macOS용 플러그인 바이너리는 현재 릴리스에 포함되지 않음 |
+| Windows 전체 시스템 소리 직접 처리 | 현재 지원하지 않음 | — | LowEnd Native Audio의 Process Tap 기능은 Windows에 없음 |
 
 프로젝트 구성은 다음과 같습니다.
 
 ```text
 LowEnd Circuit
-└─ LowEnd Native Audio
-   └─ macOS 전체 시스템 또는 특정 앱 오디오 처리
+├─ LowEnd Native Audio
+│  └─ macOS 전체 시스템 또는 특정 앱 오디오 처리
+└─ LowEnd Circuit JUCE
+   ├─ Standalone
+   ├─ VST3
+   └─ AU (macOS에서 소스 빌드)
 ```
 
 ## 다운로드
@@ -40,6 +48,8 @@ LowEnd Circuit
 | 플랫폼 | 파일 | 용도 |
 |---|---|---|
 | macOS 14.4 이상, Apple Silicon | [`LowEnd-Native-Audio-macOS-v0.2.9.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.9/LowEnd-Native-Audio-macOS-v0.2.9.zip) | 전체 시스템 또는 특정 앱 처리 |
+| Windows 10/11 x64 | [`LowEnd-Circuit-Standalone-Windows-v0.2.9.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.9/LowEnd-Circuit-Standalone-Windows-v0.2.9.zip) | 선택한 오디오 입력 처리 |
+| Windows 10/11 x64 | [`LowEnd-Circuit-VST3-Windows-v0.2.9.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.9/LowEnd-Circuit-VST3-Windows-v0.2.9.zip) | DAW 또는 플러그인 호스트에서 사용 |
 
 이전 버전은 [GitHub Releases](https://github.com/Gomtanga/lowend-circuit/releases)에서 받을 수 있습니다.
 
@@ -47,6 +57,8 @@ LowEnd Circuit
 
 - macOS 배포 파일은 `arm64` 전용입니다. Intel Mac용 바이너리는 제공하지 않습니다.
 - macOS 앱은 애드혹 서명(ad-hoc signing) 상태이며 Apple 공증을 받지 않았습니다.
+- Windows 릴리스에는 Standalone과 VST3만 들어 있습니다.
+- macOS용 Standalone, VST3, AU는 소스 빌드에서 지원하지만 현재 릴리스 바이너리에는 포함되지 않습니다. 필요한 경우 [소스에서 빌드](#소스에서-빌드)하세요.
 
 ## 1분 빠른 시작
 
@@ -70,13 +82,33 @@ LowEnd Circuit
 
 앱 아래쪽의 실행 목록에서 번들 ID를 확인할 수 있습니다. `com.tidal.desktop`처럼 기본 앱 ID를 입력하면 현재 재생 중인 하위 오디오 프로세스도 찾습니다. 일치하는 Core Audio 프로세스가 없으면 재생을 시작한 상태에서 다시 적용하세요.
 
+### Windows: Standalone
+
+1. Standalone ZIP 파일의 압축을 풉니다.
+2. `LowEnd Circuit.exe`를 실행합니다.
+3. JUCE 설정 화면에서 입력 장치와 출력 장치를 선택합니다.
+4. `LowEnd`, `Body`, `Output`을 조절합니다.
+
+Standalone은 마이크, 라인 입력 또는 별도로 구성한 가상·루프백 입력을 처리합니다. Windows에서 재생 중인 전체 시스템 소리를 자체적으로 캡처하지 않습니다. DAW 트랙에 적용하려면 VST3를 사용하세요.
+
+### Windows: VST3
+
+1. VST3 ZIP 파일의 압축을 풉니다.
+2. `LowEnd Circuit.vst3` 폴더를 일반적인 VST3 경로에 복사합니다.
+
+   ```text
+   C:\Program Files\Common Files\VST3
+   ```
+
+3. DAW를 다시 시작한 뒤 `LowEnd Circuit`을 오디오 이펙트로 불러옵니다.
+
 ## 핵심 기능
 
 | 기능 | 역할 | 제공 대상 |
 |---|---|---|
-| **Clean** | 모델 DSP와 공간 처리를 우회해 처리 전 원본 신호(Dry)를 비교합니다. | LowEnd Native Audio |
-| **Circuit** | `LowEnd`, `Body`, 병렬 처리 신호(Wet), 비대칭 포화, 출력 보호를 조합해 저역의 양감과 질감을 조절합니다. | LowEnd Native Audio |
-| **HighExciter** | 약 11 kHz 이상의 성분에서 배음을 만들고 샘플레이트에 따라 비선형 구간의 오버샘플링 배율을 조절합니다. | LowEnd Native Audio |
+| **Clean** | 모델 DSP와 공간 처리를 우회해 처리 전 원본 신호(Dry)를 비교합니다. | LowEnd Native Audio, Standalone, 플러그인 |
+| **Circuit** | `LowEnd`, `Body`, 병렬 처리 신호(Wet), 비대칭 포화, 출력 보호를 조합해 저역의 양감과 질감을 조절합니다. | LowEnd Native Audio, Standalone, 플러그인 |
+| **HighExciter** | 약 11 kHz 이상의 성분에서 배음을 만들고 샘플레이트에 따라 비선형 구간의 오버샘플링 배율을 조절합니다. | LowEnd Native Audio, Standalone, 플러그인 |
 | **Spatial Stage** | 가상 스피커 폭, 청취자 위치, 거리 게인, 양이간 시간차, 크로스피드를 이용해 헤드폰 공간을 조절합니다. | LowEnd Native Audio |
 | **Analysis** | 16,384포인트 FFT, 128개 스펙트럼 막대, Peak, RMS, Crest Factor를 표시합니다. | LowEnd Native Audio |
 | **Source 및 Rate Match** | 재생 앱이 제공하는 정보와 로그를 바탕으로 소스 포맷을 보수적으로 추정하고 DAC 후보를 보여 줍니다. | LowEnd Native Audio |
@@ -140,6 +172,7 @@ LowEnd Native Audio의 포맷 표시는 서로 다른 값을 구분합니다.
 - TIDAL은 공개된 원본 포맷 API를 제공하지 않습니다. 설치된 TIDAL 앱이 LowEnd Native Audio에서 인식하는 메시지를 남기지 않으면 Source가 `unknown`으로 표시될 수 있습니다.
 - Apple Music 메타데이터 보조 경로는 macOS 자동화 권한을 요청할 수 있습니다.
 - 특정 앱 캡처를 시작할 때 대상 앱의 Core Audio 출력 프로세스가 실행 중이어야 합니다.
+- Windows는 전체 시스템 또는 특정 앱의 네이티브 캡처를 지원하지 않습니다.
 - macOS 앱은 Developer ID 서명과 Apple 공증을 받지 않았습니다.
 - Spatial Stage는 개인화 HRTF가 아닙니다.
 
@@ -148,6 +181,7 @@ LowEnd Native Audio의 포맷 표시는 서로 다른 값을 구분합니다.
 | 대상 | 최소 사양 | 권장 또는 추가 조건 |
 |---|---|---|
 | LowEnd Native Audio | macOS 14.4 이상, Apple Silicon M1 이상, 메모리 8 GB, Metal 지원 GPU, 약 100 MB의 여유 공간 | 96/192 kHz와 Analysis를 함께 쓸 때 Apple M2 이상 및 메모리 16 GB 권장 |
+| Windows Standalone·VST3 | Windows 10 또는 11 64비트, 4코어 x64 프로세서, 메모리 8 GB | 호환 오디오 장치 또는 DAW·플러그인 호스트 |
 
 표의 사양은 모든 장치, 샘플레이트, 버퍼 크기에서 같은 성능을 보장하는 벤치마크가 아닙니다.
 
@@ -155,6 +189,7 @@ LowEnd Native Audio의 포맷 표시는 서로 다른 값을 구분합니다.
 
 | 문서 | 내용 |
 |---|---|
+| [Using It on a Regular Computer](docs/general-computer-use.md) | 일반적인 스탠드얼론 연결 방식 |
 | [System-Wide and Per-App Use](docs/system-wide-and-per-app.md) | macOS 전체 시스템 및 특정 앱 처리 |
 | [Rate Matching](docs/rate-matching.md) | 자동 샘플레이트 전환과 복구 흐름 |
 | [HighExciter Oversampling](docs/high-exciter-oversampling.md) | 배율 정책, 필터, 실시간 처리 규칙 |
@@ -186,9 +221,29 @@ open "build/LowEndCircuit_artefacts/Release/NativeSystemAudio/LowEnd Native Audi
 ./scripts/run-app-lowend.sh com.spotify.client
 ```
 
+### JUCE Standalone 및 플러그인
+
+다음 항목이 필요합니다.
+
+- CMake 3.22 이상
+- C++17 도구 체인
+- 구성 단계에서 JUCE 8.0.13과 CLI11 2.6.2를 가져올 인터넷 연결
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
+```
+
+| 플랫폼 | 생성 대상 |
+|---|---|
+| Windows | Standalone, VST3 |
+| macOS | Standalone, VST3, AU |
+
+JUCE Standalone은 일반 입력·출력 장치 경로를 사용합니다. LowEnd Native Audio의 Process Tap 기반 시스템 캡처 기능은 포함하지 않습니다.
+
 ## 검증
 
-이 저장소의 CI는 휴대용 C++ Core, Swift 지원 검사, Swift·C++ DSP 비교, LowEnd Native Audio 빌드를 나누어 검사합니다. 로컬에서는 필요한 범위에 맞춰 다음 명령을 사용할 수 있습니다.
+이 저장소의 CI는 휴대용 C++ Core, Swift 지원 검사, Swift·C++ DSP 비교, LowEnd Native Audio 빌드, Windows JUCE 빌드를 나누어 검사합니다. 로컬에서는 필요한 범위에 맞춰 다음 명령을 사용할 수 있습니다.
 
 ```sh
 cmake -S Source/Core -B build/core-tests -DLOWEND_CORE_BUILD_TESTING=ON
@@ -214,7 +269,7 @@ swift run --package-path SystemAudioProcessor SystemAudioProcessor --self-test
 - 입력·출력 장치 및 DAC 모델
 - 샘플레이트와 버퍼 설정
 - 선택한 모델과 프리셋
-- 전체 시스템 또는 특정 앱 가운데 사용한 방식
+- 전체 시스템, 특정 앱, Standalone, 플러그인 가운데 사용한 방식
 - 독점 모드와 자동 Rate Match 사용 여부
 - 재현 순서와 기대한 결과
 - 관련 로그 또는 화면 캡처
@@ -226,6 +281,7 @@ swift run --package-path SystemAudioProcessor SystemAudioProcessor --self-test
 ## 저장소 구조
 
 ```text
+Source/                         JUCE 플러그인 및 Standalone 소스
 Source/Core/                    테스트 가능한 휴대용 Circuit·HighExciter DSP
 SystemAudioProcessor/           macOS Native Swift·C 엔진
 SystemAudioProcessor/Shaders/   Metal 스펙트럼 셰이더
@@ -237,5 +293,7 @@ docs/                           사용법, 설계, 검증 기록
 ## 라이선스와 제3자 조건
 
 이 저장소는 [GNU AGPL-3.0-or-later](LICENSE)에 따라 배포됩니다.
+
+JUCE는 빌드 과정에서 내려받으며 자체 이중 라이선스 조건이 적용됩니다. 바이너리를 재배포하거나 JUCE 대상을 상업적으로 사용하기 전에 [JUCE 라이선스](https://juce.com/legal/juce-8-licence/)를 확인하세요.
 
 제3자의 이름과 상표는 각 소유자에게 귀속됩니다. 이 프로젝트는 특정 회사의 제품명을 프로젝트 브랜드로 사용하거나 독점 회로의 정확한 에뮬레이션을 주장하지 않습니다.
