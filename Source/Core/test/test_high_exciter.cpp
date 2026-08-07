@@ -2,8 +2,8 @@
 //
 // Reference implementation: main.swift HighExciterDSP (lines 2441-2510)
 //
-// The Swift implementation is the canonical reference because JUCE
-// PluginProcessor has no HighExciter model.
+// The Swift implementation is the canonical reference because the JUCE
+// plugin had no HighExciter model (JUCE targets were removed in 2026-08).
 //
 // Golden values are computed analytically for the harmonic polynomial:
 //   harmonic = driven² + 0.5 * driven³
