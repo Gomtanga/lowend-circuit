@@ -35,13 +35,13 @@ LowEnd Circuit
 
 ## Download
 
-The latest release is [v0.2.9](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.2.9). See the release notes for changes and verification results.
+The latest release is [v0.2.10](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.2.10). See the release notes for changes and verification results.
 
 ### Prebuilt files
 
 | Platform | File | Purpose |
 |---|---|---|
-| macOS 14.4 or newer, Apple Silicon | [`LowEnd-Native-Audio-macOS-v0.2.9.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.9/LowEnd-Native-Audio-macOS-v0.2.9.zip) | System-wide or per-application processing |
+| macOS 14.4 or newer, Apple Silicon | [`LowEnd-Native-Audio-macOS-v0.2.10.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.10/LowEnd-Native-Audio-macOS-v0.2.10.zip) | System-wide or per-application processing |
 
 Previous versions are available from [GitHub Releases](https://github.com/Gomtanga/lowend-circuit/releases).
 
@@ -49,6 +49,7 @@ Previous versions are available from [GitHub Releases](https://github.com/Gomtan
 
 - The downloadable macOS build is `arm64` only. There is no Intel Mac binary.
 - The macOS app is signed ad hoc and is not notarized by Apple.
+- Public binaries now cover only the macOS build of LowEnd Native Audio. The former Windows/JUCE distribution targets and historical Windows release assets were retired in August 2026.
 
 ## Start in one minute
 
@@ -128,6 +129,8 @@ LowEnd Native Audio keeps several format values separate:
 - `Source`: playback-source information obtained independently from Apple Music or TIDAL
 
 `Source` is labeled `Detected` or `Inferred` according to the available evidence. A value that cannot be established remains `unknown`; the app never substitutes the Tap or DAC rate and presents it as the source-file format.
+
+For TIDAL, the app watches `player.log` for filesystem changes and rechecks the source format after an approximately 80 ms debounce. It rearms the watcher when the log is replaced or rotated and retains periodic polling as a recovery path. `CoreaudioSink::start` and `CoreaudioSink::close` are also treated as playback-state evidence, covering track changes where TIDAL delays or omits `media.state=active`.
 
 `Rate Match Preview` is read-only. It compares a detected source rate with rates reported by the DAC and shows a candidate without changing the device.
 
