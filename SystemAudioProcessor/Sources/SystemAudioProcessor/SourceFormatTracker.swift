@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import LowEndSupport
 import OSLog
@@ -35,6 +36,9 @@ final class SourceFormatTracker: @unchecked Sendable {
     private var lastAppleMusicPersistentID: String?
     private var lastAppleMusicState: AppleMusicPlaybackState = .notRunning
     private var acceleratedPollsRemaining: Int = 0
+    private var tidalLogSource: DispatchSourceFileSystemObject?
+    private var tidalLogRefreshWorkItem: DispatchWorkItem?
+    private var tidalLogRearmWorkItem: DispatchWorkItem?
 
     init(onUpdate: @escaping @Sendable (SourceFormatSnapshot) -> Void,
          onObservation: @escaping @Sendable (SourceFormatSnapshot) -> Void = { _ in }) {
@@ -52,6 +56,7 @@ final class SourceFormatTracker: @unchecked Sendable {
             }
             self.timer = timer
             timer.resume()
+            self.installTIDALLogWatcherIfNeeded()
         }
     }
 
@@ -64,14 +69,23 @@ final class SourceFormatTracker: @unchecked Sendable {
             lastAppleMusicPersistentID = nil
             lastAppleMusicState = .notRunning
             acceleratedPollsRemaining = 0
+            tidalLogRefreshWorkItem?.cancel()
+            tidalLogRefreshWorkItem = nil
+            tidalLogRearmWorkItem?.cancel()
+            tidalLogRearmWorkItem = nil
+            cancelTIDALLogWatcher()
         }
     }
 
-    private func poll() {
+    private func poll(updateAppleMusic: Bool = true) {
         let activePlayers = SourcePlayer.allCases.filter(Self.isPlayerRunning)
         let now = Date()
 
-        if activePlayers.contains(.appleMusic) {
+        if updateAppleMusic {
+            installTIDALLogWatcherIfNeeded()
+        }
+
+        if updateAppleMusic && activePlayers.contains(.appleMusic) {
             let logEntries = readUnifiedLogEntries(player: .appleMusic)
             let scriptContext = readAppleMusicScriptContext(observedAt: now)
             let resolvedFormat = SourceFormatParser.resolveAppleMusicFormat(
@@ -117,7 +131,7 @@ final class SourceFormatTracker: @unchecked Sendable {
 
             lastAppleMusicState = scriptContext.state
             lastAppleMusicPersistentID = scriptContext.persistentID
-        } else {
+        } else if updateAppleMusic {
             cachedFormats.removeValue(forKey: .appleMusic)
             lastAppleMusicState = .notRunning
             lastAppleMusicPersistentID = nil
@@ -154,6 +168,62 @@ final class SourceFormatTracker: @unchecked Sendable {
         guard snapshot.indicatorText != lastSnapshotText else { return }
         lastSnapshotText = snapshot.indicatorText
         onUpdate(snapshot)
+    }
+
+    private func installTIDALLogWatcherIfNeeded() {
+        guard tidalLogSource == nil else { return }
+
+        let descriptor = open(tidalPlayerLogURL.path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor,
+            eventMask: [.write, .extend, .rename, .delete, .revoke],
+            queue: queue
+        )
+        source.setEventHandler { [weak self, weak source] in
+            guard let self, let source else { return }
+            let events = source.data
+            if !events.intersection([.rename, .delete, .revoke]).isEmpty {
+                self.cancelTIDALLogWatcher()
+                self.scheduleTIDALLogWatcherRearm()
+                return
+            }
+            self.scheduleTIDALLogRefresh()
+        }
+        source.setCancelHandler {
+            close(descriptor)
+        }
+        tidalLogSource = source
+        source.resume()
+    }
+
+    private func cancelTIDALLogWatcher() {
+        tidalLogSource?.setEventHandler {}
+        tidalLogSource?.cancel()
+        tidalLogSource = nil
+    }
+
+    private func scheduleTIDALLogRefresh() {
+        tidalLogRefreshWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.poll(updateAppleMusic: false)
+        }
+        tidalLogRefreshWorkItem = workItem
+        queue.asyncAfter(deadline: .now() + .milliseconds(80), execute: workItem)
+    }
+
+    private func scheduleTIDALLogWatcherRearm() {
+        tidalLogRearmWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.installTIDALLogWatcherIfNeeded()
+            if self.tidalLogSource != nil {
+                self.scheduleTIDALLogRefresh()
+            }
+        }
+        tidalLogRearmWorkItem = workItem
+        queue.asyncAfter(deadline: .now() + .milliseconds(250), execute: workItem)
     }
 
     private func readUnifiedLogEntries(player: SourcePlayer) -> [SourceFormatLogEntry] {
