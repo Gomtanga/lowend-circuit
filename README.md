@@ -33,13 +33,13 @@ LowEnd Circuit
 
 ## 다운로드
 
-현재 최신 릴리스는 [v0.2.9](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.2.9)입니다. 변경 사항과 검증 결과는 릴리스 노트에서 확인할 수 있습니다.
+현재 최신 릴리스는 [v0.2.10](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.2.10)입니다. 변경 사항과 검증 결과는 릴리스 노트에서 확인할 수 있습니다.
 
 ### 미리 빌드된 파일
 
 | 플랫폼 | 파일 | 용도 |
 |---|---|---|
-| macOS 14.4 이상, Apple Silicon | [`LowEnd-Native-Audio-macOS-v0.2.9.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.9/LowEnd-Native-Audio-macOS-v0.2.9.zip) | 전체 시스템 또는 특정 앱 처리 |
+| macOS 14.4 이상, Apple Silicon | [`LowEnd-Native-Audio-macOS-v0.2.10.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.10/LowEnd-Native-Audio-macOS-v0.2.10.zip) | 전체 시스템 또는 특정 앱 처리 |
 
 이전 버전은 [GitHub Releases](https://github.com/Gomtanga/lowend-circuit/releases)에서 받을 수 있습니다.
 
@@ -47,6 +47,7 @@ LowEnd Circuit
 
 - macOS 배포 파일은 `arm64` 전용입니다. Intel Mac용 바이너리는 제공하지 않습니다.
 - macOS 앱은 애드혹 서명(ad-hoc signing) 상태이며 Apple 공증을 받지 않았습니다.
+- 공개 바이너리는 LowEnd Native Audio의 macOS 빌드만 제공합니다. 이전 Windows/JUCE 배포 타깃과 과거 Windows 릴리스 자산은 2026년 8월에 폐기했습니다.
 
 ## 1분 빠른 시작
 
@@ -126,6 +127,8 @@ LowEnd Native Audio의 포맷 표시는 서로 다른 값을 구분합니다.
 - `Source`: Apple Music 또는 TIDAL에서 별도로 확인한 재생 소스 정보
 
 `Source`는 근거에 따라 `Detected` 또는 `Inferred`로 표시됩니다. 확인할 수 없는 값은 `unknown`으로 남기며, Tap이나 DAC 값을 원본 파일의 포맷처럼 대신 표시하지 않습니다.
+
+TIDAL은 `player.log` 변경을 파일 시스템 이벤트로 감지해 소스 포맷을 다시 확인합니다. 약 80 ms 디바운스 뒤 즉시 분석하고 로그 교체·회전 시 감시를 다시 연결하며, 이벤트를 놓친 경우에는 주기적 확인 경로가 복구를 담당합니다. `CoreaudioSink::start`와 `CoreaudioSink::close`도 재생 상태 근거로 사용하므로 TIDAL이 `media.state=active`를 늦게 쓰거나 생략하는 곡 전환도 처리할 수 있습니다.
 
 `Rate Match Preview`는 감지된 소스와 DAC가 보고한 지원 샘플레이트를 비교해 후보만 보여 주는 읽기 전용 기능입니다. DAC 설정을 직접 바꾸지 않습니다.
 
