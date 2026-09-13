@@ -57,7 +57,7 @@ Circuit의 **IEM · Gentle · LowEnd · Deep · Clear**, HighExciter의 **Soft �
 1. ZIP을 풀고 **LowEnd Native Audio.app**을 **응용 프로그램** 폴더로 옮깁니다.
 2. 앱을 실행하고 macOS의 **시스템 오디오 녹음 권한**을 허용합니다.
 3. **Circuit → IEM 또는 Gentle**, **HighExciter → Soft 또는 Air**로 시작합니다.
-4. **왼쪽 아래 스피커 버튼(전체 시스템 적용)**을 누르고 음악을 재생합니다.
+4. **왼쪽 아래 스피커 버튼**(전체 시스템 적용)을 누르고 음악을 재생합니다.
 
 앱은 **애드혹 서명 상태이며 Apple 공증을 받지 않았습니다**. 첫 실행이 차단되면 출처를 확인한 뒤 **시스템 설정 → 개인정보 보호 및 보안 → 확인 없이 열기**에서 허용하세요. 자세한 안내와 특정 앱 처리 방법은 [설치와 사용 시작](docs/getting-started.md)에 있습니다.
 
