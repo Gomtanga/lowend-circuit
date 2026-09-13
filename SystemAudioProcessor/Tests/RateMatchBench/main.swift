@@ -76,138 +76,130 @@ private func availableRates(_ deviceID: AudioObjectID) -> [Double] {
           }) == noErr else {
         return []
     }
-    return ranges.map { Double($0.mMinimum) }.sorted()
+    let standards: [Double] = [8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000,
+        44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000, 705_600, 768_000]
+    return standards.filter { rate in ranges.contains { rate >= $0.mMinimum - 0.5 && rate <= $0.mMaximum + 0.5 } }
 }
 
 private func rateText(_ rate: Double) -> String {
     String(format: "%.1fk", rate / 1000)
 }
 
-private func runOnce(deviceID: AudioObjectID,
-                     from startRate: Double,
-                     to targetRate: Double,
-                     listenerQueue: DispatchQueue) -> [String: Double] {
-    let semaphore = DispatchSemaphore(value: 0)
-    var signaledRate: Double?
+private final class ObservedRate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var rate: Double?
+    func store(_ value: Double) { lock.lock(); rate = value; lock.unlock() }
+    func load() -> Double? { lock.lock(); defer { lock.unlock() }; return rate }
+}
 
+private func monotonicSeconds() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000 }
+
+private func confirmedRate(_ deviceID: AudioObjectID, target: Double) throws -> Double {
+    let deadline = monotonicSeconds() + 3
+    repeat {
+        let actual = try nominalSampleRate(deviceID)
+        if abs(actual - target) <= 1 { return actual }
+        Thread.sleep(forTimeInterval: 0.01)
+    } while monotonicSeconds() < deadline
+    throw NSError(domain: "RateMatchBench", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Rate confirmation timed out for device \(deviceID), target \(target)"])
+}
+
+private func runOnce(deviceID: AudioObjectID, to targetRate: Double,
+                     listenerQueue: DispatchQueue) throws -> [String: Double] {
+    let semaphore = DispatchSemaphore(value: 0)
+    let observed = ObservedRate()
     let listener: AudioObjectPropertyListenerBlock = { _, _ in
-        if let r = try? nominalSampleRate(deviceID) {
-            signaledRate = r
-        }
+        if let rate = try? nominalSampleRate(deviceID) { observed.store(rate) }
         semaphore.signal()
     }
-
-    var address = AudioObjectPropertyAddress(
-        mSelector: kAudioDevicePropertyNominalSampleRate,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-    )
-    _ = AudioObjectAddPropertyListenerBlock(deviceID, &address, listenerQueue, listener)
-
-    var timings: [String: Double] = [:]
-    let t0 = Date()
-
-    // Issue the hardware rate change.
-    do {
-        try setNominalSampleRate(deviceID, targetRate)
-    } catch {
-        timings["set.error"] = -1
-        var addr2 = address
-        _ = AudioObjectRemovePropertyListenerBlock(deviceID, &addr2, listenerQueue, listener)
-        return timings
+    var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate,
+        mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    let added = AudioObjectAddPropertyListenerBlock(deviceID, &address, listenerQueue, listener)
+    guard added == noErr else { throw NSError(domain: "RateMatchBench.listener", code: Int(added)) }
+    defer {
+        _ = AudioObjectRemovePropertyListenerBlock(deviceID, &address, listenerQueue, listener)
+        listenerQueue.sync {} // Retire callbacks before releasing their captured state.
     }
-    timings["afterSetCall"] = Date().timeIntervalSince(t0) * 1000
-
-    // Wait for the property-listener signal.
-    let waitStart = Date()
-    let waitResult = semaphore.wait(timeout: .now() + .seconds(2))
-    timings["listenerWait"] = Date().timeIntervalSince(waitStart) * 1000
-    timings["listenerFired"] = (waitResult == .success) ? 1 : 0
-    timings["signaledRate"] = signaledRate ?? -1
-
-    // Also measure how long a direct read takes after the signal, in case the
-    // property value lags the listener.
-    let readStart = Date()
-    let confirmedRate = (try? nominalSampleRate(deviceID)) ?? -1
-    timings["postRead"] = Date().timeIntervalSince(readStart) * 1000
-    timings["confirmedRate"] = confirmedRate
-    timings["matchTarget"] = abs(confirmedRate - targetRate) <= 1 ? 1 : 0
-    timings["total"] = Date().timeIntervalSince(t0) * 1000
-
-    var addr2 = address
-    _ = AudioObjectRemovePropertyListenerBlock(deviceID, &addr2, listenerQueue, listener)
+    var timings: [String: Double] = [:]
+    let start = monotonicSeconds()
+    try setNominalSampleRate(deviceID, targetRate)
+    timings["setCallMs"] = (monotonicSeconds() - start) * 1_000
+    let waitStart = monotonicSeconds()
+    let result = semaphore.wait(timeout: .now() + .seconds(2))
+    timings["listenerWaitMs"] = (monotonicSeconds() - waitStart) * 1_000
+    timings["listenerFired"] = result == .success ? 1 : 0
+    timings["signaledRate"] = observed.load() ?? -1
+    timings["confirmedRate"] = try confirmedRate(deviceID, target: targetRate)
+    timings["totalMs"] = (monotonicSeconds() - start) * 1_000
     return timings
 }
 
 private func benchmark() throws {
-    let deviceID = try defaultOutputDevice()
+    var execute = false
+    var explicitDevice: AudioObjectID?
+    var rounds = 4
+    var arguments = CommandLine.arguments.dropFirst().makeIterator()
+    while let argument = arguments.next() {
+        switch argument {
+        case "--execute": execute = true
+        case "--dry-run": execute = false
+        case "--device":
+            guard let value = arguments.next(), let number = UInt32(value), number != kAudioObjectUnknown else {
+                throw NSError(domain: "RateMatchBench.arguments", code: 1, userInfo: [NSLocalizedDescriptionKey: "--device needs a nonzero numeric device ID"])
+            }
+            explicitDevice = number
+        case "--rounds":
+            guard let value = arguments.next(), let number = Int(value), (1...20).contains(number) else {
+                throw NSError(domain: "RateMatchBench.arguments", code: 1, userInfo: [NSLocalizedDescriptionKey: "--rounds needs 1...20"])
+            }
+            rounds = number
+        case "--help", "-h":
+            print("RateMatchBench [--dry-run] [--device ID] [--rounds 1...20]")
+            print("RateMatchBench --execute --device ID [--rounds 1...20]")
+            print("Default is read-only. --execute changes this physical device's rate and may interrupt other audio. The original rate is restored and read back even if a round fails.")
+            return
+        default: throw NSError(domain: "RateMatchBench.arguments", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unknown argument: \(argument)"])
+        }
+    }
+    guard !execute || explicitDevice != nil else {
+        throw NSError(domain: "RateMatchBench.arguments", code: 1, userInfo: [NSLocalizedDescriptionKey: "--execute requires --device ID; run --dry-run first"])
+    }
+    let deviceID = try explicitDevice ?? defaultOutputDevice()
     let originalRate = try nominalSampleRate(deviceID)
     let supported = availableRates(deviceID)
-
-    print("Default output device: \(deviceID)")
-    print("Current nominal rate: \(rateText(originalRate))")
-    print("Supported rates: \(supported.map(rateText).joined(separator: ", "))")
-
-    guard supported.count >= 2 else {
-        print("Device supports fewer than 2 sample rates. Cannot benchmark transitions.")
+    print("Device: \(deviceID); original nominal rate: \(rateText(originalRate))")
+    print("Supported standard rates: \(supported.map(rateText).joined(separator: ", "))")
+    guard let rateA = supported.first(where: { $0 >= 44_100 }),
+          let rateB = supported.last, rateA != rateB else {
+        print("No two supported test rates are available.")
         return
     }
+    print("Proposed: \(rateText(rateA)) ↔ \(rateText(rateB)), \(rounds) rounds; restore \(rateText(originalRate))")
+    guard execute else { print("DRY RUN: no hardware values changed."); return }
 
-    // Pick two distinct rates to alternate between.
-    let candidates = [44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0]
-        .filter { supported.contains($0) }
-    guard let rateA = candidates.first,
-          let rateB = candidates.last,
-          rateA != rateB else {
-        print("Could not pick two distinct rates. Falling back to first/last supported.")
-        let rateA = supported.first!
-        let rateB = supported.last!
-        try runRounds(deviceID: deviceID, rateA: rateA, rateB: rateB, originalRate: originalRate)
-        return
-    }
-
-    try runRounds(deviceID: deviceID, rateA: rateA, rateB: rateB, originalRate: originalRate)
-}
-
-private func runRounds(deviceID: AudioObjectID,
-                       rateA: Double,
-                       rateB: Double,
-                       originalRate: Double) throws {
     let listenerQueue = DispatchQueue(label: "rate-bench.listener")
-    print("\nAlternating \(rateText(rateA)) ↔ \(rateText(rateB)) for 4 rounds...\n")
-
-    // Start from rateA so the alternation is deterministic.
-    if originalRate != rateA {
-        try setNominalSampleRate(deviceID, rateA)
-        Thread.sleep(forTimeInterval: 0.5)
-    }
-
-    var current = rateA
-    for round in 1...4 {
-        let next = (current == rateA) ? rateB : rateA
-        print("Round \(round): \(rateText(current)) → \(rateText(next))")
-        let timings = runOnce(deviceID: deviceID, from: current, to: next, listenerQueue: listenerQueue)
-        for key in ["afterSetCall", "listenerWait", "listenerFired", "signaledRate",
-                    "postRead", "confirmedRate", "matchTarget", "total"] {
-            let value = timings[key] ?? -1
-            if ["listenerFired", "matchTarget"].contains(key) {
-                print("  \(key)=\(Int(value))")
-            } else if ["signaledRate", "confirmedRate"].contains(key) {
-                print("  \(key)=\(rateText(value))")
-            } else {
-                print("  \(key)=\(String(format: "%.1fms", value))")
-            }
+    var failure: Error?
+    do {
+        var current = originalRate
+        for round in 1...rounds {
+            let next = abs(current - rateA) < 1 ? rateB : rateA
+            let timings = try runOnce(deviceID: deviceID, to: next, listenerQueue: listenerQueue)
+            print("Round \(round): \(rateText(current)) → \(rateText(next))")
+            for key in timings.keys.sorted() { print("  \(key)=\(timings[key]!)") }
+            current = next
         }
-        current = next
-        Thread.sleep(forTimeInterval: 0.8)
+    } catch { failure = error }
+    do {
+        try setNominalSampleRate(deviceID, originalRate)
+        let actual = try confirmedRate(deviceID, target: originalRate)
+        print("RESTORE VERIFIED: device \(deviceID) at \(rateText(actual))")
+    } catch {
+        throw NSError(domain: "RateMatchBench.restore", code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "RESTORE FAILED: device \(deviceID), original \(originalRate) Hz; \(error). Round error: \(String(describing: failure))"])
     }
-
-    // Restore original rate.
-    print("\nRestoring original rate \(rateText(originalRate))...")
-    try setNominalSampleRate(deviceID, originalRate)
-    Thread.sleep(forTimeInterval: 0.5)
-    let final = try nominalSampleRate(deviceID)
-    print("Final rate: \(rateText(final)) \(final == originalRate ? "(ok)" : "(MISMATCH)")")
+    if let failure { throw failure }
 }
 
-try benchmark()
+do { try benchmark() }
+catch { fputs("\(error)\n", stderr); exit(1) }

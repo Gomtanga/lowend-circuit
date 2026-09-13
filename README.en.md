@@ -35,13 +35,13 @@ LowEnd Circuit
 
 ## Download
 
-The latest release is [v0.2.10](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.2.10). See the release notes for changes and verification results.
+The download baseline documented here is [v0.3.0](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.3.0). See the release notes for changes and verification results.
 
 ### Prebuilt files
 
 | Platform | File | Purpose |
 |---|---|---|
-| macOS 14.4 or newer, Apple Silicon | [`LowEnd-Native-Audio-macOS-v0.2.10.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.10/LowEnd-Native-Audio-macOS-v0.2.10.zip) | System-wide or per-application processing |
+| macOS 14.4 or newer, Apple Silicon | [`LowEnd-Native-Audio-macOS-v0.3.0.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.3.0/LowEnd-Native-Audio-macOS-v0.3.0.zip) | System-wide or per-application processing |
 
 Previous versions are available from [GitHub Releases](https://github.com/Gomtanga/lowend-circuit/releases).
 
@@ -77,7 +77,7 @@ The running-app list near the bottom of the window helps identify bundle IDs. En
 
 | Feature | What it does | Available in |
 |---|---|---|
-| **Clean** | Bypasses model DSP and spatial processing for comparison with the unprocessed dry signal. | LowEnd Native Audio |
+| **Clean** | Bypasses the Circuit/HighExciter tonal model. Spatial and Output Conditioning remain independent; disable both for a dry comparison. | LowEnd Native Audio |
 | **Circuit** | Combines `LowEnd`, `Body`, a parallel wet path, asymmetric saturation, and output protection to shape bass weight and texture. | LowEnd Native Audio |
 | **HighExciter** | Generates harmonics from content above roughly 11 kHz and adapts nonlinear-stage oversampling to the sample rate. | LowEnd Native Audio |
 | **Spatial Stage** | Uses virtual-speaker width, listener position, distance gain, interaural timing, and crossfeed to shape headphone space. | LowEnd Native Audio |
@@ -124,7 +124,7 @@ HighExciter presets change only `Exciter Drive` and `Wet Mix`. They do not chang
 LowEnd Native Audio keeps several format values separate:
 
 - `Tap`: the format delivered by Core Audio Process Tap
-- `Engine`: the DSP engine's processing format
+- `Engine`: the output graph format. With Live PCM 2×, tonal/Spatial DSP runs at the Tap rate before upsampling to this output rate.
 - `DAC`: the output device's nominal sample rate
 - `Source`: playback-source information obtained independently from Apple Music or TIDAL
 
@@ -132,11 +132,13 @@ LowEnd Native Audio keeps several format values separate:
 
 For TIDAL, the app watches `player.log` for filesystem changes and rechecks the source format after an approximately 80 ms debounce. It rearms the watcher when the log is replaced or rotated and retains periodic polling as a recovery path. `CoreaudioSink::start` and `CoreaudioSink::close` are also treated as playback-state evidence, covering track changes where TIDAL delays or omits `media.state=active`.
 
+Source monitoring tracks the player PID, log-file identity, and read offset. Old log bytes are not promoted to fresh observations. Source can remain `unknown` until a new playback/sink record arrives after monitoring begins, or when evidence has not refreshed for 15 seconds. Mixed sources and sources outside the capture scope do not trigger automatic rate changes.
+
 `Rate Match Preview` is read-only. It compares a detected source rate with rates reported by the DAC and shows a candidate without changing the device.
 
-`자동 Rate Match (Automatic Rate Match)` is an experimental Expert Mode option and is off by default. After stable source observations, it fades out, stops the engine, changes the DAC and Engine rates, rebuilds capture and output, verifies flow, and fades back in. Hardware relocking can cause roughly one to two seconds of silence on every track change.
+`자동 Rate Match (Automatic Rate Match)` is experimental, independent of the detailed format display, and off by default. After stable source observations, it fades out, stops the engine, changes the DAC and Engine rates, rebuilds capture and output, verifies flow, and fades back in. Changing to a different source rate can introduce silence while the device relocks; duration depends on the device and transition result. Live PCM 2× and automatic matching are mutually exclusive rate-changing modes.
 
-For gapless playback, leave Automatic Rate Match off and keep the DAC at a fixed value such as 96 kHz or 192 kHz. See [Rate Matching](docs/rate-matching.md) and the [Source Rate Tracking and Device Lock Plan](docs/source-rate-and-device-lock-plan.md) for transition and recovery details.
+To avoid device reconfiguration between tracks, leave Automatic Rate Match off and use a fixed rate supported by the DAC. See [Rate Matching](docs/rate-matching.md) and the [Source Rate Tracking and Device Lock Plan](docs/source-rate-and-device-lock-plan.md) for transition and recovery details.
 
 ## Limitations to read first
 
@@ -196,7 +198,7 @@ The following helpers can start system-wide or per-application modes from the co
 The repository CI checks the portable C++ Core, Swift support cases, Swift and C++ DSP parity, and the LowEnd Native Audio build separately. Run the commands that match your change.
 
 ```sh
-cmake -S Source/Core -B build/core-tests -DLOWEND_CORE_BUILD_TESTING=ON
+cmake -S Source/Core -B build/core-tests -DCMAKE_BUILD_TYPE=Release -DLOWEND_CORE_BUILD_TESTING=ON
 cmake --build build/core-tests --parallel
 ctest --test-dir build/core-tests --output-on-failure
 ```
@@ -204,11 +206,33 @@ ctest --test-dir build/core-tests --output-on-failure
 On macOS, you can also run:
 
 ```sh
-swift run --package-path SystemAudioProcessor LowEndSupportChecks
-swift run --package-path SystemAudioProcessor SystemAudioProcessor --self-test
+swift run --package-path SystemAudioProcessor -c release LowEndSupportChecks
+swift run --package-path SystemAudioProcessor -c release SystemAudioProcessor --self-test
 ```
 
+`--self-test` runs fast offline regressions. Run CPU throughput measurements separately with `--benchmark-output-conditioning`. `RateMatchBench` defaults to read-only `--dry-run`; physical rate changes require `--execute --device ID` and can interrupt other audio. This manual tool is never part of routine builds or CI.
+
+The bundle script builds Release, runs support checks, assembles and signs a staged app, checks its SwiftPM shader bundle, and runs that exact executable's offline self-test and CLI argument regressions before replacing an existing app. The CLI checks verify invalid-argument rejection and help output. Isolate QA output with absolute overrides:
+
+```sh
+LOWEND_BUILD_DIR=/tmp/lowend-build-qa \
+LOWEND_APP_DIR="/tmp/lowend-app-qa/LowEnd Native Audio.app" \
+./scripts/build-native-system-audio-app.sh
+```
+
+`LOWEND_SWIFT_SCRATCH_DIR` and a numeric `LOWEND_BUILD_NUMBER` are optional. A shallow clone's commit count is not a globally monotonic build identity. Offline checks do not verify Process Tap permission, physical DAC transitions, listening quality, or VoiceOver interaction.
+
+To validate a specific toolchain configuration, set `LOWEND_SWIFT_SDK` to an installed macOS SDK path and `LOWEND_SWIFT_BUILD_SYSTEM` to a build system supported by that Swift installation. Both product builds and the binary-path query receive the same options. Omit them to use Swift's defaults; these options do not change the system developer directory.
+
 The real-time audio callback is designed to avoid memory allocation, locks, logging and file I/O, UI access, and filter-coefficient calculation. See the source and [Cross-Platform Core Architecture](docs/cross-platform-core-architecture.md) for details.
+
+## Current source implementation and experimental scope
+
+The Native live callback uses the Swift Circuit/HighExciter implementations in `TonalDSP.swift` and Spatial processing in `SpatialDSP.swift`. C++ `Source/Core` provides portable kernels and the parity comparison path. Spatial geometry is shared through its pure C++ function and C ABI. Agreement between two implementations is supplemented by independent impulse, response, DC, and transition fixtures.
+
+Live Output Conditioning supports PCM 2×. Higher factors, dither/noise shaping, and DSD/DoP are not connected to live output. The offline DoP packer stores 16 DSD bits and an 8-bit marker per channel in a 32-bit little-endian container `[payloadLow, payloadHigh, marker, 0]`, preserving partial payloads and marker phase across blocks. This format check does not establish complete DSD64/128/256 transport or hardware compatibility.
+
+v0.3.0 includes the Spatial Stage redesign and audio-processing stabilization. See its release notes for included features and verification scope.
 
 ## Reporting issues and contributing
 

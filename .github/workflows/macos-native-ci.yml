@@ -12,34 +12,66 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Check staged bundle replacement failure handling
+        run: python3 scripts/check-native-build-script.py
+
       - name: Run Swift regression checks
-        run: swift run --package-path SystemAudioProcessor LowEndSupportChecks
+        run: swift run --package-path SystemAudioProcessor -c debug LowEndSupportChecks
 
-      - name: Run Swift and C++ DSP parity checks
-        shell: bash
-        run: |
-          set +e
-          output="$(swift run --package-path SystemAudioProcessor SystemAudioProcessor --self-test 2>&1)"
-          status=$?
-          printf '%s\n' "$output"
-          if [[ $status -ne 0 ]]; then
-            message="${output//$'\n'/%0A}"
-            message="${message//$'\r'/%0D}"
-            echo "::error title=DSP parity checks failed::$message"
-            exit "$status"
-          fi
+      - name: Check capture ownership across isolated processes
+        run: python3 SystemAudioProcessor/Tests/CaptureSessionLeaseChecks/run.py --scratch "$RUNNER_TEMP/lowend-capture-lease-checks"
 
-      - name: Build Native app in Debug
-        run: swift build --package-path SystemAudioProcessor -c debug
+      - name: Run Debug offline DSP, spatial, analysis and transition checks
+        # Preserve line-buffered output and the child's exit status on a crash.
+        run: script -q "$RUNNER_TEMP/lowend-debug-self-test.log" swift run --package-path SystemAudioProcessor -c debug SystemAudioProcessor --self-test
 
-      - name: Build Native app in Release
+      - name: Verify invalid CLI arguments never start capture
+        run: python3 scripts/check-native-cli.py SystemAudioProcessor/.build/debug/SystemAudioProcessor
+
+      - name: Build and verify the signed Release app and its offline checks
+        env:
+          LOWEND_BUILD_NUMBER: ${{ github.run_number }}
         run: ./scripts/build-native-system-audio-app.sh
 
       - name: Configure portable Core tests
-        run: cmake -S Source/Core -B build/core-tests -DLOWEND_CORE_BUILD_TESTING=ON
+        run: cmake -S Source/Core -B build/core-tests -DCMAKE_BUILD_TYPE=Release -DLOWEND_CORE_BUILD_TESTING=ON
 
       - name: Build portable Core tests
-        run: cmake --build build/core-tests --parallel
+        run: cmake --build build/core-tests --config Release --parallel
 
       - name: Run portable Core tests
-        run: ctest --test-dir build/core-tests --output-on-failure
+        run: ctest --test-dir build/core-tests -C Release --output-on-failure
+
+      - name: Capture native self-test backtrace
+        if: failure()
+        timeout-minutes: 2
+        continue-on-error: true
+        run: |
+          executable=SystemAudioProcessor/.build/debug/SystemAudioProcessor
+          if [ -x "$executable" ]; then
+            SWIFT_BACKTRACE=disable lldb --batch -o run --one-line-on-crash "thread backtrace all" -- "$executable" --self-test > "$RUNNER_TEMP/lowend-debug-backtrace.log" 2>&1
+          fi
+
+      - name: Collect native crash diagnostics
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import shutil
+          destination = Path(os.environ["RUNNER_TEMP"]) / "lowend-crash-reports"
+          destination.mkdir(exist_ok=True)
+          for report in (Path.home() / "Library/Logs/DiagnosticReports").glob("SystemAudioProcessor*"):
+              if report.is_file():
+                  shutil.copy2(report, destination / report.name)
+          PY
+
+      - name: Upload native failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lowend-native-failure
+          path: |
+            ${{ runner.temp }}/lowend-debug-self-test.log
+            ${{ runner.temp }}/lowend-debug-backtrace.log
+            ${{ runner.temp }}/lowend-crash-reports/

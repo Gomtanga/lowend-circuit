@@ -10,6 +10,7 @@
 #include <Core/CircuitBass.h>
 #include <cstdio>
 #include <cmath>
+#include <initializer_list>
 
 static int failures = 0;
 static int tests = 0;
@@ -160,7 +161,8 @@ static void test_stability() {
         float input = (i % 100 == 0) ? 0.5f : 0.0f;  // impulse every 100
         float l, r;
         cb.process(input, input, l, r);
-        if (l < -1.5f || l > 1.5f || r < -1.5f || r > 1.5f) {
+        if (!std::isfinite(l) || !std::isfinite(r)
+            || l < -1.5f || l > 1.5f || r < -1.5f || r > 1.5f) {
             stable = false;
             break;
         }
@@ -253,6 +255,48 @@ static void test_high_control_headroom() {
     }
 }
 
+static void test_saturation_boundary_continuity() {
+    // An identity filter fixture isolates the production saturation transfer.
+    // Keep the final protector below its knee to expose any internal jump.
+    LCDSPSettings settings{};
+    settings.intensity = 1;
+    settings.outputGain = 0.5f;
+    settings.circuitHeadroomGain = 1;
+    settings.circuitMakeupGain = 1;
+    settings.wetMix = 1;
+    settings.transformerDrive = 1;
+    settings.transformerMakeupGain = 1;
+    settings.shelf.b0 = 1;
+    settings.transformerPreEmphasis.b0 = 1;
+    settings.transformerDeEmphasis.b0 = 1;
+    lowend::CircuitBass circuit;
+    circuit.update(settings);
+    for (float sign : { -1.f, 1.f }) {
+        float inside = 0, outside = 0, right = 0;
+        circuit.process(sign * (1 - 0.00001f), 0, inside, right);
+        circuit.process(sign * (1 + 0.00001f), 0, outside, right);
+        TEST("cubic saturation continuous at +/-1", std::fabs(outside - inside) < 0.00001f);
+        TEST("saturation ceiling agrees with cubic endpoint", approx(outside, sign / 3, 0.00001f));
+    }
+
+    // Also cross the boundary with actual production controls, not only an
+    // isolated equation. A 10-second input ramp used to produce 0.04-0.16 jumps.
+    for (float intensity : { 22.f, 55.f, 100.f }) {
+        settings = lowend::DSPPrecompute::makeDSPSettings(48000, intensity, 30, 0, 1);
+        circuit.reset();
+        circuit.update(settings);
+        float previous = 0, largestStep = 0;
+        for (int frame = 0; frame < 480000; ++frame) {
+            float left = 0, right = 0;
+            const float input = static_cast<float>(frame) / 480000;
+            circuit.process(input, input, left, right);
+            largestStep = std::fmax(largestStep, std::fabs(left - previous));
+            previous = left;
+        }
+        TEST("production ramp has no saturation step", largestStep < 0.0001f);
+    }
+}
+
 int main() {
     std::printf("=== CircuitBass Golden Tests ===\n\n");
 
@@ -266,6 +310,7 @@ int main() {
     test_sample_rate_dependence();
     test_body_effect();
     test_high_control_headroom();
+    test_saturation_boundary_continuity();
 
     std::printf("\n%d tests, %d failures\n", tests, failures);
     return failures > 0 ? 1 : 0;

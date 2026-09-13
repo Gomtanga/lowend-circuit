@@ -22,14 +22,16 @@ public enum AudioProcessMatcher {
             .filter { !$0.isEmpty }
         guard !requested.isEmpty else { return [] }
 
-        let matches = connected.filter { process in
-            let candidate = process.bundleID.lowercased()
-            return requested.contains { bundleID in
-                candidate == bundleID || candidate.hasPrefix(bundleID + ".")
+        // Each explicitly requested app gets its own idle fallback. An active
+        // helper in one app must not remove another requested app from the tap.
+        let preferred = requested.flatMap { bundleID in
+            let matches = connected.filter { process in
+                let candidate = process.bundleID.lowercased()
+                return candidate == bundleID || candidate.hasPrefix(bundleID + ".")
             }
+            let activeMatches = matches.filter(\.isRunningOutput)
+            return activeMatches.isEmpty ? matches : activeMatches
         }
-        let activeMatches = matches.filter(\.isRunningOutput)
-        let preferred = activeMatches.isEmpty ? matches : activeMatches
         var seen = Set<UInt32>()
         return preferred.filter { seen.insert($0.objectID).inserted }
     }

@@ -19,8 +19,22 @@ public:
     DSPModel model() const { return model_; }
 
 private:
-    CircuitBass circuit_;
-    HighExciter exciter_;
+    struct Bank {
+        CircuitBass circuit;
+        HighExciter exciter;
+        DSPModel model = DSPModel::clean;
+        void update(const DSPSettings& settings, bool clearState);
+        void process(float left, float right, float& leftOut, float& rightOut);
+        void reset();
+    };
+    static constexpr uint32_t transitionFrames = 256;
+    Bank banks_[2];
+    uint32_t active_ = 0;
+    uint32_t target_ = 1;
+    uint32_t transitionRemaining_ = 0;
+    bool initialized_ = false;
+    bool hasPending_ = false;
+    DSPSettings pending_{};
     double sampleRate_ = 48000.0;
     uint32_t channelCount_ = 2;
     DSPModel model_ = DSPModel::clean;

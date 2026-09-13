@@ -18,6 +18,7 @@ add_library(lowend_core STATIC
     src/CircuitBass.cpp
     src/HighExciter.cpp
     src/Processor.cpp
+    src/SpatialGeometry.cpp
 )
 
 target_include_directories(lowend_core

@@ -8,15 +8,18 @@ on:
 jobs:
   portable-core:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        build-type: [Debug, Release]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Configure Core tests
-        run: cmake -S Source/Core -B build/core-tests -DLOWEND_CORE_BUILD_TESTING=ON
+        run: cmake -S Source/Core -B build/core-tests -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} -DLOWEND_CORE_BUILD_TESTING=ON
 
       - name: Build Core tests
-        run: cmake --build build/core-tests --config Release --parallel
+        run: cmake --build build/core-tests --config ${{ matrix.build-type }} --parallel
 
       - name: Run Core tests
-        run: ctest --test-dir build/core-tests -C Release --output-on-failure
+        run: ctest --test-dir build/core-tests -C ${{ matrix.build-type }} --output-on-failure

@@ -1,128 +1,114 @@
 import Foundation
 
-/// Packs a 1-bit DSD/PDM stream into DoP (DSD-over-PCM) carrier frames per the
-/// DoP open standard v1.0.
+/// Stateful DoP 1.1 packer for the offline/test path. Each channel contributes
+/// 16 chronological DSD bits, MSB first, to a 24-bit word below its marker.
+/// The word is right-aligned in a 32-bit little-endian container:
+/// `[payloadLow, payloadHigh, marker, 0]`. Stereo interleaves L then R.
 ///
-/// Frame layout (this implementation uses a 32-bit / 4-byte PCM carrier, the
-/// most common case for USB/DSD DACs):
-///
-/// ```
-/// per DoP sample frame (stereo), 8 bytes, interleaved L then R:
-///
-///   [ DSD_L ][ 0x00 ][ 0x00 ][ marker ]   <- left carrier sample (LE u32)
-///   [ DSD_R ][ 0x00 ][ 0x00 ][ marker ]   <- right carrier sample (LE u32)
-/// ```
-///
-/// where:
-/// * `DSD_x` holds 8 consecutive DSD bits packed **MSB-first** (bit 7 = earliest
-///   in time), per the DoP spec;
-/// * `marker` alternates per DoP sample *frame* (both channels of one frame share
-///   the same marker), toggling `0xFA` -> `0x05` -> `0xFA` ... so the DAC can lock
-///   onto 8-sample frame boundaries.
-///
-/// Real-time contract: `pack(...)` writes into a caller-owned output buffer using
-/// only scalar arithmetic and pointer writes — no allocation, no locks. It is
-/// reached only from the offline/test pipeline in this iteration.
+/// Partial payloads and marker phase survive block boundaries. `reset()` starts
+/// a new stream and discards an unfinished payload; no implicit zero padding is
+/// emitted. This format contract does not enable a live DSD output transport.
+/// All processing state is scalar and packing performs no allocation or locks.
 final class DoPacker {
-    /// Channel interleaving supported by the packer.
     enum ChannelLayout { case mono, stereo }
 
     let channelLayout: ChannelLayout
+    private var leftPayload: UInt16 = 0
+    private var rightPayload: UInt16 = 0
+    private var pendingBits = 0
+    private var nextMarker = DoPCarrier.markerA
 
     init(channelLayout: ChannelLayout = .stereo) {
         self.channelLayout = channelLayout
     }
 
-    var channelCount: Int {
-        channelLayout == .stereo ? 2 : 1
-    }
+    var channelCount: Int { channelLayout == .stereo ? 2 : 1 }
 
-    /// Number of output bytes a full pack of `dsdFrames` DSD bits will produce.
-    /// `dsdFrames` is rounded down to a multiple of 8 (one DSD byte per 8 bits).
+    /// Exact output capacity for the next call, including pending payload bits.
+    /// The result is zero for negative or unrepresentably large frame counts.
     func outputByteCount(forDsdFrames dsdFrames: Int) -> Int {
-        let carrierFrames = dsdFrames / 8
-        return carrierFrames * channelCount * DoPCarrier.carrierSampleBytes
+        guard dsdFrames >= 0 else { return 0 }
+        let (total, overflow) = dsdFrames.addingReportingOverflow(pendingBits)
+        guard !overflow else { return 0 }
+        let frames = total / DoPCarrier.payloadBitsPerSample
+        let (bytes, bytesOverflow) = frames.multipliedReportingOverflow(
+            by: channelCount * DoPCarrier.carrierSampleBytes)
+        return bytesOverflow ? 0 : bytes
     }
 
-    /// Pack the per-channel DSD bit streams into interleaved DoP bytes.
-    ///
-    /// - Parameters:
-    ///   - leftBits: `dsdFrames` bytes, each 0 or 1 (DSD bits for the left channel).
-    ///   - rightBits: `dsdFrames` bytes for the right channel (ignored in mono).
-    ///   - dsdFrames: number of DSD bits per channel. Must be a multiple of 8 for a
-    ///     clean pack; any trailing partial byte is ignored.
-    ///   - output: caller-owned buffer of at least `outputByteCount(forDsdFrames:)`.
-    /// - Returns: number of bytes written to `output`, or 0 on invalid arguments.
+    /// Pack bytes containing 0/1 bits. `output` must hold `outputByteCount` for
+    /// this call; a nonempty input can produce zero bytes while retaining bits.
+    /// A missing stereo right channel is invalid and leaves all state unchanged.
     @discardableResult
     func pack(leftBits: UnsafePointer<UInt8>,
               rightBits: UnsafePointer<UInt8>?,
               dsdFrames: Int,
               output: UnsafeMutablePointer<UInt8>) -> Int {
-        guard dsdFrames >= 8 else { return 0 }
-        let carrierFrames = dsdFrames / 8
-        let bytesPerSample = DoPCarrier.carrierSampleBytes
-        let ch = channelCount
+        guard dsdFrames > 0, channelCount == 1 || rightBits != nil else { return 0 }
+        let (total, overflow) = dsdFrames.addingReportingOverflow(pendingBits)
+        guard !overflow,
+              total / DoPCarrier.payloadBitsPerSample <= Int.max / (channelCount * 4) else {
+            return 0
+        }
         var outIndex = 0
-
-        for t in 0..<carrierFrames {
-            let dsdL = packByte(bits: leftBits, baseBitIndex: t * 8)
-            let marker: UInt8 = (t & 1) == 0 ? DoPCarrier.markerA : DoPCarrier.markerB
-
-            // Left carrier sample (LE): [dsd, 0, 0, marker].
-            output[outIndex] = dsdL;          outIndex &+= 1
-            output[outIndex] = 0x00;          outIndex &+= 1
-            output[outIndex] = 0x00;          outIndex &+= 1
-            output[outIndex] = marker;        outIndex &+= 1
-
-            if ch == 2 {
-                let dsdR = packByte(bits: rightBits!, baseBitIndex: t * 8)
-                output[outIndex] = dsdR;      outIndex &+= 1
-                output[outIndex] = 0x00;      outIndex &+= 1
-                output[outIndex] = 0x00;      outIndex &+= 1
-                output[outIndex] = marker;    outIndex &+= 1
+        for i in 0..<dsdFrames {
+            leftPayload = (leftPayload << 1) | UInt16(leftBits[i] & 1)
+            if let rightBits, channelCount == 2 {
+                rightPayload = (rightPayload << 1) | UInt16(rightBits[i] & 1)
+            }
+            pendingBits += 1
+            if pendingBits == DoPCarrier.payloadBitsPerSample {
+                write(leftPayload, into: output.advanced(by: outIndex))
+                outIndex += DoPCarrier.carrierSampleBytes
+                if channelCount == 2 {
+                    write(rightPayload, into: output.advanced(by: outIndex))
+                    outIndex += DoPCarrier.carrierSampleBytes
+                }
+                nextMarker = nextMarker == DoPCarrier.markerA
+                    ? DoPCarrier.markerB : DoPCarrier.markerA
+                pendingBits = 0
+                leftPayload = 0
+                rightPayload = 0
             }
         }
-        return carrierFrames * ch * bytesPerSample
+        return outIndex
     }
 
-    /// Verify the marker alternation on an already-packed buffer.
-    ///
-    /// For stereo: every DoP frame's left and right carrier samples must carry
-    /// the same marker, and the marker must toggle 0xFA / 0x05 across frames.
-    /// Returns the number of frames inspected, or 0 if a violation is found
-    /// (callers treat 0 on a non-empty buffer as a failure).
+    @inline(__always)
+    private func write(_ payload: UInt16, into output: UnsafeMutablePointer<UInt8>) {
+        output[0] = UInt8(truncatingIfNeeded: payload)
+        output[1] = UInt8(truncatingIfNeeded: payload >> 8)
+        output[2] = nextMarker
+        output[3] = 0
+    }
+
+    func reset() {
+        leftPayload = 0
+        rightPayload = 0
+        pendingBits = 0
+        nextMarker = DoPCarrier.markerA
+    }
+
+    /// Validate a complete buffer independently of the current packing state.
+    /// A slice may start with either valid marker; subsequent frames must toggle.
+    /// Optional `startingMarker` also verifies its phase within a larger stream.
     @discardableResult
-    func verifyMarkers(output: UnsafePointer<UInt8>, byteCount: Int) -> Int {
-        let bytesPerSample = DoPCarrier.carrierSampleBytes
-        let ch = channelCount
-        let frameBytes = ch * bytesPerSample
-        guard frameBytes > 0, byteCount % frameBytes == 0 else { return 0 }
+    func verifyMarkers(output: UnsafePointer<UInt8>, byteCount: Int,
+                       startingMarker: UInt8? = nil) -> Int {
+        let frameBytes = channelCount * DoPCarrier.carrierSampleBytes
+        guard byteCount > 0, byteCount % frameBytes == 0 else { return 0 }
+        var expected = startingMarker ?? output[DoPCarrier.markerByteOffset]
+        guard expected == DoPCarrier.markerA || expected == DoPCarrier.markerB else { return 0 }
         let frames = byteCount / frameBytes
-        for t in 0..<frames {
-            let expected: UInt8 = (t & 1) == 0 ? DoPCarrier.markerA : DoPCarrier.markerB
-            let frameBase = t * frameBytes
-            // Marker byte is the last byte of each carrier sample.
-            let markerL = output[frameBase + bytesPerSample - 1]
-            if markerL != expected { return 0 }
-            if ch == 2 {
-                let markerR = output[frameBase + bytesPerSample + (bytesPerSample - 1)]
-                if markerR != expected { return 0 }
+        for frame in 0..<frames {
+            for channel in 0..<channelCount {
+                let base = frame * frameBytes + channel * DoPCarrier.carrierSampleBytes
+                guard output[base + DoPCarrier.markerByteOffset] == expected,
+                      output[base + 3] == 0 else { return 0 }
             }
+            expected = expected == DoPCarrier.markerA
+                ? DoPCarrier.markerB : DoPCarrier.markerA
         }
         return frames
-    }
-
-    /// Pack 8 DSD bits (each 0/1) into one byte, MSB-first per the DoP spec.
-    private func packByte(bits: UnsafePointer<UInt8>, baseBitIndex: Int) -> UInt8 {
-        var byte: UInt8 = 0
-        byte |= (bits[baseBitIndex    ] & 1) << 7
-        byte |= (bits[baseBitIndex + 1] & 1) << 6
-        byte |= (bits[baseBitIndex + 2] & 1) << 5
-        byte |= (bits[baseBitIndex + 3] & 1) << 4
-        byte |= (bits[baseBitIndex + 4] & 1) << 3
-        byte |= (bits[baseBitIndex + 5] & 1) << 2
-        byte |= (bits[baseBitIndex + 6] & 1) << 1
-        byte |= (bits[baseBitIndex + 7] & 1)
-        return byte
     }
 }

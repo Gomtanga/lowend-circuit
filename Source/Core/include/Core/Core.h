@@ -48,7 +48,7 @@ enum class DSPModel : uint32_t {
 using DSPSettings = LCDSPSettings;
 
 // ======================================================================
-// Biquad — Direct Form I biquad filter
+// Biquad — transposed Direct Form II biquad filter
 //
 // Matches the Swift Biquad struct (main.swift lines 2196-2236):
 //   output = b0 * input + z1
@@ -96,6 +96,26 @@ private:
     // State
     float z1_ = 0.0f;
     float z2_ = 0.0f;
+};
+
+// Low-frequency filters need Double coefficients AND state at 384/768 kHz.
+// Merely computing in Double and rounding into the Float POD still changes
+// the low-frequency response significantly through coefficient cancellation.
+class Biquad64 {
+public:
+    void update(const LCBiquadCoefficients64& coefficients);
+    void update(const LCBiquadCoefficients& coefficients);
+    float process(float input);
+    void reset();
+
+    static LCBiquadCoefficients64 makeLowShelf(double sampleRate,
+                                               double frequency,
+                                               double q,
+                                               double gainDb);
+
+private:
+    double b0_ = 1.0, b1_ = 0.0, b2_ = 0.0, a1_ = 0.0, a2_ = 0.0;
+    double z1_ = 0.0, z2_ = 0.0;
 };
 
 // ======================================================================
@@ -155,11 +175,6 @@ struct DSPPrecompute {
 private:
     static float clamp(float value, float lower, float upper);
     static float makePolynomialSoftClip(float input);
-    static float distance(float ax, float az, float bx, float bz);
-    static float inverseDistanceGain(float meters);
-    static LCSpatialPathSettings makeSpatialPath(float distanceOffset,
-                                                  float gain,
-                                                  float sampleRate);
 };
 
 } // namespace lowend

@@ -12,6 +12,13 @@ public enum SourcePlayer: String, CaseIterable, Sendable {
             return "TIDAL"
         }
     }
+
+    public var bundleID: String {
+        switch self {
+        case .appleMusic: return "com.apple.Music"
+        case .tidal: return "com.tidal.desktop"
+        }
+    }
 }
 
 public enum SourceFormatConfidence: Int, Comparable, Sendable {
@@ -81,10 +88,116 @@ public struct SourceFormatLogEntry: Equatable, Sendable {
     }
 }
 
+/// Capture scope is nil for the global tap and a list of bundle roots for a
+/// process tap. Multiple usable players are deliberately ambiguous, even when
+/// their rates happen to agree; there is no single source owning that mix.
+public enum SourceFormatSelectionPolicy {
+    public static func select(formats: [SourceAudioFormat],
+                              capturedBundleIDs: [String]? = nil) -> SourceAudioFormat? {
+        let roots = capturedBundleIDs?.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }.filter { !$0.isEmpty }
+        let candidates = formats.filter { format in
+            guard format.hasUsableSampleRate, format.confidence != .unknown else { return false }
+            guard let roots else { return true }
+            let playerBundle = format.player.bundleID.lowercased()
+            return roots.contains { root in
+                root == playerBundle || playerBundle.hasPrefix(root + ".")
+                    || root.hasPrefix(playerBundle + ".")
+            }
+        }
+        let players = Set(candidates.map(\.player))
+        guard players.count == 1 else { return nil }
+        return candidates.max { $0.observedAt < $1.observedAt }
+    }
+}
+
 public enum TIDALPlayerLogResult: Equatable, Sendable {
     case unavailable
     case inactive
+    /// A log exists, but no recent playback evidence belongs to this session.
+    case stale
     case format(SourceAudioFormat)
+}
+
+/// Stateful parser for newly appended log records only. Polling an unchanged
+/// file never refreshes observedAt. Reset when the player/file session changes.
+public struct TIDALPlaybackEvidenceTracker: Sendable {
+    public let maximumEvidenceAge: TimeInterval
+    private var latestFormat: (sampleRate: Double, bitDepth: Int, date: Date)?
+    private var playbackIsActive: Bool?
+    private var activityDate: Date?
+
+    public init(maximumEvidenceAge: TimeInterval = 15) {
+        self.maximumEvidenceAge = max(0, maximumEvidenceAge)
+    }
+
+    public mutating func reset() {
+        latestFormat = nil
+        playbackIsActive = nil
+        activityDate = nil
+    }
+
+    public mutating func ingest(_ entries: [SourceFormatLogEntry]) {
+        for entry in entries.sorted(by: { $0.date < $1.date }) {
+            if let format = SourceFormatParser.tidalSinkFormat(from: entry.message),
+               latestFormat == nil || entry.date >= latestFormat!.date {
+                latestFormat = (format.sampleRate, format.bitDepth, entry.date)
+            }
+            if let active = SourceFormatParser.tidalPlaybackActivity(from: entry.message),
+               activityDate == nil || entry.date >= activityDate! {
+                playbackIsActive = active
+                activityDate = entry.date
+            }
+        }
+    }
+
+    public func snapshot(observedAt: Date) -> TIDALPlayerLogResult {
+        guard playbackIsActive != false else { return .inactive }
+        guard playbackIsActive == true, let latestFormat, let activityDate else {
+            return .unavailable
+        }
+        let evidenceAt = max(latestFormat.date, activityDate)
+        guard observedAt.timeIntervalSince(evidenceAt) <= maximumEvidenceAge else { return .stale }
+        return .format(SourceAudioFormat(
+            player: .tidal, sampleRate: latestFormat.sampleRate,
+            bitDepth: latestFormat.bitDepth, confidence: .detected,
+            evidence: .tidalPlayerLog, observedAt: evidenceAt
+        ))
+    }
+}
+
+public enum TIDALLogReadPlan: Equatable, Sendable {
+    case newSession
+    case unchanged
+    case read(from: UInt64)
+}
+
+/// A new PID/file identity or truncation starts at EOF. Historical bytes are
+/// never assigned a fresh timestamp when monitoring attaches to a player.
+public struct TIDALLogReadCursor: Sendable {
+    private var sessionID: String?
+    private var offset: UInt64 = 0
+
+    public init() {}
+
+    public mutating func reset() {
+        sessionID = nil
+        offset = 0
+    }
+
+    public mutating func plan(sessionID: String, fileSize: UInt64) -> TIDALLogReadPlan {
+        guard self.sessionID == sessionID, fileSize >= offset else {
+            self.sessionID = sessionID
+            offset = fileSize
+            return .newSession
+        }
+        return fileSize == offset ? .unchanged : .read(from: offset)
+    }
+
+    public mutating func didRead(through offset: UInt64) {
+        self.offset = offset
+    }
 }
 
 public enum AppleMusicPlaybackState: String, Equatable, Sendable {
@@ -159,56 +272,31 @@ public enum SourceFormatParser {
         entries: [SourceFormatLogEntry],
         observedAt: Date = Date()
     ) -> TIDALPlayerLogResult {
-        guard let tidalSinkExpression else { return .unavailable }
+        var evidence = TIDALPlaybackEvidenceTracker()
+        evidence.ingest(entries)
+        return evidence.snapshot(observedAt: observedAt)
+    }
 
-        var latestFormat: (sampleRate: Double, bitDepth: Int)?
-        var playbackIsActive: Bool?
+    fileprivate static func tidalSinkFormat(from message: String) -> (sampleRate: Double, bitDepth: Int)? {
+        guard let tidalSinkExpression,
+              let values = captures(expression: tidalSinkExpression, in: message),
+              let sampleRate = Double(values[0]),
+              let bitDepth = Int(values[2]),
+              isPlausibleSampleRate(sampleRate), (8...64).contains(bitDepth) else { return nil }
+        return (sampleRate, bitDepth)
+    }
 
-        for entry in entries.sorted(by: { $0.date < $1.date }) {
-            let message = entry.message
-            if let captures = captures(expression: tidalSinkExpression, in: message),
-               let sampleRate = Double(captures[0]),
-               let bitDepth = Int(captures[2]),
-               isPlausibleSampleRate(sampleRate),
-               (8...64).contains(bitDepth) {
-                latestFormat = (sampleRate, bitDepth)
-            }
-
-            // Some TIDAL Desktop builds omit the final media.state=active
-            // signal after a track switch even though Core Audio has already
-            // started. Treat the sink lifecycle as authoritative playback
-            // evidence so a newly opened format is not held indefinitely.
-            if message.contains("CoreaudioSink::start") {
-                playbackIsActive = true
-            } else if message.contains("CoreaudioSink::close") {
-                playbackIsActive = false
-            }
-
-            if message.contains(#""signal": "media.state""#) {
-                if message.contains(#""state": "active""#) {
-                    playbackIsActive = true
-                } else if message.contains(#""state": "paused""#)
-                            || message.contains(#""state": "stopped""#)
-                            || message.contains(#""state": "completed""#) {
-                    playbackIsActive = false
-                }
-            }
+    fileprivate static func tidalPlaybackActivity(from message: String) -> Bool? {
+        // Media state takes precedence when a combined record includes both.
+        if message.contains(#""signal": "media.state""#) {
+            if message.contains(#""state": "active""#) { return true }
+            if message.contains(#""state": "paused""#)
+                || message.contains(#""state": "stopped""#)
+                || message.contains(#""state": "completed""#) { return false }
         }
-
-        guard playbackIsActive == true else {
-            return playbackIsActive == false ? .inactive : .unavailable
-        }
-        guard let latestFormat else { return .unavailable }
-        return .format(
-            SourceAudioFormat(
-                player: .tidal,
-                sampleRate: latestFormat.sampleRate,
-                bitDepth: latestFormat.bitDepth,
-                confidence: .detected,
-                evidence: .tidalPlayerLog,
-                observedAt: observedAt
-            )
-        )
+        if message.contains("CoreaudioSink::start") { return true }
+        if message.contains("CoreaudioSink::close") { return false }
+        return nil
     }
 
     public static func resolveAppleMusicFormat(
@@ -460,23 +548,33 @@ public struct SourceRateMatchStabilityGate: Sendable {
         emitted = nil
     }
 
+    /// Call only after the manager accepted/completed this proposed transition.
+    /// A cooldown return or failed device request must not acknowledge it.
+    public mutating func acknowledge(targetRate: Double) {
+        guard targetRate.isFinite, let candidate,
+              abs(Double(candidate.targetRate) - targetRate) <= 1 else { return }
+        emitted = candidate
+    }
+
     public mutating func observe(format: SourceAudioFormat?,
                                  currentDeviceRate: Double,
                                  supportedRates: [Double],
                                  isDeviceRateSettable: Bool,
                                  observedAt: Date) -> Double? {
         guard isDeviceRateSettable,
+              currentDeviceRate.isFinite, currentDeviceRate >= 8_000,
+              currentDeviceRate < Double(Int.max),
               let format,
               let sourceRate = format.sampleRate,
               format.hasUsableSampleRate,
+              sourceRate < Double(Int.max),
               let targetRate = SourceRateMatchPolicy.bestRate(
                 sourceRate: sourceRate,
                 supportedRates: supportedRates
               ),
+              targetRate < Double(Int.max),
               abs(targetRate - currentDeviceRate) > 1 else {
-            candidate = nil
-            candidateSince = nil
-            observationCount = 0
+            reset()
             return nil
         }
 
@@ -500,7 +598,65 @@ public struct SourceRateMatchStabilityGate: Sendable {
               observedAt.timeIntervalSince(candidateSince ?? observedAt) >= minimumStableDuration else {
             return nil
         }
-        emitted = key
+        // This is a proposal, not a completed device operation. The manager
+        // may defer it during cooldown; leave it eligible until acknowledged.
         return targetRate
+    }
+}
+
+/// The real manager and offline checks share proposal, cooldown and ACK order.
+/// Device work remains in the caller's closure, on its manager queue.
+public struct SourceRateMatchCoordinator: Sendable {
+    public enum Outcome: Equatable, Sendable {
+        case waiting
+        case coolingDown(remaining: TimeInterval)
+        case deferred(targetRate: Double)
+        case applied(targetRate: Double)
+    }
+
+    private var gate: SourceRateMatchStabilityGate
+    public private(set) var cooldownUntil: Date = .distantPast
+    public let cooldownInterval: TimeInterval
+
+    public init(minimumStableDuration: TimeInterval = 1,
+                requiredObservationCount: Int = 2,
+                cooldownInterval: TimeInterval = 2) {
+        gate = SourceRateMatchStabilityGate(minimumStableDuration: minimumStableDuration,
+                                           requiredObservationCount: requiredObservationCount)
+        self.cooldownInterval = max(0, cooldownInterval)
+    }
+
+    /// Source loss invalidates stability but does not cancel a device cooldown.
+    public mutating func invalidateSource() { gate.reset() }
+
+    /// Explicit session reset/re-enable also clears the prior cooldown.
+    public mutating func reset() {
+        gate.reset()
+        cooldownUntil = .distantPast
+    }
+
+    public mutating func observe(format: SourceAudioFormat?, currentDeviceRate: Double,
+                                 supportedRates: [Double], isDeviceRateSettable: Bool,
+                                 now: () -> Date,
+                                 performTransition: (Double) throws -> Bool) throws -> Outcome {
+        let instant = now()
+        guard let target = gate.observe(format: format, currentDeviceRate: currentDeviceRate,
+                                        supportedRates: supportedRates,
+                                        isDeviceRateSettable: isDeviceRateSettable,
+                                        observedAt: instant) else { return .waiting }
+        guard instant >= cooldownUntil else {
+            return .coolingDown(remaining: cooldownUntil.timeIntervalSince(instant))
+        }
+
+        let previousCooldown = cooldownUntil
+        cooldownUntil = instant.addingTimeInterval(cooldownInterval)
+        // A thrown transition is not acknowledged. The caller may disable its
+        // session; retaining the cooldown also prevents an immediate retry.
+        guard try performTransition(target) else {
+            cooldownUntil = previousCooldown
+            return .deferred(targetRate: target)
+        }
+        gate.acknowledge(targetRate: target)
+        return .applied(targetRate: target)
     }
 }

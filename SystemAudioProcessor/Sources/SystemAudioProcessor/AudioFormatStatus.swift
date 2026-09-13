@@ -45,4 +45,6 @@ enum AudioFormatNotifications {
     /// Live PCM 2× oversampling activation + fallback state (Output Conditioning).
     static let livePCM2xActiveKey = "livePCM2xActive"
     static let livePCM2xFallbackKey = "livePCM2xFallback"
+    /// Manager-confirmed processing state accompanying the final 2× outcome.
+    static let isProcessingKey = "isProcessing"
 }

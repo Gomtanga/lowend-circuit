@@ -33,13 +33,13 @@ LowEnd Circuit
 
 ## 다운로드
 
-현재 최신 릴리스는 [v0.2.10](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.2.10)입니다. 변경 사항과 검증 결과는 릴리스 노트에서 확인할 수 있습니다.
+이 저장소 문서의 다운로드 기준 릴리스는 [v0.3.0](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.3.0)입니다. 변경 사항과 검증 결과는 릴리스 노트에서 확인할 수 있습니다.
 
 ### 미리 빌드된 파일
 
 | 플랫폼 | 파일 | 용도 |
 |---|---|---|
-| macOS 14.4 이상, Apple Silicon | [`LowEnd-Native-Audio-macOS-v0.2.10.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.2.10/LowEnd-Native-Audio-macOS-v0.2.10.zip) | 전체 시스템 또는 특정 앱 처리 |
+| macOS 14.4 이상, Apple Silicon | [`LowEnd-Native-Audio-macOS-v0.3.0.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.3.0/LowEnd-Native-Audio-macOS-v0.3.0.zip) | 전체 시스템 또는 특정 앱 처리 |
 
 이전 버전은 [GitHub Releases](https://github.com/Gomtanga/lowend-circuit/releases)에서 받을 수 있습니다.
 
@@ -75,7 +75,7 @@ LowEnd Circuit
 
 | 기능 | 역할 | 제공 대상 |
 |---|---|---|
-| **Clean** | 모델 DSP와 공간 처리를 우회해 처리 전 원본 신호(Dry)를 비교합니다. | LowEnd Native Audio |
+| **Clean** | Circuit/HighExciter 톤 모델만 우회합니다. Spatial과 Output Conditioning은 독립적이므로 원본 비교 시 각각 꺼야 합니다. | LowEnd Native Audio |
 | **Circuit** | `LowEnd`, `Body`, 병렬 처리 신호(Wet), 비대칭 포화, 출력 보호를 조합해 저역의 양감과 질감을 조절합니다. | LowEnd Native Audio |
 | **HighExciter** | 약 11 kHz 이상의 성분에서 배음을 만들고 샘플레이트에 따라 비선형 구간의 오버샘플링 배율을 조절합니다. | LowEnd Native Audio |
 | **Spatial Stage** | 가상 스피커 폭, 청취자 위치, 거리 게인, 양이간 시간차, 크로스피드를 이용해 헤드폰 공간을 조절합니다. | LowEnd Native Audio |
@@ -122,7 +122,7 @@ HighExciter 프리셋은 `Exciter Drive`와 `Wet Mix`만 바꿉니다. Circuit�
 LowEnd Native Audio의 포맷 표시는 서로 다른 값을 구분합니다.
 
 - `Tap`: Core Audio Process Tap이 전달하는 포맷
-- `Engine`: DSP 엔진의 처리 포맷
+- `Engine`: 출력 그래프의 포맷. Live PCM 2×에서는 톤/Spatial DSP가 Tap rate로 처리한 뒤 2× 변환되어 이 포맷에 도달합니다.
 - `DAC`: 출력 장치가 사용하는 명목 샘플레이트
 - `Source`: Apple Music 또는 TIDAL에서 별도로 확인한 재생 소스 정보
 
@@ -130,11 +130,13 @@ LowEnd Native Audio의 포맷 표시는 서로 다른 값을 구분합니다.
 
 TIDAL은 `player.log` 변경을 파일 시스템 이벤트로 감지해 소스 포맷을 다시 확인합니다. 약 80 ms 디바운스 뒤 즉시 분석하고 로그 교체·회전 시 감시를 다시 연결하며, 이벤트를 놓친 경우에는 주기적 확인 경로가 복구를 담당합니다. `CoreaudioSink::start`와 `CoreaudioSink::close`도 재생 상태 근거로 사용하므로 TIDAL이 `media.state=active`를 늦게 쓰거나 생략하는 곡 전환도 처리할 수 있습니다.
 
+소스 감시는 PID·로그 파일 identity·읽은 위치로 재시작과 회전을 구분합니다. 기존 로그를 현재 관측으로 다시 사용하지 않으므로 감시 시작 이후 새 playback/sink 기록이 없거나 증거가 15초 이상 갱신되지 않으면 `unknown`이 될 수 있습니다. 복수 소스가 섞이거나 실제 캡처 대상과 일치하지 않으면 자동 rate 변경을 보류합니다.
+
 `Rate Match Preview`는 감지된 소스와 DAC가 보고한 지원 샘플레이트를 비교해 후보만 보여 주는 읽기 전용 기능입니다. DAC 설정을 직접 바꾸지 않습니다.
 
-`자동 Rate Match`는 전문가 모드에서만 보이는 실험 기능이며 기본값은 꺼져 있습니다. 켜면 안정적인 소스 관찰 뒤 출력 페이드 아웃, 엔진 정지, DAC 및 Engine 변경, 캡처·출력 재구성, 흐름 확인, 페이드 인 순서로 전환합니다. 하드웨어가 다시 동기화되는 동안 곡이 바뀔 때마다 약 1~2초 동안 소리가 나지 않을 수 있습니다.
+`자동 Rate Match`는 상세 포맷 표시와 독립된 실험 기능이며 기본값은 꺼져 있습니다. 켜면 안정적인 소스 관찰 뒤 출력 페이드 아웃, 엔진 정지, DAC 및 Engine 변경, 캡처·출력 재구성, 흐름 확인, 페이드 인 순서로 전환합니다. 다른 샘플레이트의 소스로 전환할 때 하드웨어 재동기화로 무음 구간이 생길 수 있으며, 소요 시간은 장치와 전환 결과에 따라 달라집니다. Live PCM 2×와 자동 Rate Match는 배타적인 rate 변경 모드입니다.
 
-끊김 없는 재생이 우선이라면 자동 Rate Match를 끄고 DAC를 96 kHz 또는 192 kHz처럼 고정된 값으로 사용하세요. 자세한 동작과 복구 조건은 [Rate Matching](docs/rate-matching.md)과 [Source Rate Tracking and Device Lock Plan](docs/source-rate-and-device-lock-plan.md)에 정리되어 있습니다.
+곡 전환 시 장치 재설정을 피하려면 자동 Rate Match를 끄고 해당 DAC가 지원하는 고정 샘플레이트로 사용하세요. 자세한 동작과 복구 조건은 [Rate Matching](docs/rate-matching.md)과 [Source Rate Tracking and Device Lock Plan](docs/source-rate-and-device-lock-plan.md)에 정리되어 있습니다.
 
 ## 먼저 알아둘 제한사항
 
@@ -194,7 +196,7 @@ open "build/LowEndCircuit_artefacts/Release/NativeSystemAudio/LowEnd Native Audi
 이 저장소의 CI는 휴대용 C++ Core, Swift 지원 검사, Swift·C++ DSP 비교, LowEnd Native Audio 빌드를 나누어 검사합니다. 로컬에서는 필요한 범위에 맞춰 다음 명령을 사용할 수 있습니다.
 
 ```sh
-cmake -S Source/Core -B build/core-tests -DLOWEND_CORE_BUILD_TESTING=ON
+cmake -S Source/Core -B build/core-tests -DCMAKE_BUILD_TYPE=Release -DLOWEND_CORE_BUILD_TESTING=ON
 cmake --build build/core-tests --parallel
 ctest --test-dir build/core-tests --output-on-failure
 ```
@@ -202,11 +204,33 @@ ctest --test-dir build/core-tests --output-on-failure
 macOS에서는 다음 검사도 실행할 수 있습니다.
 
 ```sh
-swift run --package-path SystemAudioProcessor LowEndSupportChecks
-swift run --package-path SystemAudioProcessor SystemAudioProcessor --self-test
+swift run --package-path SystemAudioProcessor -c release LowEndSupportChecks
+swift run --package-path SystemAudioProcessor -c release SystemAudioProcessor --self-test
 ```
 
+`--self-test`는 빠른 오프라인 회귀 검사입니다. CPU 처리량 벤치마크는 `--benchmark-output-conditioning`으로 별도 실행합니다. `RateMatchBench`는 기본적으로 `--dry-run`이며 장치의 지원율과 제안만 읽습니다. 실제 변경에는 `--execute --device ID`가 필요하고 다른 앱의 오디오가 끊길 수 있습니다. 이 수동 도구는 일반 빌드·CI에서 실행하지 않습니다.
+
+빌드 스크립트는 Release 지원 검사와 서명된 최종 실행 파일의 self-test·CLI 인수 회귀 검사를 통과한 임시 앱만 기존 앱과 교체합니다. CLI 검사는 잘못된 인수의 거절과 도움말 출력을 확인합니다. SwiftPM shader resource bundle과 애드혹 서명도 검사합니다. 별도 경로에서 QA할 때는 다음처럼 실행합니다.
+
+```sh
+LOWEND_BUILD_DIR=/tmp/lowend-build-qa \
+LOWEND_APP_DIR="/tmp/lowend-app-qa/LowEnd Native Audio.app" \
+./scripts/build-native-system-audio-app.sh
+```
+
+선택적으로 `LOWEND_SWIFT_SCRATCH_DIR`와 숫자 `LOWEND_BUILD_NUMBER`를 지정할 수 있습니다. 경로는 절대 경로를 사용합니다. 빌드 번호는 배포용 식별값이며 shallow clone의 commit 수를 전역 단조 증가 번호로 취급하지 않습니다. `--self-test` 통과는 Process Tap 권한, 실제 DAC 전환, 청취·VoiceOver QA 완료를 의미하지 않습니다.
+
+특정 개발 도구 조합을 검증할 때는 `LOWEND_SWIFT_SDK`에 설치된 macOS SDK 경로, `LOWEND_SWIFT_BUILD_SYSTEM`에 해당 Swift가 지원하는 빌드 시스템 이름을 지정할 수 있습니다. 두 product 빌드와 실행 파일 경로 조회에 같은 값이 전달됩니다. 생략하면 Swift의 기본값을 사용하며 시스템의 developer directory를 변경하지 않습니다.
+
 실시간 오디오 콜백은 메모리 할당, 잠금, 로그 및 파일 입출력, UI 접근, 필터 계수 계산을 하지 않도록 설계되어 있습니다. 자세한 구조는 소스와 [Cross-Platform Core Architecture](docs/cross-platform-core-architecture.md)를 참고하세요.
+
+## 현재 소스의 처리 구현과 실험 범위
+
+Native live callback은 `TonalDSP.swift`의 Swift Circuit/HighExciter와 `SpatialDSP.swift`를 실행합니다. C++ `Source/Core`는 portable DSP 및 parity 비교 경로이며, 공간 geometry는 C++ 순수 계산을 C ABI로 공유합니다. 두 언어의 출력 일치는 동일한 오류를 배제하지 않으므로 독립 impulse·주파수 응답·DC·전환 fixture도 검사합니다.
+
+Output Conditioning의 live 범위는 PCM 2×입니다. 4×/8×, dither/noise shaping, DSD/DoP는 live 출력에 연결되어 있지 않습니다. offline DoP packer는 채널별 16 DSD bits와 8-bit marker를 32-bit little-endian container `[payloadLow, payloadHigh, marker, 0]`에 담으며, block 사이의 marker phase와 잔여 bits를 보존합니다. 이 형식 검사는 완성된 DSD64/128/256 transport 또는 DAC 호환성 검증을 뜻하지 않습니다.
+
+v0.3.0에는 Spatial Stage 개편과 오디오 처리 안정화가 포함됩니다. 확인된 기능과 검증 범위는 해당 릴리스 노트를 기준으로 확인하세요.
 
 ## 문제 신고와 기여
 

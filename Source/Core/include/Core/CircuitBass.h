@@ -34,11 +34,11 @@ public:
 private:
     struct Channel {
         // Filters — direct member storage (no heap, no pointer indirection)
-        Biquad shelf;
+        Biquad64 shelf;
         OnePole bassPole;
         OnePole subPole;
-        Biquad preEmphasis;
-        Biquad deEmphasis;
+        Biquad64 preEmphasis;
+        Biquad64 deEmphasis;
 
         // Scalar parameters (set by update(), read by process())
         float intensity = 0.0f;

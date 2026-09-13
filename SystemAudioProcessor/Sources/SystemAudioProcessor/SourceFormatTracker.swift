@@ -6,17 +6,44 @@ import OSLog
 
 struct SourceFormatSnapshot: Sendable {
     let activePlayers: [SourcePlayer]
-    let format: SourceAudioFormat?
+    let formats: [SourceAudioFormat]
+
+    var format: SourceAudioFormat? {
+        SourceFormatSelectionPolicy.select(formats: formats)
+    }
 
     var indicatorText: String {
         if let format {
             return format.indicatorText
+        }
+        if Set(formats.map(\.player)).count > 1 {
+            return "Source \(formats.map { $0.player.displayName }.joined(separator: " + ")): 복수 소스, 자동 맞춤 대기"
         }
         guard !activePlayers.isEmpty else {
             return "Source: Apple Music/TIDAL 대기 중"
         }
         return "Source \(activePlayers.map(\.displayName).joined(separator: " + ")): unknown"
     }
+}
+
+/// Process identity is separate from AppKit so lifecycle checks can exercise
+/// the real poll/cache/file-reader path against a temporary log only.
+struct SourcePlayerProcess: Sendable {
+    let processIdentifier: Int32
+    let launchDate: Date?
+}
+
+struct SourceFormatTrackerEnvironment: Sendable {
+    var runningApplication: @Sendable (SourcePlayer) -> SourcePlayerProcess? = { player in
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: player.bundleID).first else { return nil }
+        return SourcePlayerProcess(processIdentifier: app.processIdentifier, launchDate: app.launchDate)
+    }
+    var now: @Sendable () -> Date = { Date() }
+    var tidalPlayerLogURL: URL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/TIDAL/player.log")
+    // Offline checks disable filesystem watchers, Unified Log and AppleScript;
+    // ordinary file reads still use FileHandle/fstat on their injected temp URL.
+    var allowsSystemObservations = true
 }
 
 final class SourceFormatTracker: @unchecked Sendable {
@@ -31,19 +58,23 @@ final class SourceFormatTracker: @unchecked Sendable {
     private var cachedFormats: [SourcePlayer: SourceAudioFormat] = [:]
     private let cacheLifetime: TimeInterval = 15
     private lazy var logStore: OSLogStore? = try? OSLogStore.local()
-    private let tidalPlayerLogURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/TIDAL/player.log")
+    private let environment: SourceFormatTrackerEnvironment
     private var lastAppleMusicPersistentID: String?
     private var lastAppleMusicState: AppleMusicPlaybackState = .notRunning
     private var acceleratedPollsRemaining: Int = 0
     private var tidalLogSource: DispatchSourceFileSystemObject?
     private var tidalLogRefreshWorkItem: DispatchWorkItem?
     private var tidalLogRearmWorkItem: DispatchWorkItem?
+    private var tidalLogCursor = TIDALLogReadCursor()
+    private var tidalPlaybackEvidence = TIDALPlaybackEvidenceTracker()
+    private var tidalLogRemainder = Data()
 
     init(onUpdate: @escaping @Sendable (SourceFormatSnapshot) -> Void,
-         onObservation: @escaping @Sendable (SourceFormatSnapshot) -> Void = { _ in }) {
+         onObservation: @escaping @Sendable (SourceFormatSnapshot) -> Void = { _ in },
+         environment: SourceFormatTrackerEnvironment = SourceFormatTrackerEnvironment()) {
         self.onUpdate = onUpdate
         self.onObservation = onObservation
+        self.environment = environment
     }
 
     func start() {
@@ -66,6 +97,8 @@ final class SourceFormatTracker: @unchecked Sendable {
             timer?.cancel()
             timer = nil
             cachedFormats.removeAll(keepingCapacity: true)
+            lastSnapshotText = ""
+            resetTIDALReadState()
             lastAppleMusicPersistentID = nil
             lastAppleMusicState = .notRunning
             acceleratedPollsRemaining = 0
@@ -77,9 +110,12 @@ final class SourceFormatTracker: @unchecked Sendable {
         }
     }
 
-    private func poll(updateAppleMusic: Bool = true) {
-        let activePlayers = SourcePlayer.allCases.filter(Self.isPlayerRunning)
-        let now = Date()
+    func pollOnce() -> SourceFormatSnapshot { queue.sync { poll() } }
+
+    @discardableResult
+    private func poll(updateAppleMusic: Bool = true) -> SourceFormatSnapshot {
+        let activePlayers = SourcePlayer.allCases.filter { environment.runningApplication($0) != nil }
+        let now = environment.now()
 
         if updateAppleMusic {
             installTIDALLogWatcherIfNeeded()
@@ -141,15 +177,21 @@ final class SourceFormatTracker: @unchecked Sendable {
             switch readTIDALPlayerLog(observedAt: now) {
             case let .format(tidalFormat):
                 cachedFormats[.tidal] = tidalFormat
-            case .inactive:
+            case .inactive, .stale:
                 cachedFormats.removeValue(forKey: .tidal)
             case .unavailable:
-                if let tidalFormat = readUnifiedLog(player: .tidal) {
+                if let tidalFormat = readUnifiedLog(player: .tidal),
+                   now.timeIntervalSince(tidalFormat.observedAt) <= cacheLifetime,
+                   let launchedAt = environment.runningApplication(.tidal)?.launchDate,
+                   tidalFormat.observedAt >= launchedAt {
                     cachedFormats[.tidal] = tidalFormat
+                } else {
+                    cachedFormats.removeValue(forKey: .tidal)
                 }
             }
         } else {
             cachedFormats.removeValue(forKey: .tidal)
+            resetTIDALReadState()
         }
 
         cachedFormats = cachedFormats.filter {
@@ -157,23 +199,19 @@ final class SourceFormatTracker: @unchecked Sendable {
                 && now.timeIntervalSince($0.value.observedAt) <= cacheLifetime
         }
 
-        let bestFormat = cachedFormats.values.max { lhs, rhs in
-            if lhs.observedAt != rhs.observedAt {
-                return lhs.observedAt < rhs.observedAt
-            }
-            return lhs.confidence < rhs.confidence
-        }
-        let snapshot = SourceFormatSnapshot(activePlayers: activePlayers, format: bestFormat)
+        let formats = SourcePlayer.allCases.compactMap { cachedFormats[$0] }
+        let snapshot = SourceFormatSnapshot(activePlayers: activePlayers, formats: formats)
         onObservation(snapshot)
-        guard snapshot.indicatorText != lastSnapshotText else { return }
+        guard snapshot.indicatorText != lastSnapshotText else { return snapshot }
         lastSnapshotText = snapshot.indicatorText
         onUpdate(snapshot)
+        return snapshot
     }
 
     private func installTIDALLogWatcherIfNeeded() {
-        guard tidalLogSource == nil else { return }
+        guard environment.allowsSystemObservations, tidalLogSource == nil else { return }
 
-        let descriptor = open(tidalPlayerLogURL.path, O_EVTONLY)
+        let descriptor = open(environment.tidalPlayerLogURL.path, O_EVTONLY)
         guard descriptor >= 0 else { return }
 
         let source = DispatchSource.makeFileSystemObjectSource(
@@ -227,6 +265,7 @@ final class SourceFormatTracker: @unchecked Sendable {
     }
 
     private func readUnifiedLogEntries(player: SourcePlayer) -> [SourceFormatLogEntry] {
+        guard environment.allowsSystemObservations else { return [] }
         do {
             guard let store = logStore else {
                 return []
@@ -281,37 +320,80 @@ final class SourceFormatTracker: @unchecked Sendable {
         }
     }
 
+    private func resetTIDALReadState() {
+        tidalLogCursor.reset()
+        tidalPlaybackEvidence.reset()
+        tidalLogRemainder.removeAll(keepingCapacity: true)
+    }
+
     private func readTIDALPlayerLog(observedAt: Date) -> TIDALPlayerLogResult {
-        guard let handle = try? FileHandle(forReadingFrom: tidalPlayerLogURL) else {
+        guard let application = environment.runningApplication(.tidal),
+              let handle = try? FileHandle(forReadingFrom: environment.tidalPlayerLogURL) else {
+            resetTIDALReadState()
             return .unavailable
         }
         defer { try? handle.close() }
 
         do {
+            // fstat identifies the opened file, avoiding a path/rotation race.
+            var info = stat()
+            guard fstat(handle.fileDescriptor, &info) == 0 else { return .stale }
+            let launchIdentity = application.launchDate?.timeIntervalSince1970 ?? 0
+            let sessionID = "\(application.processIdentifier):\(launchIdentity):\(info.st_dev):\(info.st_ino)"
             let fileSize = try handle.seekToEnd()
-            let readSize = min(fileSize, 256 * 1_024)
-            try handle.seek(toOffset: fileSize - readSize)
-            let data = try handle.readToEnd() ?? Data()
-            guard let text = String(data: data, encoding: .utf8) else {
-                return .unavailable
+            switch tidalLogCursor.plan(sessionID: sessionID, fileSize: fileSize) {
+            case .newSession:
+                tidalPlaybackEvidence.reset()
+                tidalLogRemainder.removeAll(keepingCapacity: true)
+                return .stale
+            case .unchanged:
+                return currentTIDALLogSnapshot(observedAt: observedAt)
+            case .read(let offset):
+                // Losing a large interval also loses reliable lifecycle order.
+                // Reestablish fresh evidence instead of guessing from a tail.
+                guard fileSize - offset <= 256 * 1_024 else {
+                    tidalLogCursor.didRead(through: fileSize)
+                    tidalPlaybackEvidence.reset()
+                    tidalLogRemainder.removeAll(keepingCapacity: true)
+                    return .stale
+                }
+                try handle.seek(toOffset: offset)
+                let data = try handle.read(upToCount: Int(fileSize - offset)) ?? Data()
+                tidalLogCursor.didRead(through: offset + UInt64(data.count))
+                tidalLogRemainder.append(data)
+                if let lastNewline = tidalLogRemainder.lastIndex(of: 0x0A) {
+                    let complete = tidalLogRemainder[...lastNewline]
+                    let text = String(decoding: complete, as: UTF8.self)
+                    let entries = text.split(separator: "\n").map {
+                        SourceFormatLogEntry(date: observedAt, message: String($0))
+                    }
+                    tidalPlaybackEvidence.ingest(entries)
+                    tidalLogRemainder.removeSubrange(...lastNewline)
+                }
+                if tidalLogRemainder.count > 256 * 1_024 {
+                    tidalLogRemainder.removeAll(keepingCapacity: true)
+                    tidalPlaybackEvidence.reset()
+                }
+                return currentTIDALLogSnapshot(observedAt: observedAt)
             }
-
-            let entries = text.split(separator: "\n").enumerated().map { index, line in
-                SourceFormatLogEntry(
-                    date: observedAt.addingTimeInterval(Double(index) * 0.000_001),
-                    message: String(line)
-                )
-            }
-            return SourceFormatParser.parseTIDALPlayerLogResult(
-                entries: entries,
-                observedAt: observedAt
-            )
         } catch {
-            return .unavailable
+            // A present but unreadable log is not permission to revive an
+            // unrelated old Unified Log record for the same player.
+            return .stale
+        }
+    }
+
+    private func currentTIDALLogSnapshot(observedAt: Date) -> TIDALPlayerLogResult {
+        switch tidalPlaybackEvidence.snapshot(observedAt: observedAt) {
+        case .unavailable: return .stale
+        case let result: return result
         }
     }
 
     private func readAppleMusicScriptContext(observedAt: Date) -> AppleMusicPlaybackContext {
+        guard environment.allowsSystemObservations else {
+            return AppleMusicPlaybackContext(state: .notRunning, persistentID: nil, sampleRate: nil, observedAt: observedAt)
+        }
         let source = """
         tell application "Music"
             set currentState to player state as string
@@ -383,14 +465,4 @@ final class SourceFormatTracker: @unchecked Sendable {
         )
     }
 
-    private static func isPlayerRunning(_ player: SourcePlayer) -> Bool {
-        let bundleID: String
-        switch player {
-        case .appleMusic:
-            bundleID = "com.apple.Music"
-        case .tidal:
-            bundleID = "com.tidal.desktop"
-        }
-        return !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty
-    }
 }

@@ -5,11 +5,11 @@ import Foundation
 ///
 /// Mirrors the `runDSPParityChecks()` idiom: pure-DSP, no audio device required,
 /// invoked from `SystemAudioProcessor --self-test`. Each check throws
-/// `AppError.message` on failure so a failure exits non-zero. The benchmark at
-/// the end prints a timing table but never asserts (it is informational only).
+/// `AppError.message` on failure so a failure exits non-zero. The informational
+/// benchmark is a separate opt-in entry point, not part of correctness checks.
 ///
-/// Allocation-free contract: the real-time path is exercised here only through
-/// `processLive`, which is provably identity (it never touches the buffer). The
+/// Allocation-free contract: the real-time path is exercised here through
+/// `processLive` in both bypass and live 2× modes. The
 /// offline pipeline uses the same pre-allocated per-channel buffers the engine
 /// owns at init; tests supply caller-owned output buffers sized up front, exactly
 /// like `compareProcessing` in `DSPParityChecks.swift`.
@@ -29,6 +29,9 @@ func runOutputConditioningChecks() throws {
     let frequenciesHz: [Float] = [1_000, 10_000, 18_000, 20_000]
     let factors = OutputConditioningParameters.allowedOversamplingFactors // [2,4,8]
     let modes: [ResamplingFilterMode] = [.linearPhaseShort, .linearPhaseLong, .minimumPhaseExperimental]
+    try check(OutputConditioningParameters.clampFactor(Int.min) == 2
+              && OutputConditioningParameters.clampFactor(Int.max) == 8,
+              "Extreme persisted oversampling factors must clamp without integer overflow.")
 
     for rate in [Float(44_100), Float(48_000)] {
         for freq in frequenciesHz {
@@ -367,40 +370,20 @@ func runOutputConditioningChecks() throws {
     try check(engine.modulatorMaxStateMagnitude() <= limit + 0.001,
               "Modulator state unbounded after overload recovery: \(engine.modulatorMaxStateMagnitude()).")
 
-    // ─────────────────────────────────────────────────────────────────────
-    // SECTION 9 — DoP packing: markers, channel interleave, frame alignment
-    // ─────────────────────────────────────────────────────────────────────
-    let (dopLeft, dopRight, dopBytes, dop) = try dsdProcess(engine: engine, input: sine44,
-                                                           inputFrames: inputFrames,
-                                                           factor: dsdFactor, dsdMode: .dsd64,
-                                                           order: .second, headroomGain: 0.708)
+    // DoP transport is checked against fixed standard-derived words, separately
+    // from the PCM-to-PDM modulator. A successful self-generated round trip
+    // alone cannot establish protocol compatibility.
+    try checkDoPKnownVectorsAndStreaming()
+    engine.resetAll()
+    let (_, _, dopBytes, dop) = try dsdProcess(engine: engine, input: sine44,
+                                              inputFrames: inputFrames,
+                                              factor: dsdFactor, dsdMode: .dsd64,
+                                              order: .second, headroomGain: 0.708)
     let inspected = dop.withUnsafeBufferPointer { ptr in
         engine.verifyDoPMarkers(output: ptr.baseAddress!, byteCount: dopBytes)
     }
-    try check(inspected > 0, "DoP marker alternation check failed (inspected \(inspected) frames).")
-    // Layout: each 8-byte stereo frame = [dL,0,0,marker][dR,0,0,marker].
-    let frameStride = DoPCarrier.carrierSampleBytes * 2 // 8 bytes per stereo DoP frame
-    try check(dopBytes % frameStride == 0, "DoP byte count \(dopBytes) not a multiple of \(frameStride).")
-    let frameCount = dopBytes / frameStride
-    try check(frameCount == dsdFrames / 8,
-              "DoP frame count \(frameCount) != dsdFrames/8 (\(dsdFrames / 8)).")
-    // Channel interleave: each 8-byte stereo frame = [packedL,0,0,marker][packedR,0,0,marker].
-    // dop[0] is the LEFT packed byte (DSD bits 0..7 of the left stream, MSB-first);
-    // dop[4] is the RIGHT packed byte. Compare against a re-packed expectation.
-    let expectedL0 = packMSBFirst(dopLeft, offset: 0)
-    let expectedR0 = packMSBFirst(dopRight, offset: 0)
-    let expectedL1 = packMSBFirst(dopLeft, offset: 8)
-    let expectedR1 = packMSBFirst(dopRight, offset: 8)
-    try check(dop[0] == expectedL0 && dop[4] == expectedR0,
-              "DoP frame 0 interleave: dop[0]=\(dop[0]) vs L0=\(expectedL0), dop[4]=\(dop[4]) vs R0=\(expectedR0).")
-    try check(dop[8] == expectedL1 && dop[12] == expectedR1,
-              "DoP frame 1 interleave: dop[8]=\(dop[8]) vs L1=\(expectedL1), dop[12]=\(dop[12]) vs R1=\(expectedR1).")
-    try check(dop[3] == DoPCarrier.markerA && dop[7] == DoPCarrier.markerA,
-              "DoP frame 0 markers \(dop[3]), \(dop[7]) != 0xFA.")
-    try check(dop[8 + 3] == DoPCarrier.markerB && dop[8 + 7] == DoPCarrier.markerB,
-              "DoP frame 1 markers != 0x05.")
-    try check(dop[1] == 0 && dop[2] == 0 && dop[5] == 0 && dop[6] == 0,
-              "DoP padding bytes not zero.")
+    try check(inspected == dsdFrames / 16,
+              "DoP pipeline must emit one carrier per 16 DSD bits.")
 
     // ─────────────────────────────────────────────────────────────────────
     // SECTION 10 — DoP carrier-rate + DSD clock-rate math
@@ -469,7 +452,8 @@ func runOutputConditioningChecks() throws {
     // ─────────────────────────────────────────────────────────────────────
     // Benchmark (informational; offline only — never runs on the audio thread)
     // ─────────────────────────────────────────────────────────────────────
-    benchmarkPCMResampler()
+    // Run runOutputConditioningBenchmark() explicitly for timing measurements.
+    try checkFilterSwitchHistoryAndCrossfade()
 
     // ─────────────────────────────────────────────────────────────────────
     // SECTION 13 — Image rejection / stopband attenuation (offline FFT)
@@ -483,7 +467,8 @@ func runOutputConditioningChecks() throws {
           + "bypass==identity (disabled/bypass/dither/4x/8x), live PCM 2× frame-doubling + finite "
           + "+ deterministic + block-split continuity, headroom, offline block continuity 2/4/8, "
           + "DSD stable (DC/sine/silence/clipped, 1st+2nd order, overload guard verified to fire), "
-          + "DoP interleave+markers, carrier math, capability gating, image rejection.")
+          + "DoP known vectors+all bit splits+markers, filter switching+crossfade, "
+          + "carrier math, capability gating, calibrated FFT image rejection.")
 }
 
 // MARK: - Signal generators
@@ -577,8 +562,8 @@ private func dsdProcess(engine: ResamplingOutputConditioningEngine,
     let dsdFrames = inputFrames * factor
     var left = [UInt8](repeating: 0, count: dsdFrames)
     var right = [UInt8](repeating: 0, count: dsdFrames)
-    let dopByteCount = DoPacker(channelLayout: .stereo).outputByteCount(forDsdFrames: dsdFrames)
-    var dop = [UInt8](repeating: 0, count: dopByteCount)
+    let dopByteCount = engine.requiredDoPOutputBytes(dsdFrames: dsdFrames)
+    var dop = [UInt8](repeating: 0, count: max(1, dopByteCount))
     let result = input.withUnsafeBufferPointer { inPtr in
         left.withUnsafeMutableBufferPointer { l in
             right.withUnsafeMutableBufferPointer { r in
@@ -601,7 +586,7 @@ private func dsdProcess(engine: ResamplingOutputConditioningEngine,
     }
     try check(result.dsdFrames == dsdFrames && result.dopBytes == dopByteCount,
               "DSD path returned \(result), expected (\(dsdFrames), \(dopByteCount)).")
-    return (left, right, result.dopBytes, dop)
+    return (left, right, result.dopBytes, Array(dop.prefix(result.dopBytes)))
 }
 
 private func processLiveCopy(engine: ResamplingOutputConditioningEngine,
@@ -640,16 +625,6 @@ private func checkProcessLiveIdentity(engine: ResamplingOutputConditioningEngine
 
 private func check(_ condition: Bool, _ message: String) throws {
     if !condition { throw AppError.message(message) }
-}
-
-/// Pack 8 DSD bits (each 0/1) at `offset` into one byte, MSB-first — mirrors
-/// `DoPacker`'s internal packing so tests can independently verify it.
-private func packMSBFirst(_ bits: [UInt8], offset: Int) -> UInt8 {
-    var byte: UInt8 = 0
-    for k in 0..<8 {
-        byte |= (bits[offset + k] & 1) << (7 - k)
-    }
-    return byte
 }
 
 private extension Array where Element == Float {
@@ -693,6 +668,16 @@ private func measureImageRejection(engine: ResamplingOutputConditioningEngine) t
         throw AppError.message("Could not create vDSP FFT setup for image-rejection test.")
     }
     defer { vDSP_destroy_fftsetup(setup) }
+
+    engine.resetAll()
+    let calibratedTone = fs * 2 * 64 / Float(fftN)
+    let calibration = rejectionOf(engine: engine,
+                                  signal: stereoSine(freq: calibratedTone, rate: fs,
+                                                     frames: inputFrames, amplitude: 0.5),
+                                  inputFrames: inputFrames, factor: 2, mode: .linearPhaseLong,
+                                  fs: fs, f0: calibratedTone, setup: setup, fftN: fftN, guardBins: 3)
+    try check(abs(calibration.fundDB - 20 * log10(Float(0.5))) < 0.05,
+              "FFT coherent-gain calibration failed: 0.5 peak sine measured \(calibration.fundDB) dBFS.")
 
     let tones: [(label: String, f0: Float)] = [
         ("1kHz", 1_000), ("10kHz", 10_000), ("18kHz", 18_000),
@@ -885,7 +870,8 @@ private func rejectionOf(engine: ResamplingOutputConditioningEngine,
     let guardedStart = min(halfN, basebandEdgeBin + guardBins)
     for b in guardedStart...halfN { imageGuardedPeak = max(imageGuardedPeak, mag[b]) }
 
-    let toDB: (Float) -> Float = { 20 * log10(max($0, 1e-12)) }
+    let amplitudeScale: Float = 2 / hann.reduce(0, +)
+    let toDB: (Float) -> Float = { 20 * log10(max($0 * amplitudeScale, 1e-12)) }
     let fundDB = toDB(fundPeak)
     let imageGuardedDB = toDB(imageGuardedPeak)
     let imageRawDB = toDB(imageRawPeak)
@@ -898,10 +884,10 @@ private func rejectionOf(engine: ResamplingOutputConditioningEngine,
 /// 32 / 64 / 128 / 256 for both the `.vDSP` and `.direct` kernels. Results are
 /// printed; nothing is asserted. This is the ONLY place timing is collected —
 /// the real-time audio callback contains no timing/logging.
-private func benchmarkPCMResampler() {
+func runOutputConditioningBenchmark(iterations requestedIterations: Int = 2000) {
     let blockSizes = [32, 64, 128, 256]
     let factors = OutputConditioningParameters.allowedOversamplingFactors
-    let iterations = 2000
+    let iterations = max(1, min(requestedIterations, 20_000))
     let maxBlock = 256
 
     let resampler = PCMResampler(channels: 2, maxInputFrames: maxBlock)
@@ -947,4 +933,191 @@ private func benchmarkPCMResampler() {
             }
         }
     }}}
+}
+
+// MARK: - Independent transport and transition regressions
+
+private func checkDoPKnownVectorsAndStreaming() throws {
+    // DoP 1.1 page 2 diagram: t0 (oldest bit) is bit 15 of the DSD word.
+    // https://dsd-guide.com/sites/default/files/white-papers/DoP_openStandard_1v1.pdf
+    // Encode three deliberately asymmetric words; expected bytes are literal,
+    // not obtained by reusing the packer's shifts or marker-verifier logic.
+    let left: [UInt8] = Array("100000000000000100010010101001011100001101011010").map { $0 == "1" ? 1 : 0 }
+    let right: [UInt8] = Array("010000000000001010100101000000010011110001100101").map { $0 == "1" ? 1 : 0 }
+    let stereo: [UInt8] = [0x01, 0x80, 0xFA, 0, 0x02, 0x40, 0xFA, 0,
+                           0xA5, 0x12, 0x05, 0, 0x01, 0xA5, 0x05, 0,
+                           0x5A, 0xC3, 0xFA, 0, 0x65, 0x3C, 0xFA, 0]
+    let mono: [UInt8] = [0x01, 0x80, 0xFA, 0, 0xA5, 0x12, 0x05, 0, 0x5A, 0xC3, 0xFA, 0]
+
+    func pack(_ packer: DoPacker, start: Int, count: Int,
+              includeRight: Bool = true) throws -> [UInt8] {
+        let predicted = packer.outputByteCount(forDsdFrames: count)
+        // A sentinel detects writing beyond the exact advertised capacity,
+        // including calls that retain only partial bits and emit no output.
+        var out = [UInt8](repeating: 0xCC, count: predicted + 1)
+        let written = left.withUnsafeBufferPointer { l in
+            right.withUnsafeBufferPointer { r in
+                out.withUnsafeMutableBufferPointer { d in
+                    packer.pack(leftBits: l.baseAddress!.advanced(by: start),
+                                rightBits: includeRight ? r.baseAddress!.advanced(by: start) : nil,
+                                dsdFrames: count, output: d.baseAddress!)
+                }
+            }
+        }
+        try check(written == predicted, "DoP next-call capacity \(predicted) != written \(written).")
+        try check(out[predicted] == 0xCC, "DoP wrote beyond its predicted output capacity.")
+        return Array(out.prefix(written))
+    }
+
+    for (layout, expected) in [(DoPacker.ChannelLayout.mono, mono), (.stereo, stereo)] {
+        let whole = DoPacker(channelLayout: layout)
+        try check(try pack(whole, start: 0, count: 48) == expected,
+                  "DoP independent known word/byte-order vector failed (\(layout)).")
+        for split in 1..<48 {
+            let splitPacker = DoPacker(channelLayout: layout)
+            let a = try pack(splitPacker, start: 0, count: split)
+            let b = try pack(splitPacker, start: split, count: 48 - split)
+            try check(a + b == expected, "DoP changed at bit split \(split) (\(layout)).")
+        }
+        let singleBit = DoPacker(channelLayout: layout)
+        var joined: [UInt8] = []
+        for bit in 0..<48 { joined += try pack(singleBit, start: bit, count: 1) }
+        try check(joined == expected, "DoP one-bit chunks lost payload/marker state.")
+        _ = try pack(singleBit, start: 0, count: 7)
+        singleBit.reset()
+        try check(try pack(singleBit, start: 0, count: 48) == expected,
+                  "DoP reset must discard pending bits and restart marker phase.")
+        try check(singleBit.outputByteCount(forDsdFrames: -1) == 0,
+                  "Negative DoP size must be rejected.")
+    }
+
+    let invalid = DoPacker(channelLayout: .stereo)
+    _ = try pack(invalid, start: 0, count: 7)
+    var sink = [UInt8](repeating: 0xCC, count: 8)
+    let rejected = left.withUnsafeBufferPointer { l in
+        sink.withUnsafeMutableBufferPointer { d in
+            invalid.pack(leftBits: l.baseAddress!, rightBits: nil, dsdFrames: 16, output: d.baseAddress!)
+        }
+    }
+    try check(rejected == 0 && sink.allSatisfy { $0 == 0xCC },
+              "Missing stereo right bits must fail without writing output.")
+    try check(try pack(invalid, start: 7, count: 9) == Array(stereo.prefix(8)),
+              "Invalid stereo call changed pending payload state.")
+
+    let verifier = DoPacker(channelLayout: .stereo)
+    try check(stereo.withUnsafeBufferPointer {
+        verifier.verifyMarkers(output: $0.baseAddress!, byteCount: stereo.count, startingMarker: 0xFA)
+    } == 3, "DoP known marker sequence failed.")
+    var corrupt = stereo
+    corrupt[10] = 0xFA  // Second carrier must switch to 0x05.
+    try check(corrupt.withUnsafeBufferPointer {
+        verifier.verifyMarkers(output: $0.baseAddress!, byteCount: corrupt.count)
+    } == 0, "DoP marker verifier accepted a repeated marker.")
+    try check(stereo.withUnsafeBufferPointer {
+        verifier.verifyMarkers(output: $0.baseAddress!, byteCount: -8)
+    } == 0, "DoP marker verifier must reject negative lengths.")
+    for mode in [DSDMode.dsd64, .dsd128, .dsd256] {
+        try check(DoPCarrier.requiredCarrierRate(for: mode) * 16 == mode.bitStreamRate,
+                  "DoP carrier clock must transport 16 payload bits per frame.")
+    }
+}
+
+private func checkFilterSwitchHistoryAndCrossfade() throws {
+    let count = 512
+    let signal = (0..<(count * 3)).map {
+        Float(0.8 * sin(2 * Double.pi * 997 * Double($0) / 44_100))
+    }
+    func process(_ resampler: PCMResampler, start: Int, count: Int,
+                 factor: Int, mode: ResamplingFilterMode, transition: Int = 0,
+                 channel: Int = 0) -> [Float] {
+        var out = [Float](repeating: 0, count: count * factor)
+        signal.withUnsafeBufferPointer { input in
+            out.withUnsafeMutableBufferPointer { output in
+                _ = resampler.process(input: input.baseAddress!.advanced(by: start),
+                                      inputFrames: count, output: output.baseAddress!,
+                                      channel: channel, factor: factor, mode: mode,
+                                      transitionFrames: transition)
+            }
+        }
+        return out
+    }
+
+    // The reference has always used the target filter. Once history is warm,
+    // switching must produce exactly that target response, even after tiny input
+    // chunks and even when the previous filter needed much less history.
+    for factor in [2, 4, 8] {
+        for (old, new) in [(ResamplingFilterMode.linearPhaseShort, ResamplingFilterMode.linearPhaseLong),
+                           (.linearPhaseLong, .linearPhaseShort),
+                           (.minimumPhaseExperimental, .linearPhaseLong)] {
+            for blockSize in [1, 16, 31, 32, 127, 128] {
+                let changed = PCMResampler(channels: 2, maxInputFrames: count)
+                let reference = PCMResampler(channels: 2, maxInputFrames: count)
+                for channel in 0..<2 {
+                    var cursor = 0
+                    while cursor < count {
+                        let frames = min(blockSize, count - cursor)
+                        _ = process(changed, start: cursor, count: frames, factor: factor, mode: old, channel: channel)
+                        _ = process(reference, start: cursor, count: frames, factor: factor, mode: new, channel: channel)
+                        cursor += frames
+                    }
+                    let actual = process(changed, start: count, count: count, factor: factor, mode: new, channel: channel)
+                    let expected = process(reference, start: count, count: count, factor: factor, mode: new, channel: channel)
+                    let delta = zip(actual, expected).reduce(Float(0)) { max($0, abs($1.0 - $1.1)) }
+                    try check(delta < 1e-6, "Filter history \(old)→\(new), \(factor)× bs\(blockSize) ch\(channel): \(delta).")
+                }
+            }
+        }
+    }
+
+    // A filter transition starts exactly at the old response, converges exactly
+    // to the new response, and yields the same samples across callback splits.
+    for (old, new) in [(ResamplingFilterMode.linearPhaseShort, ResamplingFilterMode.linearPhaseLong),
+                       (.linearPhaseLong, .linearPhaseShort)] {
+        let fading = PCMResampler(channels: 1, maxInputFrames: count)
+        let split = PCMResampler(channels: 1, maxInputFrames: count)
+        let oldReference = PCMResampler(channels: 1, maxInputFrames: count)
+        let newReference = PCMResampler(channels: 1, maxInputFrames: count)
+        for sampler in [fading, split, oldReference] {
+            _ = process(sampler, start: 0, count: count, factor: 2, mode: old, transition: 512)
+        }
+        _ = process(newReference, start: 0, count: count, factor: 2, mode: new)
+        let actual = process(fading, start: count, count: count, factor: 2, mode: new, transition: 512)
+        let oldOutput = process(oldReference, start: count, count: count, factor: 2, mode: old)
+        let newOutput = process(newReference, start: count, count: count, factor: 2, mode: new)
+        try check(actual[0] == oldOutput[0], "Filter fade did not begin at the old response.")
+        for i in actual.indices {
+            let mix = Float(min(i, 512)) / 512
+            let expected = oldOutput[i] + (newOutput[i] - oldOutput[i]) * mix
+            try check(abs(actual[i] - expected) < 1e-6, "Filter fade coefficient trajectory failed at \(i).")
+        }
+        var joined: [Float] = []
+        var cursor = 0
+        while cursor < count {
+            let frames = min(17, count - cursor)
+            joined += process(split, start: count + cursor, count: frames,
+                              factor: 2, mode: new, transition: 512)
+            cursor += frames
+        }
+        try check(actual == joined, "Filter crossfade changed with callback block boundaries.")
+    }
+
+    let retargeted = PCMResampler(channels: 1, maxInputFrames: count)
+    let shortReference = PCMResampler(channels: 1, maxInputFrames: count)
+    let longReference = PCMResampler(channels: 1, maxInputFrames: count)
+    _ = process(retargeted, start: 0, count: count, factor: 2, mode: .linearPhaseShort, transition: 512)
+    _ = process(shortReference, start: 0, count: count, factor: 2, mode: .linearPhaseShort)
+    _ = process(longReference, start: 0, count: count, factor: 2, mode: .linearPhaseLong)
+    _ = process(retargeted, start: count, count: 37, factor: 2, mode: .linearPhaseLong, transition: 512)
+    _ = process(shortReference, start: count, count: 37, factor: 2, mode: .linearPhaseShort)
+    _ = process(longReference, start: count, count: 37, factor: 2, mode: .linearPhaseLong)
+    let actual = process(retargeted, start: count + 37, count: count,
+                         factor: 2, mode: .linearPhaseShort, transition: 512)
+    let short = process(shortReference, start: count + 37, count: count, factor: 2, mode: .linearPhaseShort)
+    let long = process(longReference, start: count + 37, count: count, factor: 2, mode: .linearPhaseLong)
+    for i in actual.indices {
+        let mix = (Float(74) / 512) * (1 - Float(min(i, 512)) / 512)
+        let expected = short[i] + (long[i] - short[i]) * mix
+        try check(abs(actual[i] - expected) < 1e-6,
+                  "Retargeting a filter fade reset its current mix at sample \(i).")
+    }
 }

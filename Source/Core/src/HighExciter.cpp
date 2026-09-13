@@ -42,19 +42,21 @@ void HighExciter::Oversampling2xStage::reset() {
     decimationFilter.reset();
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Channel
-// ═══════════════════════════════════════════════════════════════════════
 
-float HighExciter::Channel::processSample(float input) {
-    float dry = std::isfinite(input) ? input : 0.0f;
+void HighExciter::Pipeline::update(const LCDSPSettings& s) {
+    stage1.update(s.exciterStage1LowPass1, s.exciterStage1LowPass2);
+    stage2.update(s.exciterStage2LowPass1, s.exciterStage2LowPass2);
+    drive = s.exciterDrive;
+    wetMix = s.exciterWetMix;
+    oversampleFactor = s.exciterOversampleFactor == 4 ? 4
+        : s.exciterOversampleFactor == 2 ? 2 : 1;
+    dcBlockPole = std::isfinite(s.exciterDCBlockPole)
+        && s.exciterDCBlockPole > 0 && s.exciterDCBlockPole < 1
+        ? s.exciterDCBlockPole : 0.9993457f;
+}
 
-    // wetMix near zero → dry bypass (avoid unnecessary HP processing)
-    if (wetMix < 0.0001f) {
-        return dry;
-    }
-
-    float high = highPass.process(dry);
+float HighExciter::Pipeline::process(float high) {
+    if (wetMix < 0.0001f || drive < 0.0001f) return 0.0f;
     float harmonic = 0.0f;
 
     if (oversampleFactor == 4) {
@@ -83,62 +85,100 @@ float HighExciter::Channel::processSample(float input) {
         harmonic = makeHarmonic(high);
     }
 
-    float transitionGain = 1.0f;
-    if (transitionSamplesRemaining > 0) {
-        constexpr float transitionLength = 256.0f;
-        transitionGain = (transitionLength
-            - static_cast<float>(transitionSamplesRemaining)) / transitionLength;
-        --transitionSamplesRemaining;
-    }
-    return fastClamp(dry + harmonic * wetMix * transitionGain);
+    // The even harmonic term generates DC. Remove it only from the wet
+    // branch, after decimation, so the dry signal remains unchanged.
+    const float dcBlocked = (1.0f + dcBlockPole) * 0.5f
+        * (harmonic - previousHarmonic) + dcBlockPole * previousDCBlocked;
+    previousHarmonic = harmonic;
+    previousDCBlocked = dcBlocked;
+
+
+    return dcBlocked * wetMix;
 }
 
-float HighExciter::Channel::makeHarmonic(float input) const {
-    float driven = input * drive;
-    float driven2 = driven * driven;
-    return driven2 + driven2 * driven * 0.5f;
+float HighExciter::Pipeline::makeHarmonic(float input) const {
+    const float driven = input * drive;
+    const float squared = driven * driven;
+    return squared + squared * driven * 0.5f;
+}
+
+void HighExciter::Pipeline::reset() {
+    stage1.reset();
+    stage2.reset();
+    previousHarmonic = 0;
+    previousDCBlocked = 0;
+}
+
+void HighExciter::Channel::update(const LCDSPSettings& settings) {
+    if (transitionRemaining > 0) {
+        pending = settings;
+        hasPending = true;
+        return;
+    }
+    const uint32_t nextFactor = settings.exciterOversampleFactor == 4 ? 4
+        : settings.exciterOversampleFactor == 2 ? 2 : 1;
+    highPass.update(settings.exciterHighPass);
+    if (!initialized) {
+        pipelines[active].update(settings);
+        pipelines[active].reset();
+        initialized = true;
+    } else if (pipelines[active].oversampleFactor == nextFactor) {
+        pipelines[active].update(settings);
+    } else {
+        target = 1u - active;
+        pipelines[target].update(settings);
+        pipelines[target].reset();
+        transitionRemaining = transitionFrames;
+    }
+}
+
+float HighExciter::Channel::processSample(float input) {
+    const float dry = std::isfinite(input) ? input : 0.0f;
+    const float high = highPass.process(dry);
+    const bool isDry = (pipelines[active].wetMix < 0.0001f || pipelines[active].drive < 0.0001f)
+        && (transitionRemaining == 0 || pipelines[target].wetMix < 0.0001f || pipelines[target].drive < 0.0001f);
+    float wet = pipelines[active].process(high);
+    if (transitionRemaining > 0) {
+        const float nextWet = pipelines[target].process(high);
+        const float mix = static_cast<float>(transitionFrames - transitionRemaining + 1u)
+            / static_cast<float>(transitionFrames);
+        wet += (nextWet - wet) * mix;
+        if (--transitionRemaining == 0) {
+            active = target;
+            if (hasPending) {
+                const LCDSPSettings next = pending;
+                hasPending = false;
+                update(next);
+            }
+        }
+    }
+    return isDry ? dry : fastClamp(dry + wet);
 }
 
 void HighExciter::Channel::reset() {
+    if (transitionRemaining > 0) active = target;
+    transitionRemaining = 0;
+    if (hasPending) {
+        highPass.update(pending.exciterHighPass);
+        pipelines[active].update(pending);
+        hasPending = false;
+    }
     highPass.reset();
-    stage1.reset();
-    stage2.reset();
+    pipelines[0].reset();
+    pipelines[1].reset();
 }
 
 float HighExciter::Channel::fastClamp(float value) {
-    if (std::isnan(value) || std::isinf(value)) return 0.0f;
-    if (value > 1.0f) return 1.0f;
-    if (value < -1.0f) return -1.0f;
-    return value;
+    if (!std::isfinite(value)) return 0;
+    return value > 1 ? 1 : value < -1 ? -1 : value;
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// HighExciter — stereo wrapper
-// ═══════════════════════════════════════════════════════════════════════
 
 void HighExciter::update(const LCDSPSettings& settings) {
-    auto assign = [](Channel& ch, const LCDSPSettings& s) {
-        const uint32_t nextFactor = s.exciterOversampleFactor == 4 ? 4
-            : s.exciterOversampleFactor == 2 ? 2
-                                             : 1;
-        if (ch.oversampleFactor != nextFactor) {
-            ch.stage1.reset();
-            ch.stage2.reset();
-            ch.transitionSamplesRemaining = 256;
-        }
-        ch.highPass.update(s.exciterHighPass);
-        ch.stage1.update(s.exciterStage1LowPass1, s.exciterStage1LowPass2);
-        ch.stage2.update(s.exciterStage2LowPass1, s.exciterStage2LowPass2);
-        ch.drive = s.exciterDrive;
-        ch.wetMix = s.exciterWetMix;
-        ch.oversampleFactor = nextFactor;
-    };
-    assign(left_, settings);
-    assign(right_, settings);
+    left_.update(settings);
+    right_.update(settings);
 }
 
-void HighExciter::process(float leftIn, float rightIn,
-                           float& leftOut, float& rightOut) {
+void HighExciter::process(float leftIn, float rightIn, float& leftOut, float& rightOut) {
     leftOut = left_.processSample(leftIn);
     rightOut = right_.processSample(rightIn);
 }

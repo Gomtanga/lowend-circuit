@@ -34,9 +34,9 @@ float CircuitBass::Channel::asymmetricSaturate(float input) const {
 
     float clipped;
     if (biased > 1.0f) {
-        clipped = 1.0f;
+        clipped = 2.0f / 3.0f;
     } else if (biased < -1.0f) {
-        clipped = -1.0f;
+        clipped = -2.0f / 3.0f;
     } else {
         clipped = biased - (biased * biased * biased) * 0.33333334f;
     }
@@ -85,9 +85,15 @@ void CircuitBass::update(const LCDSPSettings& settings) {
         ch.transformerAsymmetry = s.transformerAsymmetry;
         ch.transformerBiasOffset = s.transformerBiasOffset;
         ch.transformerMakeupGain = s.transformerMakeupGain;
-        ch.shelf.update(s.shelf);
-        ch.preEmphasis.update(s.transformerPreEmphasis);
-        ch.deEmphasis.update(s.transformerDeEmphasis);
+        if (s.preciseCircuitCoefficientsEnabled != 0) {
+            ch.shelf.update(s.preciseShelf);
+            ch.preEmphasis.update(s.preciseTransformerPreEmphasis);
+            ch.deEmphasis.update(s.preciseTransformerDeEmphasis);
+        } else {
+            ch.shelf.update(s.shelf);
+            ch.preEmphasis.update(s.transformerPreEmphasis);
+            ch.deEmphasis.update(s.transformerDeEmphasis);
+        }
         ch.bassPole.update(s.bassAlpha);
         ch.subPole.update(s.subAlpha);
     };

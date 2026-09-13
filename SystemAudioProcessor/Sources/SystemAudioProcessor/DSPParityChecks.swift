@@ -4,7 +4,7 @@ import LowEndDSPCoreC
 import LowEndSupport
 
 func runDSPParityChecks() throws {
-    let sampleRates: [Float] = [44_100, 48_000, 96_000, 192_000, 768_000]
+    let sampleRates: [Float] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000, 705_600, 768_000]
     let parameterSets: [(Float, Float, Float)] = [
         (0, 0, 0),
         (22, 8, -1),
@@ -52,7 +52,65 @@ func runDSPParityChecks() throws {
         }
     }
 
-    print("DSP parity checks passed for 44.1/48/96/192/768 kHz.")
+    try compareRouterTransitions()
+    try runTonalDSPRegressionChecks()
+    print("DSP parity and independent tonal regressions passed for 44.1...768 kHz.")
+}
+
+private func compareRouterTransitions() throws {
+    for sampleRate: Float in [48_000, 192_000, 768_000] {
+        let router = TonalDSPRouter(sampleRate: sampleRate, intensity: 55, body: 30,
+                                    outputDb: 0, dspModel: .clean)
+        let core = try SharedDSPCore(sampleRate: Double(sampleRate))
+        core.update(DSPPrecompute.makeDSPSettings(sampleRate: sampleRate, intensity: 55,
+            body: 30, outputDb: 0, dspModel: .clean))
+        let changes: [(Int, Settings.DSPModel, ExciterOversamplingMode)] = [
+            (128, .circuit, .auto), (160, .highExciter, .four), (192, .clean, .auto),
+            (800, .circuit, .auto), (1200, .highExciter, .one),
+            (1700, .highExciter, .four), (1720, .highExciter, .two), (1740, .highExciter, .one),
+            (2400, .circuit, .auto), (2600, .clean, .auto)
+        ]
+        var nextChange = 0
+        var maximumDelta: Float = 0
+        for frame in 0..<4096 {
+            if nextChange < changes.count && frame == changes[nextChange].0 {
+                let change = changes[nextChange]
+                let settings = DSPPrecompute.makeDSPSettings(sampleRate: sampleRate,
+                    intensity: 100, body: 100, outputDb: 0, dspModel: change.1,
+                    exciterOversamplingMode: change.2)
+                router.update(settings)
+                core.update(settings)
+                nextChange += 1
+            }
+            let phase = 2 * Double.pi * Double(frame) / Double(sampleRate)
+            let inputLeft = Float(0.25 * sin(phase * 55) + 0.25 * sin(phase * 8000))
+            let inputRight = Float(0.2 * cos(phase * 80) - 0.2 * sin(phase * 8000))
+            let expected = router.process(left: inputLeft, right: inputRight)
+            var left = inputLeft
+            var right = inputRight
+            withUnsafeMutablePointer(to: &left) { leftPointer in
+                withUnsafeMutablePointer(to: &right) { rightPointer in
+                    core.process(left: leftPointer, right: rightPointer, frameCount: 1)
+                }
+            }
+            guard left.isFinite, right.isFinite, expected.0.isFinite, expected.1.isFinite else {
+                throw AppError.message("Router transition produced non-finite output at \(sampleRate) Hz.")
+            }
+            maximumDelta = max(maximumDelta, abs(left - expected.0), abs(right - expected.1))
+            if frame >= 3112, left != inputLeft || right != inputRight {
+                throw AppError.message("Router latest pending Clean did not converge at \(sampleRate) Hz.")
+            }
+        }
+        guard maximumDelta < 0.00005 else {
+            throw AppError.message("Router transition parity delta \(maximumDelta) at \(sampleRate) Hz.")
+        }
+        router.resetState()
+        core.reset()
+        let silence = router.process(left: 0, right: 0)
+        guard silence.0 == 0, silence.1 == 0 else {
+            throw AppError.message("Router reset retained stale history.")
+        }
+    }
 }
 
 private func compareProcessing(sampleRate: Float,
@@ -120,6 +178,10 @@ private func compareProcessing(sampleRate: Float,
 
     var maximumDelta: Float = 0
     for frame in 0..<frameCount {
+        guard left[frame].isFinite, right[frame].isFinite,
+              expectedLeft[frame].isFinite, expectedRight[frame].isFinite else {
+            throw AppError.message("\(model.displayName) processing produced a non-finite sample.")
+        }
         maximumDelta = max(
             maximumDelta,
             abs(left[frame] - expectedLeft[frame]),
@@ -141,12 +203,24 @@ private func compareSettings(_ swift: LCDSPSettings,
     let coreValues = settingsValues(core)
     var maximumDelta: Float = 0
     for index in swiftValues.indices {
+        guard swiftValues[index].isFinite, coreValues[index].isFinite else {
+            throw AppError.message("\(context) contains a non-finite coefficient.")
+        }
         maximumDelta = max(maximumDelta, abs(swiftValues[index] - coreValues[index]))
     }
     guard swift.dspModel == core.dspModel,
           swift.exciterOversampleFactor == core.exciterOversampleFactor,
+          swift.preciseCircuitCoefficientsEnabled == core.preciseCircuitCoefficientsEnabled,
           maximumDelta <= 0.00005 else {
         throw AppError.message("\(context) delta \(maximumDelta) exceeds tolerance.")
+    }
+    let swiftPrecise = preciseSettingsValues(swift)
+    let corePrecise = preciseSettingsValues(core)
+    for index in swiftPrecise.indices {
+        guard swiftPrecise[index].isFinite, corePrecise[index].isFinite,
+              abs(swiftPrecise[index] - corePrecise[index]) <= 0.000_000_001 else {
+            throw AppError.message("\(context) precise coefficient mismatch at \(index).")
+        }
     }
 }
 
@@ -169,7 +243,8 @@ private func settingsValues(_ settings: LCDSPSettings) -> [Float] {
         settings.transformerBiasOffset,
         settings.transformerMakeupGain,
         settings.exciterDrive,
-        settings.exciterWetMix
+        settings.exciterWetMix,
+        settings.exciterDCBlockPole
     ]
     values.append(contentsOf: coefficientsValues(settings.shelf))
     values.append(contentsOf: coefficientsValues(settings.transformerPreEmphasis))
@@ -180,6 +255,13 @@ private func settingsValues(_ settings: LCDSPSettings) -> [Float] {
     values.append(contentsOf: coefficientsValues(settings.exciterStage2LowPass1))
     values.append(contentsOf: coefficientsValues(settings.exciterStage2LowPass2))
     return values
+}
+
+private func preciseSettingsValues(_ settings: LCDSPSettings) -> [Double] {
+    [settings.preciseShelf, settings.preciseTransformerPreEmphasis,
+     settings.preciseTransformerDeEmphasis].flatMap {
+        [$0.b0, $0.b1, $0.b2, $0.a1, $0.a2]
+    }
 }
 
 private func coefficientsValues(_ coefficients: LCBiquadCoefficients) -> [Float] {

@@ -12,6 +12,8 @@
 #include <Core/HighExciter.h>
 #include <cstdio>
 #include <cmath>
+#include <initializer_list>
+#include <limits>
 
 static int failures = 0;
 static int tests = 0;
@@ -75,19 +77,24 @@ static void test_exciter_active() {
     lowend::HighExciter he;
     he.update(settings);
 
-    // Process a high-frequency impulse train to get past HP settling
-    float input, output;
-    for (int i = 0; i < 480; ++i) {
-        // Alternating sample to create high-frequency content
-        input = (i % 2 == 0) ? 0.3f : -0.3f;
-        he.process(input, input, output, output);
+    // Measure the actual second-harmonic band of an 8 kHz sine after settling.
+    // Comparing the last negative alternating input against positive amplitude
+    // used to let a completely bypassed implementation pass this test.
+    double harmonicReal = 0, harmonicImaginary = 0;
+    constexpr int measuredFrames = 48000;
+    for (int i = 0; i < measuredFrames * 2; ++i) {
+        const double phase = 2.0 * 3.14159265358979323846 * 8000.0 * i / 48000.0;
+        const float input = 0.5f * static_cast<float>(std::sin(phase));
+        float output = 0, right = 0;
+        he.process(input, input, output, right);
+        if (i >= measuredFrames) {
+            const double difference = output - input;
+            harmonicReal += difference * std::cos(phase * 2);
+            harmonicImaginary -= difference * std::sin(phase * 2);
+        }
     }
-
-    // With active exciter and high-frequency content,
-    // the output should differ from the raw input
-    float rawAlt = 0.3f;  // the alternating pattern amplitude
-    TEST("exciter active produces harmonics",
-         std::fabs(output - rawAlt) > 0.001f);
+    const double amplitude = 2 * std::hypot(harmonicReal, harmonicImaginary) / measuredFrames;
+    TEST("exciter adds measurable 16 kHz AC harmonic", amplitude > 0.001);
 }
 
 // ============================================================
@@ -193,7 +200,8 @@ static void test_stability() {
         float input = (i % 50 == 0) ? 1.0f : 0.0f;  // impulse every 50
         float l, r;
         he.process(input, input, l, r);
-        if (l < -1.5f || l > 1.5f || r < -1.5f || r > 1.5f) {
+        if (!std::isfinite(l) || !std::isfinite(r)
+            || l < -1.5f || l > 1.5f || r < -1.5f || r > 1.5f) {
             stable = false;
             break;
         }
@@ -261,8 +269,111 @@ static void test_zero_drive_bypass() {
     }
 
     // drive=0 → harmonic = 0 → output ≈ input
-    TEST("zero drive → bypass (output near input)",
-         std::fabs(l) > 0.01f && std::fabs(l) < 0.5f);
+    TEST("zero drive → exact dry bypass", l == input && r == input);
+}
+
+static void test_wet_dc_rejection() {
+    for (float rate : { 44100.f, 48000.f, 96000.f, 192000.f, 768000.f }) {
+        for (uint32_t factor : { 1u, 2u, 4u }) {
+            const auto settings = lowend::DSPPrecompute::makeDSPSettings(rate, 100, 100, 0, 2, factor);
+            lowend::HighExciter exciter;
+            exciter.update(settings);
+            const int frames = static_cast<int>(rate);
+            const double frequency = std::fmin(12000.0, static_cast<double>(rate) * 0.25);
+            double mean = 0;
+            bool finite = true;
+            for (int frame = 0; frame < frames * 2; ++frame) {
+                const float input = static_cast<float>(0.5 * std::sin(
+                    2.0 * 3.14159265358979323846 * frequency * frame / rate));
+                float left = 0, right = 0;
+                exciter.process(input, input, left, right);
+                finite = finite && std::isfinite(left) && std::isfinite(right);
+                if (frame >= frames) mean += left;
+            }
+            mean /= frames;
+            TEST("exciter output finite across rates/modes", finite);
+            TEST("steady-state wet DC below 0.00002 FS", std::fabs(mean) < 0.00002);
+            // Natural signal -> silence, without reset. The wet DC blocker
+            // must retain its initial tail and then decay; clearing history at
+            // silence would conceal a state-transition defect.
+            double earlyPeak = 0, latePeak = 0, lateMean = 0;
+            const int silenceFrames = frames * 3 / 4;
+            int lateCount = 0;
+            for (int frame = 0; frame < silenceFrames; ++frame) {
+                float left = 0, right = 0;
+                exciter.process(0, 0, left, right);
+                finite = finite && std::isfinite(left) && std::isfinite(right);
+                if (frame < frames / 100) earlyPeak = std::fmax(earlyPeak, std::fabs(left));
+                if (frame >= frames / 2) {
+                    latePeak = std::fmax(latePeak, std::fabs(left));
+                    lateMean += left;
+                    ++lateCount;
+                }
+            }
+            TEST("natural silence keeps a measurable initial wet tail", earlyPeak > 0.00001);
+            // A 5 Hz pole has decayed by exp(-2*pi*5*.5) ~= 1.5e-7
+            // after 0.5 s. 2e-6 FS includes Float/filter residual margin.
+            TEST("natural silence is finite and below -114 dBFS after 0.5 s",
+                 finite && latePeak < 0.000002 && std::fabs(lateMean / lateCount) < 0.000002);
+            TEST("natural silence tail decays by more than 60 dB", latePeak < earlyPeak * 0.001);
+            exciter.reset();
+            float left = 1, right = 1;
+            exciter.process(0, 0, left, right);
+            TEST("reset clears DC-blocker history", left == 0 && right == 0);
+        }
+    }
+}
+
+static void test_nonfinite_input() {
+    auto settings = lowend::DSPPrecompute::makeDSPSettings(48000, 100, 100, 0, 2);
+    lowend::HighExciter exciter;
+    exciter.update(settings);
+    for (float input : { std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity() }) {
+        float left = 0, right = 0;
+        exciter.process(input, input, left, right);
+        TEST("nonfinite input does not poison filters", left == 0 && right == 0);
+    }
+}
+
+static void test_factor_crossfade() {
+    const auto oldSettings = lowend::DSPPrecompute::makeDSPSettings(48000, 100, 100, 0, 2, 4);
+    const auto nextSettings = lowend::DSPPrecompute::makeDSPSettings(48000, 100, 100, 0, 2, 1);
+    auto warmSettings = nextSettings;
+    warmSettings.exciterDrive = 0;
+    lowend::HighExciter actual, oldReference, newReference;
+    actual.update(oldSettings); oldReference.update(oldSettings); newReference.update(warmSettings);
+    for (int frame = 0; frame < 1024; ++frame) {
+        const float input = float(0.5 * std::sin(2 * std::acos(-1.0) * 8000 * frame / 48000));
+        float left = 0, right = 0;
+        actual.process(input, input, left, right);
+        oldReference.process(input, input, left, right);
+        newReference.process(input, input, left, right);
+    }
+    actual.update(nextSettings);
+    newReference.update(nextSettings);
+    for (int frame = 0; frame < 256; ++frame) {
+        const float input = float(0.5 * std::sin(2 * std::acos(-1.0) * 8000 * (frame + 1024) / 48000));
+        float left = 0, right = 0, oldOut = 0, newOut = 0;
+        oldReference.process(input, input, oldOut, right);
+        newReference.process(input, input, newOut, right);
+        actual.process(input, input, left, right);
+        const float mix = float(frame + 1) / 256;
+        const float expected = oldOut + (newOut - oldOut) * mix;
+        TEST("factor transition keeps the previous wet path throughout crossfade",
+             std::fabs(left - expected) < 0.000002f);
+    }
+    actual.update(oldSettings);
+    for (int frame = 0; frame < 49000; ++frame) {
+        if (frame == 32) actual.update(nextSettings);
+        if (frame == 64) actual.update(oldSettings);
+        const float input = float(0.5 * std::sin(2 * std::acos(-1.0) * 8000 * (frame + 1280) / 48000));
+        float left = 0, right = 0, expected = 0;
+        actual.process(input, input, left, right);
+        oldReference.process(input, input, expected, right);
+        if (frame >= 48000) TEST("factor latest pending target converges",
+                                std::fabs(left - expected) < 0.0001f);
+    }
 }
 
 int main() {
@@ -278,6 +389,9 @@ int main() {
     test_stability();
     test_sample_rate_dependence();
     test_zero_drive_bypass();
+    test_wet_dc_rejection();
+    test_nonfinite_input();
+    test_factor_crossfade();
 
     std::printf("\n%d tests, %d failures\n", tests, failures);
     return failures > 0 ? 1 : 0;

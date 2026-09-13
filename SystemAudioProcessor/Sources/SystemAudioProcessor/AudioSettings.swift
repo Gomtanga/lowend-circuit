@@ -1,7 +1,7 @@
 import Foundation
 import LowEndSupport
 
-struct SpatialSettings {
+struct SpatialSettings: Sendable {
     var enabled: Bool = false
     var listenerX: Float = 0.0
     var listenerZ: Float = 0.0
@@ -24,6 +24,21 @@ struct Settings {
     var exciterOversamplingMode: ExciterOversamplingMode = .auto
     var automaticRateMatchingEnabled = false
     var spatial: SpatialSettings = SpatialSettings()
+
+    func normalized() -> Settings {
+        var result = self
+        func finiteClamp(_ value: Float, _ lower: Float, _ upper: Float, _ fallback: Float) -> Float {
+            value.isFinite ? min(max(value, lower), upper) : fallback
+        }
+        result.intensity = finiteClamp(intensity, 0, 100, 55)
+        result.body = finiteClamp(body, 0, 100, 30)
+        result.outputDb = finiteClamp(outputDb, -18, 6, -1.5)
+        result.spatial.listenerX = finiteClamp(spatial.listenerX, -3, 3, 0)
+        result.spatial.listenerZ = finiteClamp(spatial.listenerZ, -2.8, 2.8, 0)
+        result.spatial.speakerWidth = finiteClamp(spatial.speakerWidth, 0.6, 3, 1.65)
+        result.spatial.amount = finiteClamp(spatial.amount, 0, 100, 35)
+        return result
+    }
 
     enum Mode {
         case all
