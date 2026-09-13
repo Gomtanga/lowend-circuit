@@ -22,7 +22,8 @@ jobs:
         run: python3 SystemAudioProcessor/Tests/CaptureSessionLeaseChecks/run.py --scratch "$RUNNER_TEMP/lowend-capture-lease-checks"
 
       - name: Run Debug offline DSP, spatial, analysis and transition checks
-        run: swift run --package-path SystemAudioProcessor -c debug SystemAudioProcessor --self-test
+        # Preserve line-buffered output and the child's exit status on a crash.
+        run: script -q "$RUNNER_TEMP/lowend-debug-self-test.log" swift run --package-path SystemAudioProcessor -c debug SystemAudioProcessor --self-test
 
       - name: Verify invalid CLI arguments never start capture
         run: python3 scripts/check-native-cli.py SystemAudioProcessor/.build/debug/SystemAudioProcessor
@@ -40,3 +41,26 @@ jobs:
 
       - name: Run portable Core tests
         run: ctest --test-dir build/core-tests -C Release --output-on-failure
+
+      - name: Collect native crash diagnostics
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import shutil
+          destination = Path(os.environ["RUNNER_TEMP"]) / "lowend-crash-reports"
+          destination.mkdir(exist_ok=True)
+          for report in (Path.home() / "Library/Logs/DiagnosticReports").glob("SystemAudioProcessor*"):
+              if report.is_file():
+                  shutil.copy2(report, destination / report.name)
+          PY
+
+      - name: Upload native failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lowend-native-failure
+          path: |
+            ${{ runner.temp }}/lowend-debug-self-test.log
+            ${{ runner.temp }}/lowend-crash-reports/
