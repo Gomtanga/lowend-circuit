@@ -24,6 +24,7 @@ let package = Package(
         .executableTarget(
             name: "SystemAudioProcessor",
             dependencies: ["AudioRingBufferC", "LowEndDSPCoreC", "LowEndSupport"],
+            resources: [.copy("../../Shaders/SpectrumShaders.metal")],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),
@@ -46,5 +47,6 @@ let package = Package(
                 .linkedFramework("CoreAudio")
             ]
         )
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )

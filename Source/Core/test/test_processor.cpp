@@ -60,6 +60,48 @@ int main() {
         }
     }
 
+    // Model transitions must be the actual old/new bank blend, not a reset
+    // followed by fade-in from silence. Only the transition runs two banks.
+    processor.prepare(48000, 2);
+    processor.update(lowend::DSPPrecompute::makeDSPSettings(48000, 55, 30, 0, 0));
+    const auto circuitSettings = lowend::DSPPrecompute::makeDSPSettings(48000, 100, 30, 0, 1);
+    lowend::CircuitBass targetCircuit;
+    targetCircuit.update(circuitSettings);
+    processor.update(circuitSettings);
+    for (int frame = 0; frame < 256; ++frame) {
+        left[0] = 0.4f; right[0] = -0.2f;
+        float targetLeft = 0, targetRight = 0;
+        targetCircuit.process(left[0], right[0], targetLeft, targetRight);
+        const float mix = static_cast<float>(frame + 1) / 256;
+        const float expectedLeft = left[0] + (targetLeft - left[0]) * mix;
+        const float expectedRight = right[0] + (targetRight - right[0]) * mix;
+        processor.process(channels, 1);
+        check(std::fabs(left[0] - expectedLeft) < 0.000001f
+            && std::fabs(right[0] - expectedRight) < 0.000001f,
+            "model transition matches the independently processed old/new blend");
+    }
+
+    // Repeated retargets retain only the last pending snapshot. A later Clean
+    // target must eventually become exact dry, with no indefinitely restarted fade.
+    processor.update(lowend::DSPPrecompute::makeDSPSettings(48000, 100, 100, 0, 2, 1));
+    for (int frame = 0; frame < 1024; ++frame) {
+        if (frame == 32) processor.update(circuitSettings);
+        if (frame == 64) processor.update(lowend::DSPPrecompute::makeDSPSettings(48000, 55, 30, 0, 0));
+        left[0] = 0.35f; right[0] = -0.2f;
+        processor.process(channels, 1);
+        check(std::isfinite(left[0]) && std::isfinite(right[0]), "retarget transition remains finite");
+        if (frame >= 512) check(left[0] == 0.35f && right[0] == -0.2f,
+            "latest pending model reaches exact Clean output within two fades");
+    }
+    // Reusing a bank that once held signal must not replay frozen filter tails.
+    processor.update(circuitSettings);
+    for (int frame = 0; frame < 512; ++frame) {
+        left[0] = right[0] = 0;
+        processor.process(channels, 1);
+        check(std::fabs(left[0]) < 0.000001f && std::fabs(right[0]) < 0.000001f,
+              "cold target bank does not replay stale history");
+    }
+
     if (failures == 0) {
         std::printf("test_processor: all checks passed\n");
     }

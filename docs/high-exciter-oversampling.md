@@ -19,6 +19,7 @@ Input
   -> Polynomial Harmonic Generator
   -> Anti-Alias Low-Pass
   -> Decimation
+  -> 5 Hz harmonic-branch DC blocker
   -> Dry + Harmonic * Wet Mix
 ```
 
@@ -26,6 +27,10 @@ Dry 신호는 oversampling 경로를 통과하지 않는다. 따라서 Wet Mix�
 동일한 원본 신호가 출력된다.
 
 ## 배율 정책
+
+앱의 HighExciter `배음 품질` 배율과 출력 컨디셔닝의 `DAC 출력 배수`는 독립적이다. 전자는 배음 생성 뒤 원래 Tap 레이트로 돌아오고, 후자는 모델·Spatial 처리가 끝난 전체 PCM의 출력 레이트를 바꾼다. 예를 들어 Tap 48 kHz에서 HighExciter 4×와 출력 2×를 켜면 배음 구간192 kHz → Tap48 kHz → DAC96 kHz이며, 배음 생성8×를 뜻하지 않는다.
+
+출력 헤드룸은 실제 PCM2× 출력의 보간 전에 적용되는 감쇠다. `2× 출력 중` 상태에서 동작하며 시작 전 설정은 `출력 대기`, Bypass·실시간 미구현 모드와 fallback은 `미적용`으로 구분한다. 모델 내부에서 이미 생긴 포화·배음을 되돌리는 조절은 아니다. 후단 PCM 보간도 앞단에서 이미 생긴 alias를 제거하는 대체 수단이 아니다.
 
 | 엔진 샘플레이트 | 배율 | 내부 비선형 처리율 |
 | --- | ---: | ---: |
@@ -41,7 +46,7 @@ Dry 신호는 oversampling 경로를 통과하지 않는다. 따라서 Wet Mix�
 ## 사용자 배율 선택
 
 macOS Native 앱에서는 `Auto`, `1x`, `2x`, `4x`를 선택할 수 있다. 기본값은
-`Auto`이며 실제 Engine 처리율을 기준으로 위 표의 배율을 선택한다. Source
+`Auto`이며 톤 DSP가 실제 사용하는 Tap 측 처리율을 기준으로 위 표의 배율을 선택한다. Live PCM 2×의 후단 output/DAC rate를 이 기준으로 사용하지 않는다. Source
 메타데이터는 표시 및 Rate Matching 판단에만 사용하고 DSP 배율을 직접 결정하지
 않는다.
 
@@ -56,8 +61,11 @@ macOS Native 앱에서는 `Auto`, `1x`, `2x`, `4x`를 선택할 수 있다. 기�
 | 192 kHz | 4x | 2x |
 | 768 kHz | 4x | 1x |
 
-배율 변경 시 interpolation/decimation 필터 상태를 초기화하고 256 sample 동안
-wet 신호를 올리는 ramp를 적용해 전환 팝을 줄인다.
+배율 변경 시 미리 할당한 두 wet 경로 중 새 경로의 interpolation/decimation
+필터 상태를 초기화한다. 기존 경로와 새 경로를 함께 처리하며 256 frame 동안
+출력을 crossfade한다. 기존 경로의 상태는 전환이 끝날 때까지 유지한다.
+전환 중에 들어온 추가 설정은 가장 최근 값 하나를 보관하고 현재 전환이 끝난 뒤
+적용한다. Swift live와 C++ portable 구현에 같은 정책을 적용한다.
 
 ## 2x Stage
 
@@ -106,6 +114,8 @@ Decimation:
 - 모든 지원 샘플레이트에서 올바른 4x/2x/1x 선택
 - impulse 및 sine 입력에서 NaN/Inf 미발생
 - Wet Mix 0에서 bit-identical dry 반환
+- 높은 Drive/Wet의 일정 sine에서 충분한 안정화 후 DC 평균 제한
+- Swift live와 C++ portable 경로의 parity 및 독립 harmonic/DC fixture
 - 48 kHz, 15 kHz sine 비선형 처리 시 1x보다 alias 성분 감소
 - 샘플레이트 재설정 시 High-Pass와 모든 oversampling filter state reset
 

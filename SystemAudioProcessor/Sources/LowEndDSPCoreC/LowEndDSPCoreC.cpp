@@ -4,6 +4,7 @@
 #include "../../../Source/Core/src/CircuitBass.cpp"
 #include "../../../Source/Core/src/HighExciter.cpp"
 #include "../../../Source/Core/src/Processor.cpp"
+#include "../../../Source/Core/src/SpatialGeometry.cpp"
 
 #include <new>
 
@@ -76,4 +77,18 @@ void lc_dsp_core_reset(LCDSPCore *core) {
         return;
     }
     core->processor.reset();
+}
+
+uint32_t lc_spatial_geometry_precompute(float sampleRate,
+                                       const LCSpatialGeometryInput *input,
+                                       uint32_t delayCapacity,
+                                       LCSpatialGeometryResult *result) {
+    if (result == nullptr) {
+        return 0;
+    }
+    if (input == nullptr) {
+        *result = {};
+        return 0;
+    }
+    return lowend::calculateSpatialGeometry(sampleRate, *input, delayCapacity, *result) ? 1u : 0u;
 }

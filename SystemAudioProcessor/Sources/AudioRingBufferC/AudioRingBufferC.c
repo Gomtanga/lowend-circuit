@@ -5,6 +5,56 @@
 #include <stdlib.h>
 #include <string.h>
 
+struct LCCallbackGate {
+    void *userdata;
+    atomic_uint enabled;
+    atomic_uint_fast64_t inFlight;
+};
+
+LCCallbackGate *lc_callback_gate_create(void *userdata) {
+    if (userdata == NULL) return NULL;
+    LCCallbackGate *gate = (LCCallbackGate *)calloc(1, sizeof(LCCallbackGate));
+    if (gate == NULL) return NULL;
+    gate->userdata = userdata;
+    atomic_init(&gate->enabled, 1);
+    atomic_init(&gate->inFlight, 0);
+    if (!atomic_is_lock_free(&gate->enabled) || !atomic_is_lock_free(&gate->inFlight)) {
+        free(gate);
+        return NULL;
+    }
+    return gate;
+}
+
+void *lc_callback_gate_try_enter(LCCallbackGate *gate) {
+    if (gate == NULL) return NULL;
+    // One total order across entry, disable and the manager's count read means
+    // an accepted callback is counted before disable can observe quiescence.
+    atomic_fetch_add_explicit(&gate->inFlight, 1, memory_order_seq_cst);
+    if (!atomic_load_explicit(&gate->enabled, memory_order_seq_cst)) {
+        atomic_fetch_sub_explicit(&gate->inFlight, 1, memory_order_seq_cst);
+        return NULL;
+    }
+    return gate->userdata;
+}
+
+void lc_callback_gate_leave(LCCallbackGate *gate) {
+    if (gate != NULL) atomic_fetch_sub_explicit(&gate->inFlight, 1, memory_order_seq_cst);
+}
+
+void lc_callback_gate_disable(LCCallbackGate *gate) {
+    if (gate != NULL) atomic_store_explicit(&gate->enabled, 0, memory_order_seq_cst);
+}
+
+uint64_t lc_callback_gate_in_flight(const LCCallbackGate *gate) {
+    return gate == NULL ? 0 : atomic_load_explicit(&gate->inFlight, memory_order_seq_cst);
+}
+
+void lc_callback_gate_destroy(LCCallbackGate *gate) {
+    // The caller must first remove the callback source; entry itself accesses
+    // the gate even when it rejects userdata. See the public lifetime contract.
+    free(gate);
+}
+
 struct LCLockFreeRingBuffer {
     float *storage;
     uint32_t capacity;
@@ -15,6 +65,7 @@ struct LCLockFreeRingBuffer {
     atomic_uint_fast64_t underrunSamples;
     atomic_uint_fast64_t totalWrittenSamples;
     atomic_uint_fast64_t totalReadSamples;
+    atomic_uint discardRequested;
 };
 
 struct LCControlEventQueue {
@@ -23,6 +74,7 @@ struct LCControlEventQueue {
     uint32_t mask;
     atomic_uint_fast64_t readIndex;
     atomic_uint_fast64_t writeIndex;
+    atomic_uint_fast64_t appliedRevision;
 };
 
 struct LCSpectrumSnapshot {
@@ -32,11 +84,10 @@ struct LCSpectrumSnapshot {
 };
 
 struct LCOutputGainRamp {
-    atomic_uint_fast64_t commandSequence;
-    atomic_uint_fast32_t requestedTargetBits;
-    atomic_uint_fast32_t requestedFrameCount;
+    // One atomic word publishes the whole command. Identical commands coalesce.
+    atomic_uint_fast64_t requestedCommand;
     atomic_uint_fast32_t publishedCurrentBits;
-    uint64_t appliedSequence;
+    uint64_t appliedCommand;
     float currentGain;
     float targetGain;
     float step;
@@ -66,6 +117,7 @@ static float clamp_gain(float gain) {
 }
 
 static uint32_t next_power_of_two(uint32_t value) {
+    if (value > UINT32_C(0x80000000)) return 0;
     if (value < 2) {
         return 2;
     }
@@ -87,6 +139,7 @@ LCLockFreeRingBuffer *lc_ring_buffer_create(uint32_t requestedCapacitySamples) {
     }
 
     const uint32_t capacity = next_power_of_two(requestedCapacitySamples);
+    if (capacity == 0) { free(ringBuffer); return NULL; }
     ringBuffer->storage = (float *)calloc(capacity, sizeof(float));
     if (ringBuffer->storage == NULL) {
         free(ringBuffer);
@@ -101,7 +154,21 @@ LCLockFreeRingBuffer *lc_ring_buffer_create(uint32_t requestedCapacitySamples) {
     atomic_init(&ringBuffer->underrunSamples, 0);
     atomic_init(&ringBuffer->totalWrittenSamples, 0);
     atomic_init(&ringBuffer->totalReadSamples, 0);
+    atomic_init(&ringBuffer->discardRequested, 0);
     return ringBuffer;
+}
+
+// May be requested by management while producer/consumer are active.
+void lc_ring_buffer_request_discard(LCLockFreeRingBuffer *ringBuffer) {
+    if (ringBuffer) atomic_store_explicit(&ringBuffer->discardRequested, 1, memory_order_release);
+}
+
+// Only the SPSC consumer may execute this. No storage is touched.
+uint32_t lc_ring_buffer_consume_discard_request(LCLockFreeRingBuffer *ringBuffer) {
+    if (!ringBuffer || !atomic_exchange_explicit(&ringBuffer->discardRequested, 0, memory_order_acq_rel)) return 0;
+    const uint64_t write = atomic_load_explicit(&ringBuffer->writeIndex, memory_order_acquire);
+    atomic_store_explicit(&ringBuffer->readIndex, write, memory_order_release);
+    return 1;
 }
 
 void lc_ring_buffer_destroy(LCLockFreeRingBuffer *ringBuffer) {
@@ -309,9 +376,9 @@ LCOutputGainRamp *lc_output_gain_ramp_create(float initialGain) {
     }
 
     initialGain = clamp_gain(initialGain);
-    atomic_init(&ramp->commandSequence, 0);
-    atomic_init(&ramp->requestedTargetBits, float_to_bits(initialGain));
-    atomic_init(&ramp->requestedFrameCount, 0);
+    const uint64_t initialCommand = (uint64_t)float_to_bits(initialGain) << 32;
+    atomic_init(&ramp->requestedCommand, initialCommand);
+    ramp->appliedCommand = initialCommand;
     atomic_init(&ramp->publishedCurrentBits, float_to_bits(initialGain));
     ramp->currentGain = initialGain;
     ramp->targetGain = initialGain;
@@ -328,9 +395,8 @@ void lc_output_gain_ramp_set_target(LCOutputGainRamp *ramp, float targetGain, ui
     }
 
     targetGain = clamp_gain(targetGain);
-    atomic_store_explicit(&ramp->requestedTargetBits, float_to_bits(targetGain), memory_order_relaxed);
-    atomic_store_explicit(&ramp->requestedFrameCount, frameCount, memory_order_relaxed);
-    atomic_fetch_add_explicit(&ramp->commandSequence, 1, memory_order_release);
+    const uint64_t command = ((uint64_t)float_to_bits(targetGain) << 32) | frameCount;
+    atomic_store_explicit(&ramp->requestedCommand, command, memory_order_release);
 }
 
 float lc_output_gain_ramp_current(const LCOutputGainRamp *ramp) {
@@ -344,20 +410,11 @@ float lc_output_gain_ramp_current(const LCOutputGainRamp *ramp) {
 }
 
 static void output_gain_ramp_consume_command(LCOutputGainRamp *ramp) {
-    const uint64_t sequence = atomic_load_explicit(&ramp->commandSequence, memory_order_acquire);
-    if (sequence == ramp->appliedSequence) {
-        return;
-    }
-
-    ramp->appliedSequence = sequence;
-    ramp->targetGain = bits_to_float((uint32_t)atomic_load_explicit(
-        &ramp->requestedTargetBits,
-        memory_order_relaxed
-    ));
-    ramp->remainingFrames = (uint32_t)atomic_load_explicit(
-        &ramp->requestedFrameCount,
-        memory_order_relaxed
-    );
+    const uint64_t command = atomic_load_explicit(&ramp->requestedCommand, memory_order_acquire);
+    if (command == ramp->appliedCommand) return;
+    ramp->appliedCommand = command;
+    ramp->targetGain = bits_to_float((uint32_t)(command >> 32));
+    ramp->remainingFrames = (uint32_t)command;
     if (ramp->remainingFrames == 0) {
         ramp->currentGain = ramp->targetGain;
         ramp->step = 0;
@@ -428,6 +485,7 @@ LCControlEventQueue *lc_control_event_queue_create(uint32_t requestedCapacityEve
     }
 
     const uint32_t capacity = next_power_of_two(requestedCapacityEvents);
+    if (capacity == 0) { free(queue); return NULL; }
     queue->storage = (LCControlEvent *)calloc(capacity, sizeof(LCControlEvent));
     if (queue->storage == NULL) {
         free(queue);
@@ -438,6 +496,7 @@ LCControlEventQueue *lc_control_event_queue_create(uint32_t requestedCapacityEve
     queue->mask = capacity - 1;
     atomic_init(&queue->readIndex, 0);
     atomic_init(&queue->writeIndex, 0);
+    atomic_init(&queue->appliedRevision, 0);
     return queue;
 }
 
@@ -493,6 +552,13 @@ uint32_t lc_control_event_queue_available(const LCControlEventQueue *queue) {
     const uint64_t readIndex = atomic_load_explicit(&queue->readIndex, memory_order_acquire);
     const uint64_t available = writeIndex - readIndex;
     return available > queue->capacity ? queue->capacity : (uint32_t)available;
+}
+
+void lc_control_event_queue_acknowledge(LCControlEventQueue *queue, uint64_t revision) {
+    if (queue) atomic_store_explicit(&queue->appliedRevision, revision, memory_order_release);
+}
+uint64_t lc_control_event_queue_applied_revision(const LCControlEventQueue *queue) {
+    return queue ? atomic_load_explicit(&queue->appliedRevision, memory_order_acquire) : 0;
 }
 
 LCSpectrumSnapshot *lc_spectrum_snapshot_create(void) {

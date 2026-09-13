@@ -16,12 +16,10 @@ import Foundation
 /// Selects what the conditioning layer does to the post-tonal-DSP signal before
 /// it reaches the output device.
 enum OutputConditioningMode: UInt32, CaseIterable {
-    /// Identity pass-through. The live output is untouched. This is the only
-    /// mode that is actually exercised on the live audio path in this iteration.
+    /// Identity pass-through. The live output is untouched.
     case bypass = 0
-    /// Integer polyphase oversampling (2x / 4x / 8x). Rate-changing: producing
-    /// a live result requires switching the output device format, which is out
-    /// of scope here, so it runs in the offline harness only.
+    /// Integer polyphase oversampling. Live supports 2x for eligible devices
+    /// and tap rates; 4x / 8x run only in the offline harness.
     case pcmOversampling = 1
     /// Same-rate dither / noise shaping (and headroom) without a rate change.
     /// Kept as a structural placeholder; on the Float32 live output it is a no-op.
@@ -34,8 +32,8 @@ enum OutputConditioningMode: UInt32, CaseIterable {
         switch self {
         case .bypass: return "Bypass"
         case .pcmOversampling: return "PCM Oversampling"
-        case .pcmWithDither: return "PCM + Dither"
-        case .experimentalDSD: return "Experimental DSD / DoP"
+        case .pcmWithDither: return "PCM + Dither (Live 미구현)"
+        case .experimentalDSD: return "DSD / DoP (오프라인 전용)"
         }
     }
 }
@@ -83,7 +81,7 @@ enum ResamplingFilterMode: UInt32, CaseIterable {
         switch self {
         case .linearPhaseShort: return "Linear Phase Short"
         case .linearPhaseLong: return "Linear Phase Long"
-        case .minimumPhaseExperimental: return "Minimum Phase (Experimental)"
+        case .minimumPhaseExperimental: return "Minimum Phase 미구현 → Short"
         }
     }
 
@@ -105,28 +103,25 @@ enum ResamplingFilterMode: UInt32, CaseIterable {
     }
 }
 
-/// DoP (DSD-over-PCM) carrier helpers. The DoP open standard packs 8 DSD bits
-/// into the least-significant byte of a PCM carrier sample, with a marker byte
-/// (0x05 / 0xFA alternating) in the most-significant byte. For stereo, one DoP
-//  sample *frame* spans one carrier sample per channel.
+/// DoP 1.1 carrier helpers: a 24-bit word has 16 DSD payload bits below an
+/// alternating 0x05 / 0xFA marker byte. Our offline representation stores that
+/// word right-aligned in a little-endian 32-bit container. This byte layout is
+/// explicit; a future hardware transport must negotiate a matching ASBD.
 enum DoPCarrier {
     /// PCM carrier sample rate required to clock a given DSD family out as DoP.
     /// DSD64 -> 176.4 kHz, DSD128 -> 352.8 kHz, DSD256 -> 705.6 kHz carrier.
-    /// (8 DSD bits packed per carrier sample, so carrierRate = bitStreamRate / 8.)
+    /// (16 DSD bits per carrier sample: carrierRate = bitStreamRate / 16.)
     static func requiredCarrierRate(for dsdMode: DSDMode) -> Double {
-        switch dsdMode {
-        case .off: return 0
-        case .dsd64: return 176_400
-        case .dsd128: return 352_800
-        case .dsd256: return 705_600
-        }
+        dsdMode.bitStreamRate / Double(payloadBitsPerSample)
     }
 
     /// Bytes per PCM carrier sample in the packed DoP stream. We use the 32-bit
-    /// (4-byte) carrier layout: [dsdByte, 0x00, 0x00, markerByte].
+    /// (4-byte) carrier layout: [payloadLow, payloadHigh, marker, 0x00].
     static let carrierSampleBytes = 4
+    static let payloadBitsPerSample = 16
+    static let markerByteOffset = 2
 
-    /// The marker byte toggled into the MSB of successive DoP sample frames.
+    /// The marker byte toggled into bits 16...23 of successive carrier frames.
     static let markerA: UInt8 = 0xFA
     static let markerB: UInt8 = 0x05
 }
@@ -177,6 +172,10 @@ struct OutputConditioningParameters: Equatable {
 
     /// Clamp an arbitrary integer to the nearest supported oversampling factor.
     static func clampFactor(_ value: Int) -> Int {
+        // Bound before subtraction so even persisted Int.min / Int.max values
+        // cannot overflow the distance calculation.
+        if value <= 2 { return 2 }
+        if value >= 8 { return 8 }
         guard let nearest = allowedOversamplingFactors.min(
             by: { abs($0 - value) < abs($1 - value) }
         ) else { return 2 }

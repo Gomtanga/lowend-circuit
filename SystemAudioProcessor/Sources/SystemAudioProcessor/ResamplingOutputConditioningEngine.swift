@@ -46,6 +46,7 @@ final class ResamplingOutputConditioningEngine {
     // queue drain), audio-thread reader (in processLive). Tests read/write
     // directly because they own the only thread touching the engine.
     private var settings = OutputConditioningParameters()
+    private var liveHeadroomGain: Float = 1
 
     init(maxInputFrames: Int = 8192) {
         self.maxInputFrames = max(64, maxInputFrames)
@@ -121,7 +122,7 @@ final class ResamplingOutputConditioningEngine {
 
         // 2× polyphase oversample with headroom trim into the per-channel slots,
         // then finite-guarded re-interleave into the caller's output buffer.
-        let gain = settings.headroomGain
+        let gain = liveHeadroomGain
         for i in 0..<inputFrames {
             deinterleavedL[i] = input[i * 2] * gain
             deinterleavedR[i] = input[i * 2 + 1] * gain
@@ -131,13 +132,15 @@ final class ResamplingOutputConditioningEngine {
                                           output: oversampledL,
                                           channel: 0,
                                           factor: 2,
-                                          mode: settings.filterMode)
+                                          mode: settings.filterMode,
+                                          transitionFrames: 512)
         _ = resampler.process(input: deinterleavedR,
                               inputFrames: inputFrames,
                               output: oversampledR,
                               channel: 1,
                               factor: 2,
-                              mode: settings.filterMode)
+                              mode: settings.filterMode,
+                              transitionFrames: 512)
         for i in 0..<outFrames {
             var l = oversampledL[i]
             var r = oversampledR[i]
@@ -153,9 +156,17 @@ final class ResamplingOutputConditioningEngine {
     /// live-oversampling activation or the oversampling factor changes, the FIR
     /// per-channel history is cleared so the (re)activated path starts from a
     /// clean state — minimising the transient at the mode switch. `resetAll` is a
-    /// plain memset of the pre-allocated history, so it stays allocation- and
-    /// lock-free and is safe on the audio thread.
+    /// plain reset of pre-allocated storage. Filter-only changes preserve all
+    /// input history and crossfade over 512 output frames in `processLive`.
+    /// Manager/offline convenience only: converts dB to gain. The audio callback
+    /// must use the overload with a precomputed gain from its C control packet.
     func updateSettings(_ settings: OutputConditioningParameters) {
+        updateSettings(settings, precomputedHeadroomGain: settings.headroomGain)
+    }
+
+    /// Audio-thread entry: scalar copies only, no logarithm/power calculation.
+    /// Also valid on the manager after both callbacks have quiesced.
+    func updateSettings(_ settings: OutputConditioningParameters, precomputedHeadroomGain: Float) {
         let wasLiveActive = self.settings.isEnabled
             && self.settings.outputMode == .pcmOversampling
             && self.settings.oversamplingFactor == 2
@@ -164,6 +175,7 @@ final class ResamplingOutputConditioningEngine {
             && settings.oversamplingFactor == 2
         let factorChanged = self.settings.oversamplingFactor != settings.oversamplingFactor
         self.settings = settings
+        liveHeadroomGain = precomputedHeadroomGain.isFinite ? max(precomputedHeadroomGain, 0) : 0
         if wasLiveActive != isLiveActive || factorChanged {
             resampler.resetAll()
         }
@@ -174,9 +186,16 @@ final class ResamplingOutputConditioningEngine {
     func resetAll() {
         resampler.resetAll()
         modulator.resetAll()
+        dopPacker.reset()
     }
 
     // MARK: - Offline pipeline (test harness)
+
+    /// Required capacity for the next offline pack, including any partial
+    /// payload retained by previous calls. Query before processing that block.
+    func requiredDoPOutputBytes(dsdFrames: Int) -> Int {
+        dopPacker.outputByteCount(forDsdFrames: dsdFrames)
+    }
 
     /// Polyphase-oversample interleaved stereo, applying `headroomGain` as a
     /// pre-gain. Writes interleaved oversampled stereo into `output`.
@@ -244,7 +263,9 @@ final class ResamplingOutputConditioningEngine {
     ///   - leftDsdBits / rightDsdBits: caller buffers of at least
     ///     `inputFrames * factor` bytes (filled 0/1).
     ///   - dopOutput: caller buffer of at least
-    ///     `DoPacker.outputByteCount(forDsdFrames: inputFrames * factor)` bytes.
+    ///     `requiredDoPOutputBytes(dsdFrames: inputFrames * factor)` bytes.
+    ///     The packer retains partial payloads and marker phase across calls;
+    ///     `resetAll()` starts a new stream.
     /// - Returns: `(dsdFrames, dopBytes)` written, or `(0, 0)` on bad args.
     @discardableResult
     func processDSDToP(interleaved input: UnsafePointer<Float>,

@@ -50,17 +50,35 @@ private:
         void reset();
     };
 
-    struct Channel {
-        Biquad highPass;       // ~11 kHz high-pass
+    struct Pipeline {
         Oversampling2xStage stage1;
         Oversampling2xStage stage2;
-        float drive = 0.0f;   // exciter drive gain
-        float wetMix = 0.0f;  // wet blend amount (0 = bypass)
+        float drive = 0.0f;
+        float wetMix = 0.0f;
         uint32_t oversampleFactor = 1;
-        uint32_t transitionSamplesRemaining = 0;
+        float dcBlockPole = 0.9993457f;
+        float previousHarmonic = 0.0f;
+        float previousDCBlocked = 0.0f;
 
-        float processSample(float input);
+        void update(const LCDSPSettings& settings);
+        float process(float high);
         float makeHarmonic(float input) const;
+        void reset();
+    };
+
+    struct Channel {
+        static constexpr uint32_t transitionFrames = 256;
+        Biquad highPass;
+        Pipeline pipelines[2];
+        uint32_t active = 0;
+        uint32_t target = 1;
+        uint32_t transitionRemaining = 0;
+        bool initialized = false;
+        bool hasPending = false;
+        LCDSPSettings pending{};
+
+        void update(const LCDSPSettings& settings);
+        float processSample(float input);
         void reset();
         static float fastClamp(float value);
     };

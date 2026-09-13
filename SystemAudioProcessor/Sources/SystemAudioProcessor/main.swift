@@ -48,91 +48,6 @@ enum RateMatchPhase: String, Sendable {
 }
 
 
-private final class DynamicsMeterModel: ObservableObject {
-    struct Levels {
-        var peak: Float
-        var rms: Float
-        var crestFactor: Float
-    }
-
-    @Published private(set) var levels = Levels(peak: -100, rms: -100, crestFactor: 0)
-
-    func update(peak: Float, rms: Float, crestFactor: Float) {
-        levels = Levels(peak: peak, rms: rms, crestFactor: crestFactor)
-    }
-
-    func reset() {
-        update(peak: -100, rms: -100, crestFactor: 0)
-    }
-}
-
-private final class SpectrumModel {
-    static let binCount = Int(LC_SPECTRUM_BIN_COUNT)
-    private let snapshot: OpaquePointer
-
-    init() {
-        guard let snapshot = lc_spectrum_snapshot_create() else {
-            fatalError("Could not allocate spectrum snapshot.")
-        }
-        self.snapshot = snapshot
-    }
-
-    deinit {
-        lc_spectrum_snapshot_destroy(snapshot)
-    }
-
-    func publish(_ values: [Float]) {
-        values.withUnsafeBufferPointer { pointer in
-            guard let baseAddress = pointer.baseAddress else { return }
-            lc_spectrum_snapshot_publish(snapshot, baseAddress, UInt32(pointer.count))
-        }
-    }
-
-    func copySnapshot(
-        into destination: UnsafeMutablePointer<Float>,
-        after previousSequence: UInt64
-    ) -> UInt64? {
-        var newSequence: UInt64 = previousSequence
-        let copied = lc_spectrum_snapshot_copy_if_new(
-            snapshot,
-            destination,
-            UInt32(Self.binCount),
-            previousSequence,
-            &newSequence
-        )
-        return copied == UInt32(Self.binCount) ? newSequence : nil
-    }
-
-    func setAnalysisActive(_ active: Bool) {
-        lc_spectrum_snapshot_set_active(snapshot, active ? 1 : 0)
-    }
-
-    var isAnalysisActive: Bool {
-        lc_spectrum_snapshot_is_active(snapshot) != 0
-    }
-
-    func reset() {
-        lc_spectrum_snapshot_clear(snapshot)
-    }
-}
-
-private final class SpatialControlModel: ObservableObject {
-    @Published var settings: SpatialSettings
-
-    init(settings: SpatialSettings = SpatialSettings()) {
-        self.settings = settings
-    }
-
-    func update(_ newSettings: SpatialSettings) {
-        var clamped = newSettings
-        clamped.listenerX = clamp(clamped.listenerX, -3.0, 3.0)
-        clamped.listenerZ = clamp(clamped.listenerZ, -2.8, 2.8)
-        clamped.speakerWidth = clamp(clamped.speakerWidth, 0.6, 3.0)
-        clamped.amount = clamp(clamped.amount, 0, 100)
-        settings = clamped
-    }
-}
-
 private enum DynamicsMeterStyle {
     case compactHorizontal
     case analysis
@@ -218,359 +133,6 @@ private struct DynamicsMeterView: View {
 
 }
 
-private struct MetalSpectrumUniforms {
-    var viewportAndCount = SIMD4<Float>(0, 0, Float(SpectrumModel.binCount), 0)
-    var layout = SIMD4<Float>(42, 5, 1.5, 0)
-}
-
-@available(macOS 14.4, *)
-private struct MetalSpectrumView: NSViewRepresentable {
-    let model: SpectrumModel
-    var isActive = true
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(model: model)
-    }
-
-    func makeNSView(context: Context) -> MTKView {
-        let view = MTKView(frame: .zero, device: context.coordinator.device)
-        model.setAnalysisActive(isActive)
-        view.delegate = context.coordinator
-        view.colorPixelFormat = .bgra8Unorm
-        view.framebufferOnly = true
-        view.clearColor = MTLClearColor(red: 0.07, green: 0.08, blue: 0.10, alpha: 1)
-        view.preferredFramesPerSecond = 30
-        view.enableSetNeedsDisplay = false
-        view.isPaused = !isActive || !context.coordinator.isReady
-        view.presentsWithTransaction = false
-        return view
-    }
-
-    func updateNSView(_ nsView: MTKView, context: Context) {
-        model.setAnalysisActive(isActive)
-        nsView.isPaused = !isActive || !context.coordinator.isReady
-    }
-
-    static func dismantleNSView(_ nsView: MTKView, coordinator: Coordinator) {
-        coordinator.setAnalysisActive(false)
-        nsView.isPaused = true
-        nsView.delegate = nil
-    }
-
-    final class Coordinator: NSObject, MTKViewDelegate {
-        let device: MTLDevice?
-        private let model: SpectrumModel
-        private let commandQueue: MTLCommandQueue?
-        private let pipelineState: MTLRenderPipelineState?
-        private let amplitudeBuffers: [MTLBuffer]
-        private let uniformBuffers: [MTLBuffer]
-        private var bufferIndex = 0
-        private var drawableSize = SIMD2<Float>(0, 0)
-        private var lastSequence = UInt64.max
-
-        var isReady: Bool {
-            device != nil &&
-                commandQueue != nil &&
-                pipelineState != nil &&
-                amplitudeBuffers.count == 3 &&
-                uniformBuffers.count == 3
-        }
-
-        init(model: SpectrumModel) {
-            self.model = model
-            let device = MTLCreateSystemDefaultDevice()
-            self.device = device
-            self.commandQueue = device?.makeCommandQueue()
-            self.pipelineState = Self.makePipeline(device: device)
-
-            var amplitudes: [MTLBuffer] = []
-            var uniforms: [MTLBuffer] = []
-            if let device {
-                let amplitudeLength = SpectrumModel.binCount * MemoryLayout<Float>.stride
-                let uniformLength = MemoryLayout<MetalSpectrumUniforms>.stride
-                for _ in 0..<3 {
-                    if let amplitude = device.makeBuffer(length: amplitudeLength, options: .storageModeShared),
-                       let uniform = device.makeBuffer(length: uniformLength, options: .storageModeShared) {
-                        memset(amplitude.contents(), 0, amplitudeLength)
-                        memset(uniform.contents(), 0, uniformLength)
-                        amplitudes.append(amplitude)
-                        uniforms.append(uniform)
-                    }
-                }
-            }
-            self.amplitudeBuffers = amplitudes
-            self.uniformBuffers = uniforms
-            super.init()
-        }
-
-        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-            drawableSize = SIMD2(Float(size.width), Float(size.height))
-            lastSequence = UInt64.max
-        }
-
-        func setAnalysisActive(_ active: Bool) {
-            model.setAnalysisActive(active)
-        }
-
-        func draw(in view: MTKView) {
-            guard isReady,
-                  drawableSize.x > 0,
-                  drawableSize.y > 0,
-                  let commandQueue,
-                  let pipelineState,
-                  let descriptor = view.currentRenderPassDescriptor,
-                  let drawable = view.currentDrawable else { return }
-
-            let index = bufferIndex
-            bufferIndex = (bufferIndex + 1) % 3
-            let amplitudeBuffer = amplitudeBuffers[index]
-            let amplitudePointer = amplitudeBuffer.contents().bindMemory(
-                to: Float.self,
-                capacity: SpectrumModel.binCount
-            )
-            guard let sequence = model.copySnapshot(
-                into: amplitudePointer,
-                after: lastSequence
-            ) else { return }
-            lastSequence = sequence
-
-            let uniformBuffer = uniformBuffers[index]
-            let uniformPointer = uniformBuffer.contents().bindMemory(
-                to: MetalSpectrumUniforms.self,
-                capacity: 1
-            )
-            uniformPointer.pointee.viewportAndCount = SIMD4(
-                drawableSize.x,
-                drawableSize.y,
-                Float(SpectrumModel.binCount),
-                0
-            )
-
-            guard let commandBuffer = commandQueue.makeCommandBuffer(),
-                  let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
-            encoder.setRenderPipelineState(pipelineState)
-            encoder.setVertexBuffer(amplitudeBuffer, offset: 0, index: 0)
-            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
-            encoder.drawPrimitives(
-                type: .triangle,
-                vertexStart: 0,
-                vertexCount: 6,
-                instanceCount: SpectrumModel.binCount
-            )
-            encoder.endEncoding()
-            commandBuffer.present(drawable)
-            commandBuffer.commit()
-        }
-
-        private static func makePipeline(device: MTLDevice?) -> MTLRenderPipelineState? {
-            guard let device,
-                  let shaderURL = Bundle.main.url(forResource: "SpectrumShaders", withExtension: "metal"),
-                  let shaderSource = try? String(contentsOf: shaderURL, encoding: .utf8),
-                  let library = try? device.makeLibrary(source: shaderSource, options: nil),
-                  let vertexFunction = library.makeFunction(name: "spectrumVertex"),
-                  let fragmentFunction = library.makeFunction(name: "spectrumFragment") else {
-                return nil
-            }
-
-            let descriptor = MTLRenderPipelineDescriptor()
-            descriptor.label = "LowEnd Spectrum Bars"
-            descriptor.vertexFunction = vertexFunction
-            descriptor.fragmentFunction = fragmentFunction
-            descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-            return try? device.makeRenderPipelineState(descriptor: descriptor)
-        }
-    }
-}
-
-@available(macOS 14.4, *)
-private struct SpatialStageRepresentable: NSViewRepresentable {
-    @ObservedObject var model: SpatialControlModel
-    let onChange: (SpatialSettings) -> Void
-
-    func makeNSView(context: Context) -> SpatialStageView {
-        let view = SpatialStageView(frame: .zero)
-        view.wantsLayer = true
-        view.layer?.cornerRadius = 6
-        view.onChange = { settings in
-            model.update(settings)
-            onChange(model.settings)
-        }
-        view.setSettings(model.settings)
-        return view
-    }
-
-    func updateNSView(_ nsView: SpatialStageView, context: Context) {
-        nsView.setSettings(model.settings)
-    }
-}
-
-@available(macOS 14.4, *)
-private struct RightPanelContainerView: View {
-    private enum PanelTab: String, CaseIterable, Identifiable {
-        case spatial = "Spatial Stage"
-        case analysis = "Analysis"
-
-        var id: String { rawValue }
-    }
-
-    @State private var selectedTab: PanelTab = .spatial
-    @ObservedObject var spatialModel: SpatialControlModel
-    let dynamicsModel: DynamicsMeterModel
-    let spectrumModel: SpectrumModel
-    let onSpatialChange: (SpatialSettings) -> Void
-
-    var body: some View {
-        VStack(spacing: 12) {
-            Picker("", selection: $selectedTab) {
-                ForEach(PanelTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            ZStack {
-                switch selectedTab {
-                case .spatial:
-                    spatialTab
-                        .transition(.opacity)
-                case .analysis:
-                    analysisTab
-                        .transition(.opacity)
-                }
-            }
-            .animation(.easeInOut(duration: 0.16), value: selectedTab)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(red: 0.12, green: 0.14, blue: 0.17))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var spatialTab: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                Text("공간 무대")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(Color(red: 0.96, green: 0.75, blue: 0.31))
-                Spacer()
-                Button("원위치") {
-                    applySpatialChange { settings in
-                        settings.listenerX = 0
-                        settings.listenerZ = 0
-                    }
-                }
-                .buttonStyle(.bordered)
-                Toggle("공간음향", isOn: spatialEnabledBinding)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 12, weight: .semibold))
-            }
-
-            SpatialStageRepresentable(model: spatialModel, onChange: onSpatialChange)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .frame(minHeight: 310)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-
-            VStack(spacing: 8) {
-                spatialSlider(title: "나 X", value: listenerXBinding, range: -3.0...3.0, suffix: "m")
-                spatialSlider(title: "나 Z", value: listenerZBinding, range: -2.8...2.8, suffix: "m")
-                spatialSlider(title: "Width", value: speakerWidthBinding, range: 0.6...3.0, suffix: "m")
-                spatialSlider(title: "Space", value: spatialAmountBinding, range: 0...100, suffix: "%")
-            }
-
-            DynamicsMeterView(model: dynamicsModel, style: .compactHorizontal)
-                .frame(maxWidth: .infinity)
-                .frame(height: 34)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var analysisTab: some View {
-        VStack(spacing: 12) {
-            MetalSpectrumView(model: spectrumModel, isActive: selectedTab == .analysis)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .frame(minHeight: 330)
-                .overlay(alignment: .topLeading) {
-                    Text("스펙트럼")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            DynamicsMeterView(model: dynamicsModel, style: .analysis)
-                .frame(maxWidth: .infinity)
-                .frame(height: 162)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func spatialSlider(title: String, value: Binding<Double>, range: ClosedRange<Double>, suffix: String) -> some View {
-        HStack(spacing: 10) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
-                .frame(width: 46, alignment: .leading)
-            Slider(value: value, in: range)
-            Text(valueText(value.wrappedValue, suffix: suffix))
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white)
-                .frame(width: 70, alignment: .trailing)
-        }
-    }
-
-    private var spatialEnabledBinding: Binding<Bool> {
-        Binding(
-            get: { spatialModel.settings.enabled },
-            set: { newValue in
-                applySpatialChange { settings in settings.enabled = newValue }
-            }
-        )
-    }
-
-    private var listenerXBinding: Binding<Double> {
-        spatialBinding(\.listenerX)
-    }
-
-    private var listenerZBinding: Binding<Double> {
-        spatialBinding(\.listenerZ)
-    }
-
-    private var speakerWidthBinding: Binding<Double> {
-        spatialBinding(\.speakerWidth)
-    }
-
-    private var spatialAmountBinding: Binding<Double> {
-        spatialBinding(\.amount)
-    }
-
-    private func spatialBinding(_ keyPath: WritableKeyPath<SpatialSettings, Float>) -> Binding<Double> {
-        Binding(
-            get: { Double(spatialModel.settings[keyPath: keyPath]) },
-            set: { newValue in
-                applySpatialChange { settings in settings[keyPath: keyPath] = Float(newValue) }
-            }
-        )
-    }
-
-    private func applySpatialChange(_ change: (inout SpatialSettings) -> Void) {
-        var settings = spatialModel.settings
-        change(&settings)
-        spatialModel.update(settings)
-        onSpatialChange(spatialModel.settings)
-    }
-
-    private func valueText(_ value: Double, suffix: String) -> String {
-        if suffix == "%" {
-            return "\(Int(value.rounded()))\(suffix)"
-        }
-        return String(format: "%.2f %@", value, suffix)
-    }
-}
-
 @available(macOS 14.4, *)
 private struct PersistentAnalysisView: View {
     let dynamicsModel: DynamicsMeterModel
@@ -604,124 +166,6 @@ private struct PersistentAnalysisView: View {
     }
 }
 
-@available(macOS 14.4, *)
-private struct SpatialPageView: View {
-    @ObservedObject var spatialModel: SpatialControlModel
-    let onSpatialChange: (SpatialSettings) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("공간 음향")
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundStyle(.white)
-                    Text("청취 위치와 가상 스피커 폭을 실시간으로 조절합니다.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color(red: 0.60, green: 0.65, blue: 0.72))
-                }
-                Spacer()
-                Button {
-                    applySpatialChange { settings in
-                        settings.listenerX = 0
-                        settings.listenerZ = 0
-                    }
-                } label: {
-                    Image(systemName: "location.fill.viewfinder")
-                }
-                .buttonStyle(.bordered)
-                .help("청취 위치를 원점으로 되돌립니다.")
-
-                Toggle("공간음향", isOn: spatialEnabledBinding)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 12, weight: .semibold))
-            }
-
-            SpatialStageRepresentable(model: spatialModel, onChange: onSpatialChange)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .frame(minHeight: 300)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-
-            VStack(spacing: 10) {
-                spatialSlider(title: "나 X", value: listenerXBinding, range: -3.0...3.0, suffix: "m")
-                spatialSlider(title: "나 Z", value: listenerZBinding, range: -2.8...2.8, suffix: "m")
-                spatialSlider(title: "Width", value: speakerWidthBinding, range: 0.6...3.0, suffix: "m")
-                spatialSlider(title: "Space", value: spatialAmountBinding, range: 0...100, suffix: "%")
-            }
-            .padding(14)
-            .background(Color(red: 0.12, green: 0.14, blue: 0.17))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
-        .padding(20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(red: 0.08, green: 0.09, blue: 0.11))
-    }
-
-    private func spatialSlider(title: String,
-                               value: Binding<Double>,
-                               range: ClosedRange<Double>,
-                               suffix: String) -> some View {
-        HStack(spacing: 10) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color(red: 0.78, green: 0.81, blue: 0.86))
-                .frame(width: 50, alignment: .leading)
-            Slider(value: value, in: range)
-            Text(valueText(value.wrappedValue, suffix: suffix))
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white)
-                .frame(width: 72, alignment: .trailing)
-        }
-    }
-
-    private var spatialEnabledBinding: Binding<Bool> {
-        Binding(
-            get: { spatialModel.settings.enabled },
-            set: { newValue in
-                applySpatialChange { settings in settings.enabled = newValue }
-            }
-        )
-    }
-
-    private var listenerXBinding: Binding<Double> {
-        spatialBinding(\.listenerX)
-    }
-
-    private var listenerZBinding: Binding<Double> {
-        spatialBinding(\.listenerZ)
-    }
-
-    private var speakerWidthBinding: Binding<Double> {
-        spatialBinding(\.speakerWidth)
-    }
-
-    private var spatialAmountBinding: Binding<Double> {
-        spatialBinding(\.amount)
-    }
-
-    private func spatialBinding(_ keyPath: WritableKeyPath<SpatialSettings, Float>) -> Binding<Double> {
-        Binding(
-            get: { Double(spatialModel.settings[keyPath: keyPath]) },
-            set: { newValue in
-                applySpatialChange { settings in
-                    settings[keyPath: keyPath] = Float(newValue)
-                }
-            }
-        )
-    }
-
-    private func applySpatialChange(_ mutation: (inout SpatialSettings) -> Void) {
-        var settings = spatialModel.settings
-        mutation(&settings)
-        spatialModel.update(settings)
-        onSpatialChange(spatialModel.settings)
-    }
-
-    private func valueText(_ value: Double, suffix: String) -> String {
-        suffix == "%" ? "\(Int(value.rounded()))%" : String(format: "%.2f %@", value, suffix)
-    }
-}
-
 private func fourCC(_ status: OSStatus) -> String {
     let value = UInt32(bitPattern: status)
     let chars = [
@@ -734,11 +178,11 @@ private func fourCC(_ status: OSStatus) -> String {
     return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "'\(text)'"
 }
 
-private func check(_ status: OSStatus, _ label: String) throws {
+func check(_ status: OSStatus, _ label: String) throws {
     guard status == noErr else { throw AppError.osStatus(label, status) }
 }
 
-private func clamp(_ value: Float, _ lower: Float, _ upper: Float) -> Float {
+func clamp(_ value: Float, _ lower: Float, _ upper: Float) -> Float {
     min(max(value, lower), upper)
 }
 
@@ -758,13 +202,20 @@ private func formatDbText(_ db: Float) -> String {
 }
 
 private func parseArguments() throws -> Settings {
+    let arguments = Array(CommandLine.arguments.dropFirst())
+    let diagnostics = ["--list-apps", "--self-test", "--ui-self-test", "--benchmark-output-conditioning"]
+    guard arguments.count == 1 || !arguments.contains(where: diagnostics.contains) else {
+        throw AppError.message("Diagnostic commands must be used on their own.")
+    }
     var settings = Settings()
     var bundleIDs: [String] = []
-    var iterator = CommandLine.arguments.dropFirst().makeIterator()
+    var captureAll = false
+    var iterator = arguments.makeIterator()
 
     while let arg = iterator.next() {
         switch arg {
         case "--all":
+            captureAll = true
             settings.mode = .all
         case "--bundle-id":
             guard let value = iterator.next(), !value.isEmpty else {
@@ -772,17 +223,17 @@ private func parseArguments() throws -> Settings {
             }
             bundleIDs.append(value)
         case "--intensity":
-            guard let value = iterator.next(), let number = Float(value) else {
+            guard let value = iterator.next(), let number = Float(value), number.isFinite else {
                 throw AppError.message("--intensity needs a number")
             }
             settings.intensity = number
         case "--body":
-            guard let value = iterator.next(), let number = Float(value) else {
+            guard let value = iterator.next(), let number = Float(value), number.isFinite else {
                 throw AppError.message("--body needs a number")
             }
             settings.body = number
         case "--output":
-            guard let value = iterator.next(), let number = Float(value) else {
+            guard let value = iterator.next(), let number = Float(value), number.isFinite else {
                 throw AppError.message("--output needs a number")
             }
             settings.outputDb = number
@@ -807,24 +258,28 @@ private func parseArguments() throws -> Settings {
             guard let value = iterator.next() else {
                 throw AppError.message("--spatial needs on or off")
             }
-            settings.spatial.enabled = ["on", "true", "1", "yes"].contains(value.lowercased())
+            switch value.lowercased() {
+            case "on", "true", "1", "yes": settings.spatial.enabled = true
+            case "off", "false", "0", "no": settings.spatial.enabled = false
+            default: throw AppError.message("--spatial needs on or off")
+            }
         case "--listener-x":
-            guard let value = iterator.next(), let number = Float(value) else {
+            guard let value = iterator.next(), let number = Float(value), number.isFinite else {
                 throw AppError.message("--listener-x needs a number")
             }
             settings.spatial.listenerX = number
         case "--listener-z":
-            guard let value = iterator.next(), let number = Float(value) else {
+            guard let value = iterator.next(), let number = Float(value), number.isFinite else {
                 throw AppError.message("--listener-z needs a number")
             }
             settings.spatial.listenerZ = number
         case "--stage-width":
-            guard let value = iterator.next(), let number = Float(value) else {
+            guard let value = iterator.next(), let number = Float(value), number.isFinite else {
                 throw AppError.message("--stage-width needs a number")
             }
             settings.spatial.speakerWidth = number
         case "--space":
-            guard let value = iterator.next(), let number = Float(value) else {
+            guard let value = iterator.next(), let number = Float(value), number.isFinite else {
                 throw AppError.message("--space needs a number")
             }
             settings.spatial.amount = number
@@ -840,463 +295,16 @@ private func parseArguments() throws -> Settings {
     }
 
     if !bundleIDs.isEmpty {
+        guard !captureAll else { throw AppError.message("Choose --all or --bundle-id, not both.") }
         settings.mode = .bundleIDs(bundleIDs)
     }
 
-    return settings
+    return settings.normalized()
 }
 
 @available(macOS 14.4, *)
 @MainActor
-private final class SpatialStageView: SCNView {
-    var onChange: ((SpatialSettings) -> Void)?
-
-    private let listenerNode = SCNNode()
-    private let listenerRingNode = SCNNode()
-    private let leftSpeakerNode = SCNNode()
-    private let rightSpeakerNode = SCNNode()
-    private let speakerWidthNode = SCNNode()
-    private let cameraNode = SCNNode()
-    private var settings = SpatialSettings()
-    private let xRange: Float = 3.0
-    private let zRange: Float = 2.8
-
-    override init(frame frameRect: NSRect, options: [String: Any]? = nil) {
-        super.init(frame: frameRect, options: options)
-        setupScene()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setupScene()
-    }
-
-    func setSettings(_ newSettings: SpatialSettings) {
-        settings = newSettings
-        updateNodes()
-    }
-
-    override func layout() {
-        super.layout()
-        updateCameraScale()
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        updateListener(from: event)
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        updateListener(from: event)
-    }
-
-    private func setupScene() {
-        let scene = SCNScene()
-        self.scene = scene
-        backgroundColor = NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1)
-        allowsCameraControl = false
-        rendersContinuously = false
-
-        let camera = SCNCamera()
-        camera.usesOrthographicProjection = true
-        cameraNode.camera = camera
-        cameraNode.position = SCNVector3(0, 6.2, 0)
-        cameraNode.look(at: SCNVector3(0, 0, 0), up: SCNVector3(0, 0, 1), localFront: SCNVector3(0, 0, -1))
-        scene.rootNode.addChildNode(cameraNode)
-        pointOfView = cameraNode
-        updateCameraScale()
-
-        let floor = SCNNode(geometry: SCNPlane(width: 6.0, height: 5.6))
-        floor.geometry?.firstMaterial?.diffuse.contents = NSColor(calibratedRed: 0.10, green: 0.12, blue: 0.15, alpha: 1)
-        floor.eulerAngles.x = -CGFloat.pi / 2
-        floor.position = SCNVector3(0, -0.025, 0)
-        scene.rootNode.addChildNode(floor)
-
-        addGrid(to: scene)
-        addFrontMarker(to: scene)
-
-        let speakerMaterial = SCNMaterial()
-        speakerMaterial.diffuse.contents = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 1)
-        let speakerGeometry = SCNBox(width: 0.28, height: 0.22, length: 0.44, chamferRadius: 0.04)
-        speakerGeometry.materials = [speakerMaterial]
-        leftSpeakerNode.geometry = speakerGeometry.copy() as? SCNGeometry
-        rightSpeakerNode.geometry = speakerGeometry.copy() as? SCNGeometry
-        scene.rootNode.addChildNode(leftSpeakerNode)
-        scene.rootNode.addChildNode(rightSpeakerNode)
-
-        let widthMaterial = SCNMaterial()
-        widthMaterial.diffuse.contents = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 0.95)
-        speakerWidthNode.geometry = SCNBox(width: 1.65, height: 0.025, length: 0.055, chamferRadius: 0)
-        speakerWidthNode.geometry?.materials = [widthMaterial]
-        speakerWidthNode.position = SCNVector3(0, 0.02, 1.47)
-        scene.rootNode.addChildNode(speakerWidthNode)
-
-        let listenerMaterial = SCNMaterial()
-        listenerMaterial.diffuse.contents = NSColor(calibratedRed: 0.34, green: 0.80, blue: 0.92, alpha: 1)
-        listenerNode.geometry = SCNSphere(radius: 0.20)
-        listenerNode.geometry?.materials = [listenerMaterial]
-        scene.rootNode.addChildNode(listenerNode)
-
-        let ringMaterial = SCNMaterial()
-        ringMaterial.diffuse.contents = NSColor(calibratedRed: 0.34, green: 0.80, blue: 0.92, alpha: 0.65)
-        listenerRingNode.geometry = SCNTorus(ringRadius: 0.33, pipeRadius: 0.018)
-        listenerRingNode.geometry?.materials = [ringMaterial]
-        listenerRingNode.eulerAngles.x = CGFloat.pi / 2
-        scene.rootNode.addChildNode(listenerRingNode)
-
-        updateNodes()
-    }
-
-    private func updateCameraScale() {
-        guard bounds.width > 1, bounds.height > 1 else { return }
-        let aspect = Float(bounds.width / bounds.height)
-        let padding: Float = 0.12
-        let halfHeight = max(zRange + padding, (xRange + padding) / max(aspect, 0.2))
-        cameraNode.camera?.orthographicScale = CGFloat(halfHeight)
-    }
-
-    private func addGrid(to scene: SCNScene) {
-        let material = SCNMaterial()
-        material.diffuse.contents = NSColor(calibratedRed: 0.24, green: 0.28, blue: 0.34, alpha: 0.72)
-
-        for x in stride(from: -3.0, through: 3.0, by: 0.75) {
-            let line = SCNNode(geometry: SCNBox(width: 0.012, height: 0.012, length: 5.6, chamferRadius: 0))
-            line.geometry?.materials = [material]
-            line.position = SCNVector3(Float(x), 0, 0)
-            scene.rootNode.addChildNode(line)
-        }
-
-        for z in stride(from: -2.8, through: 2.8, by: 0.7) {
-            let line = SCNNode(geometry: SCNBox(width: 6.0, height: 0.012, length: 0.012, chamferRadius: 0))
-            line.geometry?.materials = [material]
-            line.position = SCNVector3(0, 0, Float(z))
-            scene.rootNode.addChildNode(line)
-        }
-    }
-
-    private func addFrontMarker(to scene: SCNScene) {
-        let material = SCNMaterial()
-        material.diffuse.contents = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 0.85)
-        let marker = SCNNode(geometry: SCNBox(width: 5.5, height: 0.026, length: 0.035, chamferRadius: 0))
-        marker.geometry?.materials = [material]
-        marker.position = SCNVector3(0, 0.01, 2.1)
-        scene.rootNode.addChildNode(marker)
-    }
-
-    private func updateNodes() {
-        let width = clamp(settings.speakerWidth, 0.6, 3.0)
-        let halfWidth = width / 2
-        leftSpeakerNode.position = SCNVector3(-halfWidth, 0.11, 1.8)
-        rightSpeakerNode.position = SCNVector3(halfWidth, 0.11, 1.8)
-        speakerWidthNode.geometry = SCNBox(width: CGFloat(width), height: 0.025, length: 0.055, chamferRadius: 0)
-        speakerWidthNode.geometry?.firstMaterial?.diffuse.contents = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 0.95)
-
-        let listenerPosition = SCNVector3(
-            clamp(settings.listenerX, -xRange, xRange),
-            0.14,
-            clamp(settings.listenerZ, -zRange, zRange)
-        )
-        listenerNode.position = listenerPosition
-        listenerRingNode.position = SCNVector3(listenerPosition.x, 0.03, listenerPosition.z)
-    }
-
-    private func updateListener(from event: NSEvent) {
-        guard let point = stagePoint(from: event) else { return }
-        settings.listenerX = clamp(Float(point.x), -xRange, xRange)
-        settings.listenerZ = clamp(Float(point.z), -zRange, zRange)
-        updateNodes()
-        onChange?(settings)
-    }
-
-    private func stagePoint(from event: NSEvent) -> SCNVector3? {
-        let point = convert(event.locationInWindow, from: nil)
-        guard bounds.contains(point) else { return nil }
-
-        let near = unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 0))
-        let far = unprojectPoint(SCNVector3(Float(point.x), Float(point.y), 1))
-        let dy = far.y - near.y
-        guard abs(dy) > 0.0001 else { return nil }
-
-        let t = -near.y / dy
-        return SCNVector3(
-            near.x + (far.x - near.x) * t,
-            0,
-            near.z + (far.z - near.z) * t
-        )
-    }
-}
-
-private final class AudioSpectrumAnalyzer: NSObject {
-    private static let fftSize = 16384
-    private static let halfSize = 8192
-    private static let barCount = 128
-
-    private let ringBuffer: LockFreeFloatRingBuffer
-    private let dynamicsModel: DynamicsMeterModel
-    private let spectrumModel: SpectrumModel
-    private let fftSize = AudioSpectrumAnalyzer.fftSize
-    private let halfSize = AudioSpectrumAnalyzer.halfSize
-    private let log2n = vDSP_Length(14)
-    private let barCount = AudioSpectrumAnalyzer.barCount
-    private var sampleRate: Float
-    private var timer: Timer?
-    private var fftSetup: FFTSetup?
-    private var drainBuffer = [Float](repeating: 0, count: 32_768)
-    private var history = [Float](repeating: 0, count: AudioSpectrumAnalyzer.fftSize)
-    private var window = [Float](repeating: 0, count: AudioSpectrumAnalyzer.fftSize)
-    private var windowed = [Float](repeating: 0, count: AudioSpectrumAnalyzer.fftSize)
-    private var real = [Float](repeating: 0, count: AudioSpectrumAnalyzer.halfSize)
-    private var imag = [Float](repeating: 0, count: AudioSpectrumAnalyzer.halfSize)
-    private var powerBins = [Float](repeating: 0, count: AudioSpectrumAnalyzer.halfSize)
-    private var dbBins = [Float](repeating: -120, count: AudioSpectrumAnalyzer.halfSize)
-    private var magnitudes = [Float](repeating: 0, count: AudioSpectrumAnalyzer.barCount)
-    private var binCenters = [Float](repeating: 1, count: AudioSpectrumAnalyzer.barCount)
-    private var filledSamples = 0
-    private var smoothedPeakDb: Float = -100
-    private var smoothedRMSDb: Float = -100
-    private var smoothedCrestDb: Float = 0
-    private var dynamicsPublishCounter = 0
-    private let levelReleaseDbPerTick: Float = 1.10
-    private let crestReleaseDbPerTick: Float = 0.40
-
-    init(ringBuffer: LockFreeFloatRingBuffer,
-         sampleRate: Float,
-         dynamicsModel: DynamicsMeterModel,
-         spectrumModel: SpectrumModel) {
-        self.ringBuffer = ringBuffer
-        self.dynamicsModel = dynamicsModel
-        self.spectrumModel = spectrumModel
-        self.sampleRate = sampleRate
-        super.init()
-        fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
-        vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
-        rebuildLogBins()
-    }
-
-    deinit {
-        stop()
-        if let fftSetup {
-            vDSP_destroy_fftsetup(fftSetup)
-        }
-    }
-
-    func start() {
-        stop()
-        let timer = Timer(
-            timeInterval: 1.0 / 30.0,
-            target: self,
-            selector: #selector(tick),
-            userInfo: nil,
-            repeats: true
-        )
-        timer.tolerance = 1.0 / 120.0
-        RunLoop.main.add(timer, forMode: .common)
-        RunLoop.main.add(timer, forMode: .eventTracking)
-        RunLoop.main.add(timer, forMode: .modalPanel)
-        self.timer = timer
-    }
-
-    func stop() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    func updateSampleRate(_ sampleRate: Float) {
-        self.sampleRate = sampleRate
-        rebuildLogBins()
-    }
-
-    @objc private func tick() {
-        guard drainAudio(),
-              spectrumModel.isAnalysisActive,
-              filledSamples >= fftSize else { return }
-        computeSpectrum()
-        spectrumModel.publish(magnitudes)
-    }
-
-    @discardableResult
-    private func drainAudio() -> Bool {
-        let available = min(ringBuffer.availableSamples(), drainBuffer.count)
-        let sampleCount = available - (available % 2)
-        guard sampleCount >= 2 else { return false }
-
-        drainBuffer.withUnsafeMutableBufferPointer { pointer in
-            if let baseAddress = pointer.baseAddress {
-                ringBuffer.popInterleaved(into: baseAddress, count: sampleCount)
-            }
-        }
-        updateDynamics(sampleCount: sampleCount)
-
-        let frameCount = sampleCount / 2
-        if frameCount >= fftSize {
-            let startFrame = frameCount - fftSize
-            downmixStereo(
-                sourceStartFrame: startFrame,
-                destinationStartFrame: 0,
-                frameCount: fftSize
-            )
-            filledSamples = fftSize
-            return true
-        }
-
-        let keepCount = fftSize - frameCount
-        history.withUnsafeMutableBufferPointer { pointer in
-            guard let baseAddress = pointer.baseAddress else { return }
-            memmove(
-                baseAddress,
-                baseAddress.advanced(by: frameCount),
-                keepCount * MemoryLayout<Float>.stride
-            )
-        }
-        downmixStereo(
-            sourceStartFrame: 0,
-            destinationStartFrame: keepCount,
-            frameCount: frameCount
-        )
-        filledSamples = min(fftSize, filledSamples + frameCount)
-        return true
-    }
-
-    private func downmixStereo(
-        sourceStartFrame: Int,
-        destinationStartFrame: Int,
-        frameCount: Int
-    ) {
-        guard frameCount > 0 else { return }
-
-        drainBuffer.withUnsafeBufferPointer { sourcePointer in
-            history.withUnsafeMutableBufferPointer { destinationPointer in
-                guard let sourceBase = sourcePointer.baseAddress,
-                      let destinationBase = destinationPointer.baseAddress else { return }
-                let left = sourceBase.advanced(by: sourceStartFrame * 2)
-                let right = left.advanced(by: 1)
-                let destination = destinationBase.advanced(by: destinationStartFrame)
-                let count = vDSP_Length(frameCount)
-                var half: Float = 0.5
-                vDSP_vadd(left, 2, right, 2, destination, 1, count)
-                vDSP_vsmul(destination, 1, &half, destination, 1, count)
-            }
-        }
-    }
-
-    private func computeSpectrum() {
-        guard let fftSetup else { return }
-
-        vDSP_vmul(history, 1, window, 1, &windowed, 1, vDSP_Length(fftSize))
-
-        windowed.withUnsafeBufferPointer { windowPointer in
-            real.withUnsafeMutableBufferPointer { realPointer in
-                imag.withUnsafeMutableBufferPointer { imagPointer in
-                    guard let windowBase = windowPointer.baseAddress,
-                          let realBase = realPointer.baseAddress,
-                          let imagBase = imagPointer.baseAddress else { return }
-                    var split = DSPSplitComplex(realp: realBase, imagp: imagBase)
-
-                    windowBase.withMemoryRebound(to: DSPComplex.self, capacity: halfSize) { complexPointer in
-                        vDSP_ctoz(complexPointer, 2, &split, 1, vDSP_Length(halfSize))
-                    }
-
-                    vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
-
-                    var scale = 1 / Float(fftSize)
-                    vDSP_vsmul(split.realp, 1, &scale, split.realp, 1, vDSP_Length(halfSize))
-                    vDSP_vsmul(split.imagp, 1, &scale, split.imagp, 1, vDSP_Length(halfSize))
-
-                    powerBins.withUnsafeMutableBufferPointer { powerPointer in
-                        guard let powerBase = powerPointer.baseAddress else { return }
-                        vDSP_zvmags(&split, 1, powerBase, 1, vDSP_Length(halfSize))
-                    }
-                }
-            }
-        }
-
-        var floor: Float = 1.0e-12
-        vDSP_vthr(powerBins, 1, &floor, &powerBins, 1, vDSP_Length(halfSize))
-        var reference: Float = 1
-        vDSP_vdbcon(powerBins, 1, &reference, &dbBins, 1, vDSP_Length(halfSize), 0)
-
-        for bar in 0..<barCount {
-            let sampledDb = interpolatedDb(at: binCenters[bar])
-            let normalized = clamp((sampledDb + 96) / 78, 0, 1)
-            magnitudes[bar] = magnitudes[bar] * 0.68 + normalized * 0.32
-        }
-    }
-
-    private func interpolatedDb(at fractionalBin: Float) -> Float {
-        let clampedBin = clamp(fractionalBin, 1, Float(halfSize - 2))
-        let lowerIndex = Int(clampedBin)
-        let upperIndex = lowerIndex + 1
-        let fraction = clampedBin - Float(lowerIndex)
-        let lower = dbBins[lowerIndex]
-        let upper = dbBins[upperIndex]
-        return lower + (upper - lower) * fraction
-    }
-
-    private func updateDynamics(sampleCount: Int) {
-        var peak: Float = 0
-        var rms: Float = 0
-
-        drainBuffer.withUnsafeBufferPointer { sourcePointer in
-            guard let sourceBase = sourcePointer.baseAddress else { return }
-            let count = vDSP_Length(sampleCount)
-            vDSP_maxmgv(sourceBase, 1, &peak, count)
-            vDSP_rmsqv(sourceBase, 1, &rms, count)
-        }
-
-        let peakDb = amplitudeToDb(peak)
-        let rmsDb = amplitudeToDb(rms)
-        let crestDb = max(0, peakDb - rmsDb)
-
-        smoothedPeakDb = releaseSmooth(current: smoothedPeakDb, target: peakDb, step: levelReleaseDbPerTick)
-        smoothedRMSDb = releaseSmooth(current: smoothedRMSDb, target: rmsDb, step: levelReleaseDbPerTick)
-        smoothedCrestDb = releaseSmooth(current: smoothedCrestDb, target: crestDb, step: crestReleaseDbPerTick)
-
-        dynamicsPublishCounter += 1
-        if dynamicsPublishCounter >= 2 {
-            dynamicsPublishCounter = 0
-            dynamicsModel.update(peak: smoothedPeakDb, rms: smoothedRMSDb, crestFactor: smoothedCrestDb)
-        }
-    }
-
-    private func amplitudeToDb(_ value: Float) -> Float {
-        let clamped = max(value, 0.00001)
-        return max(20 * log10(clamped), -100)
-    }
-
-    private func releaseSmooth(current: Float, target: Float, step: Float) -> Float {
-        if target >= current {
-            return target
-        }
-        return max(current - step, target)
-    }
-
-    private func rebuildLogBins() {
-        let nyquist = max(sampleRate * 0.5, 1_000)
-        let minHz: Float = 28
-        let bassMaxHz: Float = min(420, nyquist * 0.75)
-        let maxHz = min(nyquist, 20_000)
-        let bassBarRatio: Float = 0.38
-        let bassCurve: Float = 0.82
-        let minLog = log(max(bassMaxHz, minHz + 1))
-        let maxLog = log(max(maxHz, bassMaxHz + 1))
-
-        for bar in 0..<barCount {
-            let ratio = (Float(bar) + 0.5) / Float(barCount)
-            let centerHz: Float
-            if ratio < bassBarRatio {
-                let bassRatio = ratio / bassBarRatio
-                centerHz = minHz + pow(bassRatio, bassCurve) * (bassMaxHz - minHz)
-            } else {
-                let trebleRatio = (ratio - bassBarRatio) / (1 - bassBarRatio)
-                centerHz = exp(minLog + (maxLog - minLog) * trebleRatio)
-            }
-            binCenters[bar] = clamp((centerHz / sampleRate) * Float(fftSize), 1, Float(halfSize - 2))
-        }
-    }
-}
-
-@available(macOS 14.4, *)
-@MainActor
-private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate {
+private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private enum AppPage: Int, CaseIterable {
         case model
         case spatial
@@ -1367,20 +375,31 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     private var intensityValueLabel: NSTextField!
     private var bodyValueLabel: NSTextField!
     private var outputValueLabel: NSTextField!
-    private var modelPopup: NSPopUpButton!
+    private var modelSelector: NSSegmentedControl!
+    private var preferenceStore: UserDefaults = .standard
     private var oversamplingModeLabel: NSTextField!
     private var oversamplingModeControl: NSSegmentedControl!
     private var presetButtons: [NSButton] = []
-    private var spatialEnabledButton: NSButton!
-    private var spatialStageView: SpatialStageView!
-    private var listenerXField: NSTextField!
-    private var listenerZField: NSTextField!
-    private var speakerWidthField: NSTextField!
-    private var spatialAmountSlider: NSSlider!
-    private var spatialAmountValueLabel: NSTextField!
     private var processor: SystemAudioProcessor?
+    private enum AudioOperationPhase { case replacing, creating, starting, stopping }
+    private struct PendingAudioOperation {
+        let id = UUID()
+        var phase: AudioOperationPhase
+        var stopRequested = false
+        var quitRequested = false
+    }
+    // Main owns the token and processor. The serial worker retains each
+    // blocking call until it really returns; elapsed time never retires it.
+    private var pendingAudioOperation: PendingAudioOperation?
+    private let audioLifecycleWorker = GUIAudioLifecycleWorker()
+    private var audioLifecycleIO = GUIAudioLifecycleIO()
+    private var lifecycleStartsDiagnosticsTimer = true
+    private var finishRequestedQuit: @MainActor () -> Void = { NSApplication.shared.terminate(nil) }
     private var spectrumAnalyzer: AudioSpectrumAnalyzer?
     private var sourceFormatTracker: SourceFormatTracker?
+    private var lastSourceSnapshot: SourceFormatSnapshot?
+    private var lastSourceObservation: SourceFormatSnapshot?
+    private var lastSpatialSubmissionRevision: UInt64 = 0
     private var diagnosticsTimer: Timer?
     private let dynamicsMeterModel = DynamicsMeterModel()
     private let spectrumModel = SpectrumModel()
@@ -1397,6 +416,9 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     private var currentTapSampleRate: Double?
     private var currentLivePCM2xActive = false
     private var currentLivePCM2xFallback = ""
+    private var currentStopFailure: String?
+    private var currentProcessingFailure: String?
+    private var pendingHeadroomEdit = false
     private var supportedDeviceSampleRates: [Double] = []
     private var isDeviceSampleRateSettable = false
     private var automaticRateMatchingEnabled = UserDefaults.standard.bool(
@@ -1407,7 +429,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     )
     private var rateMatchStatusText = "자동 꺼짐"
     private var exciterOversamplingMode: ExciterOversamplingMode = {
-        let rawValue = UInt32(UserDefaults.standard.integer(forKey: "exciterOversamplingMode"))
+        let rawValue = UInt32(clamping: UserDefaults.standard.integer(forKey: "exciterOversamplingMode"))
         return ExciterOversamplingMode(rawValue: rawValue) ?? .auto
     }()
 
@@ -1416,7 +438,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         forKey: "outputConditioningEnabled"
     )
     private var outputConditioningModeRaw: UInt32 = {
-        let stored = UInt32(UserDefaults.standard.integer(forKey: "outputConditioningMode"))
+        let stored = UInt32(clamping: UserDefaults.standard.integer(forKey: "outputConditioningMode"))
         return OutputConditioningMode(rawValue: stored)?.rawValue ?? OutputConditioningMode.bypass.rawValue
     }()
     private var outputConditioningFactor: Int = {
@@ -1424,7 +446,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         return OutputConditioningParameters.allowedOversamplingFactors.contains(stored) ? stored : 2
     }()
     private var outputConditioningFilterRaw: UInt32 = {
-        let stored = UInt32(UserDefaults.standard.integer(forKey: "outputConditioningFilter"))
+        let stored = UInt32(clamping: UserDefaults.standard.integer(forKey: "outputConditioningFilter"))
         return ResamplingFilterMode(rawValue: stored)?.rawValue ?? ResamplingFilterMode.linearPhaseShort.rawValue
     }()
     private var outputConditioningHeadroomDB: Double = {
@@ -1440,7 +462,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         forKey: "outputConditioningNoiseShape"
     )
     private var outputConditioningDSDRaw: UInt32 = {
-        let stored = UInt32(UserDefaults.standard.integer(forKey: "outputConditioningDSD"))
+        let stored = UInt32(clamping: UserDefaults.standard.integer(forKey: "outputConditioningDSD"))
         return DSDMode(rawValue: stored)?.rawValue ?? DSDMode.off.rawValue
     }()
     private var outputConditioningCapability: OutputConditioningCapability?
@@ -1449,7 +471,9 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     private var outputConditioningFactorPopup: NSPopUpButton!
     private var outputConditioningFilterPopup: NSPopUpButton!
     private var outputConditioningHeadroomSlider: NSSlider!
+    private var outputConditioningHeadroomCaption: NSTextField!
     private var outputConditioningHeadroomValueLabel: NSTextField!
+    private var outputConditioningRuntimeLabel: NSTextField!
     private var outputConditioningDitherButton: NSButton!
     private var outputConditioningNoiseShapeButton: NSButton!
     private var outputConditioningDSDPopup: NSPopUpButton!
@@ -1467,6 +491,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     private var diagRestartValue: NSTextField!
     private var diagDeviceNameValue: NSTextField!
     private var diagCaptureValue: NSTextField!
+    private var diagAudioFlowValue: NSTextField!
 
     // Device name is resolved from CoreAudio only when the device changes (it
     // rarely does mid-session), avoiding a main-thread IPC on every 1 Hz tick.
@@ -1499,8 +524,12 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        stopAudio()
-        return .terminateNow
+        if pendingAudioOperation == nil && processor == nil { return .terminateNow }
+        requestStopAudio(quit: true)
+        // Keep the event loop usable even if HAL takes a long time to return.
+        // A confirmed asynchronous Stop will request termination again.
+        window?.makeKeyAndOrderFront(nil)
+        return .terminateCancel
     }
 
     private func buildWindow() {
@@ -1514,6 +543,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         )
         window.title = "LowEnd Native Audio"
         window.minSize = NSSize(width: 940, height: 640)
+        window.autorecalculatesKeyViewLoop = true
         window.delegate = self
         window.center()
 
@@ -1730,7 +760,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         let button = NSButton(title: page.title, target: self, action: #selector(sidebarPageChanged(_:)))
         button.tag = page.rawValue
         button.bezelStyle = .recessed
-        button.refusesFirstResponder = true
+        button.refusesFirstResponder = false
         button.alignment = .left
         button.font = .systemFont(ofSize: 13, weight: .semibold)
         button.image = NSImage(systemSymbolName: page.symbolName, accessibilityDescription: page.title)
@@ -1783,7 +813,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         diagnosticsLabel = makeLabel("XRuns 대기 중", size: 10, weight: .regular)
         diagnosticsLabel.textColor = NSColor(calibratedRed: 0.55, green: 0.60, blue: 0.67, alpha: 1)
         diagnosticsLabel.lineBreakMode = .byTruncatingMiddle
-        diagnosticsLabel.toolTip = "출력 underrun, 출력/분석 버퍼 drop, 엔진 재시작 횟수와 실제 캡처 프로세스를 표시합니다."
+        diagnosticsLabel.toolTip = "출력 underrun, 출력/분석 버퍼 drop, 엔진 재시작 횟수와 실제 캡처 프로세스를 표시합니다. 앱별 대상은 현재 tap에서 약 1초마다 조회하며, 대상 소멸이나 조회 실패도 표시합니다."
         diagnosticsLabel.frame = NSRect(x: 24, y: 586, width: 480, height: 16)
         diagnosticsLabel.autoresizingMask = [.minYMargin, .width]
         page.addSubview(diagnosticsLabel)
@@ -1793,16 +823,16 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         modelLabel.autoresizingMask = [.minYMargin]
         page.addSubview(modelLabel)
 
-        modelPopup = NSPopUpButton(frame: NSRect(x: 84, y: 545, width: 170, height: 30), pullsDown: false)
-        modelPopup.addItems(withTitles: ["Clean", "Circuit", "HighExciter"])
-        let savedModelIndex = UserDefaults.standard.integer(forKey: "selectedModel")
-        let initialModelIndex = (0...2).contains(savedModelIndex) ? savedModelIndex : 1
-        modelPopup.selectItem(at: initialModelIndex)
-        modelPopup.target = self
-        modelPopup.action = #selector(modelChanged)
-        modelPopup.toolTip = "Clean은 DSP bypass, Circuit은 저역 회로 모델, HighExciter는 독립 고역 배음 모델입니다."
-        modelPopup.autoresizingMask = [.minYMargin]
-        page.addSubview(modelPopup)
+        modelSelector = NSSegmentedControl(labels: ["Clean", "Circuit", "HighExciter"],
+            trackingMode: .selectOne, target: self, action: #selector(modelChanged))
+        modelSelector.frame = NSRect(x: 84, y: 545, width: 300, height: 30)
+        modelSelector.segmentStyle = .rounded
+        let savedModelIndex = preferenceStore.integer(forKey: "selectedModel")
+        modelSelector.selectedSegment = (0...2).contains(savedModelIndex) ? savedModelIndex : 1
+        modelSelector.setAccessibilityLabel("사운드 모델")
+        modelSelector.toolTip = "Clean은 DSP bypass, Circuit은 저역 회로 모델, HighExciter는 독립 고역 배음 모델입니다. 처리 중에도 바로 선택할 수 있습니다."
+        modelSelector.autoresizingMask = [.minYMargin]
+        page.addSubview(modelSelector)
 
         modelExplanationView = makeExplanationSection()
         page.addSubview(modelExplanationView)
@@ -1856,7 +886,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         routingStartAppButton = makeButton("특정 앱 적용", action: #selector(startSelectedApp))
         routingStartAppButton.frame = NSRect(x: 390, y: 496, width: 128, height: 40)
         routingStartAppButton.autoresizingMask = [.minYMargin, .minXMargin]
-        routingStartAppButton.toolTip = "입력한 bundle id를 가진 앱의 소리에만 LowEnd를 적용합니다."
+        routingStartAppButton.toolTip = "입력한 앱과 하위 오디오 프로세스에 적용합니다. 앱이나 helper를 재실행한 뒤 처리되지 않으면 앱에서 재생을 시작하고 이 버튼을 다시 누르세요. 기존 처리를 정상 중지한 뒤 현재 프로세스를 다시 선택합니다. 앱 목록 새로고침은 캡처 대상을 바꾸지 않습니다."
         page.addSubview(routingStartAppButton)
 
         let listButton = makeButton("실행 중인 앱 새로고침", action: #selector(refreshApps))
@@ -1991,12 +1021,14 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         outputConditioningEnableButton.frame = NSRect(x: 24, y: 566, width: 320, height: 24)
         outputConditioningEnableButton.autoresizingMask = [.minYMargin]
         outputConditioningEnableButton.state = outputConditioningEnabled ? .on : .off
-        outputConditioningEnableButton.toolTip = "출력 직전 신호를 처리합니다. 기본값은 꺼짐(Bypass)입니다. PCM Oversampling 2×는 실험적 기능으로 출력 장치를 2배 샘플레이트로 전환합니다(44.1k→88.2k, 48k→96k만 지원). 전환 시 짧은 무음이 발생하며, 미지원 장치/샘플레이트에서는 안전하게 PCM으로 폴백됩니다."
+        outputConditioningEnableButton.toolTip = "출력 직전 신호를 처리합니다. 기본값은 꺼짐(Bypass)입니다. PCM Oversampling 2×는 출력 장치를 2배 샘플레이트로 전환하는 실험 기능입니다(44.1k→88.2k, 48k→96k). 전환 시 짧은 무음이 발생합니다. 실패하면 원래 PCM 구성을 복구하며, 복구에 실패하면 중지 미완료 상태와 재시도 안내를 표시합니다."
         page.addSubview(outputConditioningEnableButton)
 
         outputConditioningModePopup = makeConditioningPopup(
             titles: OutputConditioningMode.allCases.map { mode in
-                mode == .experimentalDSD
+                mode == .pcmOversampling
+                    ? "PCM Oversampling · DAC 출력 변환"
+                    : mode == .experimentalDSD
                     ? "\(mode.displayName) (오프라인/테스트 전용)"
                     : mode.displayName
             },
@@ -2015,7 +1047,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             action: #selector(outputConditioningFactorChanged),
             y: 458
         )
-        page.addSubview(makeConditioningCaption("오버샘플링 배수", y: 482))
+        page.addSubview(makeConditioningCaption("DAC 출력 배수", y: 482))
+        outputConditioningFactorPopup.toolTip = "모델·공간 처리 후 전체 PCM의 출력 레이트를 바꿉니다. HighExciter 내부 배음 생성 배율과 독립적입니다. 실시간 출력은 지원 장치의 2×만 적용됩니다."
         page.addSubview(outputConditioningFactorPopup)
         if let index = OutputConditioningParameters.allowedOversamplingFactors.firstIndex(of: outputConditioningFactor) {
             outputConditioningFactorPopup.selectItem(at: index)
@@ -2031,8 +1064,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         selectConditioningPopup(outputConditioningFilterPopup, forRaw: outputConditioningFilterRaw,
                                 in: ResamplingFilterMode.allCases.map { $0.rawValue })
 
-        let headroomCaption = makeConditioningCaption("헤드룸", y: 374)
-        page.addSubview(headroomCaption)
+        outputConditioningHeadroomCaption = makeConditioningCaption("헤드룸", y: 374)
+        outputConditioningHeadroomCaption.frame.size.width = max(0, page.bounds.width - 48)
+        outputConditioningHeadroomCaption.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(outputConditioningHeadroomCaption)
         outputConditioningHeadroomSlider = NSSlider(
             value: outputConditioningHeadroomDB,
             minValue: -12,
@@ -2040,7 +1075,9 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             target: self,
             action: #selector(outputConditioningHeadroomChanged)
         )
-        outputConditioningHeadroomSlider.frame = NSRect(x: 24, y: 348, width: 300, height: 24)
+        outputConditioningHeadroomSlider.isContinuous = true
+        outputConditioningHeadroomSlider.setAccessibilityLabel("2× 출력 헤드룸")
+        outputConditioningHeadroomSlider.frame = NSRect(x: 24, y: 348, width: max(120, page.bounds.width - 144), height: 24)
         outputConditioningHeadroomSlider.autoresizingMask = [.minYMargin, .width]
         page.addSubview(outputConditioningHeadroomSlider)
         outputConditioningHeadroomValueLabel = makeLabel(
@@ -2048,8 +1085,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             size: 12, weight: .regular
         )
         outputConditioningHeadroomValueLabel.alignment = .right
-        outputConditioningHeadroomValueLabel.frame = NSRect(x: 330, y: 348, width: 80, height: 20)
-        outputConditioningHeadroomValueLabel.autoresizingMask = [.minYMargin]
+        outputConditioningHeadroomValueLabel.frame = NSRect(x: page.bounds.width - 104, y: 348, width: 80, height: 20)
+        outputConditioningHeadroomValueLabel.autoresizingMask = [.minYMargin, .minXMargin]
         page.addSubview(outputConditioningHeadroomValueLabel)
 
         outputConditioningDitherButton = NSButton(
@@ -2099,6 +1136,13 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         outputConditioningStatusLabel.frame = NSRect(x: 24, y: 150, width: 540, height: 44)
         outputConditioningStatusLabel.autoresizingMask = [.minYMargin, .width]
         page.addSubview(outputConditioningStatusLabel)
+
+        outputConditioningRuntimeLabel = makeLabel("", size: 12, weight: .semibold)
+        outputConditioningRuntimeLabel.lineBreakMode = .byWordWrapping
+        outputConditioningRuntimeLabel.maximumNumberOfLines = 3
+        outputConditioningRuntimeLabel.frame = NSRect(x: 24, y: 78, width: max(0, page.bounds.width - 48), height: 64)
+        outputConditioningRuntimeLabel.autoresizingMask = [.minYMargin, .width]
+        page.addSubview(outputConditioningRuntimeLabel)
 
         applyOutputConditioningControlEnabledState()
         updateOutputConditioningStatus()
@@ -2156,8 +1200,10 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
 
         page.addSubview(makeDiagSection("캡처 대상", y: 160))
         diagCaptureValue = addDiagRow(to: page, caption: "실제 캡처 프로세스", value: "—", y: 136)
+        diagAudioFlowValue = addDiagRow(to: page, caption: "오디오 데이터", value: "—", y: 108)
 
         refreshDiagnosticsPanel()
+        refreshAudioFlowPresentation()
         return page
     }
 
@@ -2189,6 +1235,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     /// before the engine starts. Counters + device identity are filled by
     /// updateDiagnostics (1 Hz); this handles the notification-driven rows.
     private func refreshDiagnosticsPanel() {
+        // The output page must refresh even when Diagnostics was never opened.
+        refreshOutputConditioningHeadroomState()
         guard diagTapValue != nil else { return }
         diagTapValue.stringValue = formatDiagRate(currentTapSampleRate)
         diagEngineValue.stringValue = formatDiagRate(currentProcessingSampleRate)
@@ -2196,9 +1244,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         diagFormatValue.stringValue =
             currentProcessingSampleRate == nil ? "—" : currentOutputSampleFormat
 
-        // Output Conditioning status: off / PCM 2× active / fallback.
-        // 2× is only "armed" when PCM Oversampling ×2 is the selected mode; any
-        // other enabled config (bypass, ×4/8, dither, DSD) is just "On".
+        // Separate the selected offline options from the actual live state.
         let isPCM2xArmed = outputConditioningEnabled
             && OutputConditioningMode(rawValue: outputConditioningModeRaw) == .pcmOversampling
             && outputConditioningFactor == 2
@@ -2209,18 +1255,23 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             currentLivePCM2xFallback = ""
         }
         let conditioningText: String
-        if !outputConditioningEnabled {
+        if currentStopFailure != nil {
+            conditioningText = "중지 미완료 · 재시도 필요"
+        } else if currentProcessingFailure != nil {
+            conditioningText = "처리 중단 · 중지 후 다시 적용"
+        } else if !outputConditioningEnabled {
             conditioningText = "Off"
         } else if currentLivePCM2xActive {
             conditioningText = "PCM 2× active"
         } else if !currentLivePCM2xFallback.isEmpty {
-            conditioningText = "Fallback → PCM"
+            conditioningText = "2× 미적용 · 상태 확인"
         } else {
-            conditioningText = isPCM2xArmed ? "활성화됨(2× 대기)" : "활성화됨"
+            conditioningText = isPCM2xArmed ? "PCM 2× 대기" : "Bypass (선택 기능 Live 미적용)"
         }
         diagConditioningValue.stringValue = conditioningText
-        let hasFallback = !currentLivePCM2xFallback.isEmpty
-        diagFallbackValue.stringValue = hasFallback ? currentLivePCM2xFallback : "—"
+        let reason = currentStopFailure ?? currentProcessingFailure ?? currentLivePCM2xFallback
+        let hasFallback = !reason.isEmpty
+        diagFallbackValue.stringValue = hasFallback ? reason : "—"
         diagFallbackValue.textColor = hasFallback
             ? NSColor(calibratedRed: 0.95, green: 0.76, blue: 0.40, alpha: 1)
             : NSColor(calibratedRed: 0.62, green: 0.66, blue: 0.72, alpha: 1)
@@ -2233,7 +1284,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     /// mode via the same pure policy used by updateOversamplingIndicator.
     private func highExciterDiagnosticsText() -> String {
         guard selectedDSPModel() == .highExciter else { return "—" }
-        guard let sampleRate = currentProcessingSampleRate else { return "포맷 대기 중" }
+        guard let sampleRate = currentTapSampleRate else { return "포맷 대기 중" }
         let resolution = ExciterOversamplingPolicy.resolve(
             processingSampleRate: sampleRate,
             mode: exciterOversamplingMode
@@ -2264,7 +1315,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     }
 
     private func makeConditioningPopup(titles: [String], action: Selector, y: CGFloat) -> NSPopUpButton {
-        let popup = NSPopUpButton(frame: NSRect(x: 24, y: y, width: 300, height: 26), pullsDown: false)
+        let width = max(220, (pageContainerView?.bounds.width ?? 620) - 48)
+        let popup = NSPopUpButton(frame: NSRect(x: 24, y: y, width: width, height: 26), pullsDown: false)
         popup.autoresizingMask = [.minYMargin, .width]
         popup.addItems(withTitles: titles)
         popup.target = self
@@ -2281,17 +1333,72 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     private func applyOutputConditioningControlEnabledState() {
         let on = outputConditioningEnabled
         outputConditioningModePopup?.isEnabled = on
-        outputConditioningFactorPopup?.isEnabled = on
-        outputConditioningFilterPopup?.isEnabled = on
-        outputConditioningHeadroomSlider?.isEnabled = on
-        outputConditioningDitherButton?.isEnabled = on
-        outputConditioningNoiseShapeButton?.isEnabled = on
+        let pcm = OutputConditioningMode(rawValue: outputConditioningModeRaw) == .pcmOversampling
+        outputConditioningFactorPopup?.isEnabled = on && pcm
+        outputConditioningFilterPopup?.isEnabled = on && pcm && outputConditioningFactor == 2
+        refreshOutputConditioningHeadroomState()
+        outputConditioningDitherButton?.isEnabled = false
+        outputConditioningNoiseShapeButton?.isEnabled = false
+        outputConditioningDitherButton?.toolTip = "현재 Float32 live 출력에는 적용되지 않습니다."
+        outputConditioningNoiseShapeButton?.toolTip = "현재 Float32 live 출력에는 적용되지 않습니다."
         // DSD gating depends on device capability (set in updateOutputConditioningStatus).
+    }
+
+    private func refreshOutputConditioningHeadroomState() {
+        guard let slider = outputConditioningHeadroomSlider else { return }
+        let requests2x = outputConditioningEnabled
+            && OutputConditioningMode(rawValue: outputConditioningModeRaw) == .pcmOversampling
+            && outputConditioningFactor == 2
+        if !requests2x { currentLivePCM2xFallback = "" }
+        let failed = !currentLivePCM2xActive && !currentLivePCM2xFallback.isEmpty
+        // The requested gain remains editable for the next successful run.
+        // Editing an inactive route saves it without retrying a device transition.
+        slider.isEnabled = outputConditioningEnabled
+        let state: String
+        if pendingAudioOperation != nil {
+            state = "시작·중지 처리 중 · 설정 저장"
+        } else if currentStopFailure != nil {
+            state = "중지 미완료 · 설정 저장"
+        } else if currentProcessingFailure != nil {
+            state = "처리 중단 · 설정 저장"
+        } else if currentLivePCM2xActive && !requests2x {
+            state = "2× 해제 대기 · 미적용"
+        } else if !outputConditioningEnabled {
+            state = "꺼짐 · 미적용"
+        } else if !requests2x {
+            state = "현재 모드에서 미적용 · 설정 저장"
+        } else if currentLivePCM2xActive {
+            state = "2× 출력 중"
+        } else if failed {
+            state = "2× 미적용 · 설정 저장"
+        } else {
+            state = "2× 출력 대기 · 아직 미적용"
+        }
+        outputConditioningHeadroomCaption?.stringValue = "헤드룸 · \(state)"
+        // The number is the requested setting, not a callback acknowledgement.
+        let detail = "\(state). 설정 \(formatDbText(outputConditioningHeadroomDB)). 실제 2× 출력에서만 음량을 감쇠합니다. 0 dB는 감쇠 없음, −6 dB는 신호 진폭 약 절반입니다. 모델 내부의 포화·배음을 되돌리지는 않습니다."
+        slider.toolTip = detail
+        outputConditioningHeadroomValueLabel?.toolTip = detail
+        outputConditioningHeadroomCaption?.toolTip = failed ? currentLivePCM2xFallback : detail
+        let failure = currentStopFailure ?? currentProcessingFailure
+        if pendingAudioOperation != nil {
+            outputConditioningRuntimeLabel?.stringValue = "오디오 시작·중지 작업을 기다리는 중입니다. 설정은 저장되며, 정상 시작이 완료되면 최신 값이 적용됩니다."
+            outputConditioningRuntimeLabel?.toolTip = nil
+        } else if let failure {
+            outputConditioningRuntimeLabel?.stringValue = "오디오 처리가 중단됐습니다. 오디오 적용에서 중지 후 다시 적용하세요. 헤드룸 값은 저장되며 현재 소리에는 적용되지 않습니다."
+            outputConditioningRuntimeLabel?.toolTip = failure
+        } else if failed {
+            outputConditioningRuntimeLabel?.stringValue = "현재 2× 출력은 미적용입니다. 헤드룸 값은 저장되며 2× 출력이 활성화되면 적용됩니다."
+            outputConditioningRuntimeLabel?.toolTip = currentLivePCM2xFallback
+        } else {
+            outputConditioningRuntimeLabel?.stringValue = ""
+            outputConditioningRuntimeLabel?.toolTip = nil
+        }
     }
 
     @objc private func outputConditioningEnableChanged() {
         outputConditioningEnabled = outputConditioningEnableButton.state == .on
-        UserDefaults.standard.set(outputConditioningEnabled, forKey: "outputConditioningEnabled")
+        preferenceStore.set(outputConditioningEnabled, forKey: "outputConditioningEnabled")
         applyOutputConditioningControlEnabledState()
         updateOutputConditioningStatus()
         pushOutputConditioningSettings()
@@ -2301,7 +1408,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         let index = outputConditioningModePopup.indexOfSelectedItem
         let mode = OutputConditioningMode.allCases[safe: index] ?? .bypass
         outputConditioningModeRaw = mode.rawValue
-        UserDefaults.standard.set(Int(mode.rawValue), forKey: "outputConditioningMode")
+        preferenceStore.set(Int(mode.rawValue), forKey: "outputConditioningMode")
         updateOutputConditioningStatus()
         pushOutputConditioningSettings()
     }
@@ -2310,7 +1417,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         let index = outputConditioningFactorPopup.indexOfSelectedItem
         let factor = OutputConditioningParameters.allowedOversamplingFactors[safe: index] ?? 2
         outputConditioningFactor = factor
-        UserDefaults.standard.set(factor, forKey: "outputConditioningFactor")
+        preferenceStore.set(factor, forKey: "outputConditioningFactor")
+        updateOutputConditioningStatus()
         pushOutputConditioningSettings()
     }
 
@@ -2318,26 +1426,28 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         let index = outputConditioningFilterPopup.indexOfSelectedItem
         let mode = ResamplingFilterMode.allCases[safe: index] ?? .linearPhaseShort
         outputConditioningFilterRaw = mode.rawValue
-        UserDefaults.standard.set(Int(mode.rawValue), forKey: "outputConditioningFilter")
+        preferenceStore.set(Int(mode.rawValue), forKey: "outputConditioningFilter")
         pushOutputConditioningSettings()
     }
 
     @objc private func outputConditioningHeadroomChanged() {
         outputConditioningHeadroomDB = Double(outputConditioningHeadroomSlider.doubleValue)
-        UserDefaults.standard.set(outputConditioningHeadroomDB, forKey: "outputConditioningHeadroomDB")
+        pendingHeadroomEdit = true
+        preferenceStore.set(outputConditioningHeadroomDB, forKey: "outputConditioningHeadroomDB")
         outputConditioningHeadroomValueLabel.stringValue = formatDbText(outputConditioningHeadroomDB)
-        pushOutputConditioningSettings()
+        refreshOutputConditioningHeadroomState()
+        if currentLivePCM2xActive { pushActiveHeadroomSettings() }
     }
 
     @objc private func outputConditioningDitherChanged() {
         outputConditioningDither = outputConditioningDitherButton.state == .on
-        UserDefaults.standard.set(outputConditioningDither, forKey: "outputConditioningDither")
+        preferenceStore.set(outputConditioningDither, forKey: "outputConditioningDither")
         pushOutputConditioningSettings()
     }
 
     @objc private func outputConditioningNoiseShapeChanged() {
         outputConditioningNoiseShape = outputConditioningNoiseShapeButton.state == .on
-        UserDefaults.standard.set(outputConditioningNoiseShape, forKey: "outputConditioningNoiseShape")
+        preferenceStore.set(outputConditioningNoiseShape, forKey: "outputConditioningNoiseShape")
         pushOutputConditioningSettings()
     }
 
@@ -2345,7 +1455,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         let index = outputConditioningDSDPopup.indexOfSelectedItem
         let mode = DSDMode.allCases[safe: index] ?? .off
         outputConditioningDSDRaw = mode.rawValue
-        UserDefaults.standard.set(Int(mode.rawValue), forKey: "outputConditioningDSD")
+        preferenceStore.set(Int(mode.rawValue), forKey: "outputConditioningDSD")
         // The unsupported-mode warning depends on the selected mode, so refresh it.
         updateOutputConditioningStatus()
         pushOutputConditioningSettings()
@@ -2365,7 +1475,18 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     }
 
     private func pushOutputConditioningSettings() {
-        processor?.updateOutputConditioning(currentOutputConditioningParameters())
+        guard pendingAudioOperation == nil, currentStopFailure == nil, currentProcessingFailure == nil, let processor else { return }
+        pendingHeadroomEdit = false
+        processor.updateOutputConditioning(currentOutputConditioningParameters())
+    }
+
+    private func pushActiveHeadroomSettings() {
+        guard pendingAudioOperation == nil, currentStopFailure == nil, currentProcessingFailure == nil, let processor else { return }
+        let parameters = currentOutputConditioningParameters()
+        guard parameters.isEnabled, parameters.outputMode == .pcmOversampling,
+              parameters.oversamplingFactor == 2 else { return }
+        pendingHeadroomEdit = false
+        processor.updateActiveLivePCM2xParameters(parameters)
     }
 
     private func refreshOutputConditioningCapability() {
@@ -2380,6 +1501,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     }
 
     private func updateOutputConditioningStatus() {
+        applyOutputConditioningControlEnabledState()
         guard let statusLabel = outputConditioningStatusLabel else { return }
         let capability = outputConditioningCapability
         var lines: [String] = []
@@ -2539,7 +1661,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         bodyNameLabel = addSliderRow(to: view, y: 48, title: "Body", slider: bodySlider, valueLabel: bodyValueLabel)
         outputNameLabel = addSliderRow(to: view, y: 10, title: "Output", slider: outputSlider, valueLabel: outputValueLabel)
 
-        oversamplingModeLabel = makeLabel("오버샘플링", size: 13, weight: .semibold)
+        oversamplingModeLabel = makeLabel("배음 품질", size: 13, weight: .semibold)
         oversamplingModeLabel.frame = NSRect(x: 16, y: 10, width: 100, height: 24)
         oversamplingModeControl = NSSegmentedControl(
             labels: ExciterOversamplingMode.allCases.map(\.title),
@@ -2550,7 +1672,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         oversamplingModeControl.frame = NSRect(x: 120, y: 7, width: 310, height: 28)
         oversamplingModeControl.autoresizingMask = [.width]
         oversamplingModeControl.selectedSegment = segmentIndex(for: exciterOversamplingMode)
-        oversamplingModeControl.toolTip = "Auto는 Engine 처리율에 맞춰 배수를 선택합니다. 수동 선택은 384 kHz 이상의 Engine 처리율에 추가 오버샘플링을 하지 않도록 제한됩니다."
+        oversamplingModeControl.toolTip = "HighExciter 배음 생성 구간만 높은 레이트로 계산한 뒤 원래 Tap 레이트로 돌아옵니다. DAC 출력 배수와 독립적입니다. Auto는 Tap 처리율에 맞춰 선택하며, 수동 선택도 내부 처리율 384 kHz 한도에서 제한됩니다."
         view.addSubview(oversamplingModeLabel)
         view.addSubview(oversamplingModeControl)
         configureControlsForSelectedModel()
@@ -2578,75 +1700,6 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         return view
     }
 
-    private func makeSpatialSection() -> NSView {
-        let view = NSView(frame: .zero)
-        view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor(calibratedRed: 0.12, green: 0.14, blue: 0.17, alpha: 1).cgColor
-        view.layer?.cornerRadius = 8
-
-        let title = makeLabel("공간 무대", size: 18, weight: .bold)
-        title.textColor = NSColor(calibratedRed: 0.96, green: 0.75, blue: 0.31, alpha: 1)
-        title.frame = NSRect(x: 16, y: 594, width: 170, height: 26)
-        view.addSubview(title)
-
-        let resetButton = NSButton(title: "원위치", target: self, action: #selector(resetSpatialPosition))
-        resetButton.bezelStyle = .rounded
-        resetButton.font = .systemFont(ofSize: 12, weight: .semibold)
-        resetButton.frame = NSRect(x: 220, y: 592, width: 78, height: 26)
-        resetButton.toolTip = "청취자 위치를 중앙 기준점으로 되돌립니다. 스피커 폭과 공간량 값은 유지됩니다."
-        view.addSubview(resetButton)
-
-        spatialEnabledButton = NSButton(checkboxWithTitle: "공간음향", target: self, action: #selector(spatialControlChanged))
-        spatialEnabledButton.frame = NSRect(x: 310, y: 592, width: 96, height: 26)
-        spatialEnabledButton.state = spatialControlModel.settings.enabled ? .on : .off
-        spatialEnabledButton.toolTip = "3D 위치 기반 거리, 지연, 크로스피드 처리를 켜거나 끕니다. 모델(Clean 포함)과 관계없이 독립적으로 적용됩니다."
-        view.addSubview(spatialEnabledButton)
-
-        let description = makeLabel("파란 점을 드래그하거나 아래 숫자를 입력하세요.", size: 12, weight: .regular)
-        description.frame = NSRect(x: 16, y: 566, width: 398, height: 20)
-        view.addSubview(description)
-
-        spatialStageView = SpatialStageView(frame: NSRect(x: 16, y: 222, width: 398, height: 340))
-        spatialStageView.wantsLayer = true
-        spatialStageView.layer?.cornerRadius = 6
-        spatialStageView.onChange = { [weak self] settings in
-            self?.spatialStageChanged(settings)
-        }
-        view.addSubview(spatialStageView)
-
-        listenerXField = makeNumberField(value: 0.0)
-        listenerZField = makeNumberField(value: 0.0)
-        speakerWidthField = makeNumberField(value: 1.65)
-        addNumberRow(to: view, y: 180, title: "청취자 X", field: listenerXField, suffix: "m", tooltip: "좌우 위치입니다. 음수는 왼쪽, 양수는 오른쪽입니다.")
-        addNumberRow(to: view, y: 142, title: "청취자 Z", field: listenerZField, suffix: "m", tooltip: "앞뒤 위치입니다. 양수는 스피커 쪽, 음수는 뒤쪽입니다.")
-        addNumberRow(to: view, y: 104, title: "스피커 폭", field: speakerWidthField, suffix: "m", tooltip: "가상 좌우 스피커 사이의 거리입니다.")
-
-        let amountLabel = makeLabel("공간량", size: 13, weight: .semibold)
-        amountLabel.frame = NSRect(x: 16, y: 66, width: 62, height: 24)
-        view.addSubview(amountLabel)
-
-        spatialAmountSlider = NSSlider(value: 35, minValue: 0, maxValue: 100, target: self, action: #selector(spatialControlChanged))
-        spatialAmountSlider.isContinuous = true
-        spatialAmountSlider.frame = NSRect(x: 82, y: 66, width: 250, height: 24)
-        spatialAmountSlider.toolTip = "원본 스테레오와 공간 처리 신호의 혼합량입니다. 높일수록 거리, 귀 사이 딜레이, 크로스피드 영향이 커집니다."
-        view.addSubview(spatialAmountSlider)
-
-        spatialAmountValueLabel = makeLabel("", size: 13, weight: .semibold)
-        spatialAmountValueLabel.frame = NSRect(x: 342, y: 66, width: 56, height: 24)
-        view.addSubview(spatialAmountValueLabel)
-
-        let spaceHelp = makeLabel("공간량: 원본과 공간 처리 신호를 섞는 양입니다.", size: 11.5, weight: .regular)
-        spaceHelp.frame = NSRect(x: 16, y: 32, width: 398, height: 18)
-        view.addSubview(spaceHelp)
-
-        let hint = makeLabel("권장 25-45%. IEM에서 위상이 거칠면 먼저 낮추세요.", size: 11.5, weight: .regular)
-        hint.frame = NSRect(x: 16, y: 12, width: 398, height: 18)
-        view.addSubview(hint)
-
-        updateSpatialControls(from: spatialSettingsFromControls(), notifyProcessor: false)
-        return view
-    }
-
     private func makeSlider(value: Double, min: Double, max: Double) -> NSSlider {
         let slider = NSSlider(value: value, minValue: min, maxValue: max, target: self, action: #selector(sliderChanged))
         slider.isContinuous = true
@@ -2667,34 +1720,6 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         return label
     }
 
-    private func makeNumberField(value: Double) -> NSTextField {
-        let field = NSTextField(frame: .zero)
-        field.stringValue = String(format: "%.2f", value)
-        field.alignment = .right
-        field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
-        field.target = self
-        field.action = #selector(spatialFieldChanged)
-        field.delegate = self
-        return field
-    }
-
-    private func addNumberRow(to view: NSView,
-                              y: CGFloat,
-                              title: String,
-                              field: NSTextField,
-                              suffix: String,
-                              tooltip: String) {
-        let label = makeLabel(title, size: 13, weight: .semibold)
-        label.frame = NSRect(x: 16, y: y, width: 62, height: 24)
-        field.frame = NSRect(x: 82, y: y - 2, width: 250, height: 28)
-        field.toolTip = tooltip
-        let unit = makeLabel(suffix, size: 12, weight: .regular)
-        unit.frame = NSRect(x: 342, y: y, width: 44, height: 24)
-        view.addSubview(label)
-        view.addSubview(field)
-        view.addSubview(unit)
-    }
-
     @objc private func sliderChanged() {
         updateSliderLabels()
         updateOversamplingIndicator()
@@ -2709,6 +1734,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
                 for: model
             )
         }
+        guard pendingAudioOperation == nil else { return }
         processor?.updateDSP(intensity: Float(intensitySlider.doubleValue),
                              body: Float(bodySlider.doubleValue),
                              outputDb: Float(outputSlider.doubleValue),
@@ -2721,7 +1747,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         let index = oversamplingModeControl.selectedSegment
         guard modes.indices.contains(index) else { return }
         exciterOversamplingMode = modes[index]
-        UserDefaults.standard.set(
+        preferenceStore.set(
             Int(exciterOversamplingMode.rawValue),
             forKey: "exciterOversamplingMode"
         )
@@ -2730,59 +1756,37 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
 
     @objc private func automaticRateMatchChanged() {
         automaticRateMatchingEnabled = automaticRateMatchButton.state == .on
-        UserDefaults.standard.set(
+        preferenceStore.set(
             automaticRateMatchingEnabled,
             forKey: "automaticRateMatchingEnabled"
         )
         rateMatchStatusText = automaticRateMatchingEnabled ? "자동 켜짐: 소스 안정화 대기" : "자동 꺼짐"
         updateRateMatchPreview()
-        processor?.setAutomaticRateMatchingEnabled(automaticRateMatchingEnabled)
+        if pendingAudioOperation == nil && currentStopFailure == nil {
+            processor?.setAutomaticRateMatchingEnabled(automaticRateMatchingEnabled)
+        }
     }
 
     @objc private func expertModeChanged() {
         expertModeEnabled = expertModeButton.state == .on
-        UserDefaults.standard.set(expertModeEnabled, forKey: "expertModeEnabled")
+        preferenceStore.set(expertModeEnabled, forKey: "expertModeEnabled")
         // "자세히 보기" only toggles the detailed format header; 자동 Rate Match is
         // independent and stays available regardless of this setting.
         updateFormatHeaderMode()
         layoutApplication()
     }
 
-    @objc private func spatialControlChanged() {
-        updateSpatialControls(from: spatialControlModel.settings, notifyProcessor: true)
-    }
-
-    @objc private func spatialFieldChanged() {
-        spatialControlChanged()
-    }
-
-    func controlTextDidEndEditing(_ notification: Notification) {
-        spatialControlChanged()
-    }
-
-    private func spatialStageChanged(_ settings: SpatialSettings) {
-        var updated = spatialControlModel.settings
-        updated.listenerX = settings.listenerX
-        updated.listenerZ = settings.listenerZ
-        updateSpatialControls(from: updated, notifyProcessor: true)
-    }
-
-    @objc private func resetSpatialPosition() {
-        var updated = spatialControlModel.settings
-        updated.listenerX = 0
-        updated.listenerZ = 0
-        updateSpatialControls(from: updated, notifyProcessor: true)
-        statusLabel.stringValue = "공간음향 위치를 원위치로 되돌렸습니다."
-    }
-
     @objc private func modelChanged() {
         let model = selectedDSPModel()
-        UserDefaults.standard.set(modelPopup.indexOfSelectedItem, forKey: "selectedModel")
+        preferenceStore.set(modelSelector.selectedSegment, forKey: "selectedModel")
         applySliderValues(loadSliderValues(for: model))
         configureControlsForSelectedModel()
         sliderChanged()
         updateCompactFormatSummary()
-        statusLabel.stringValue = "모델 변경: \(model.displayName)"
+        statusLabel.stringValue = currentProcessingFailure == nil
+            ? "모델 변경: \(model.displayName)"
+            : "처리 중단 · 모델 설정 저장: \(model.displayName)"
+        refreshAudioOperationPresentation()
     }
 
     private func configureControlsForSelectedModel() {
@@ -2939,7 +1943,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             return
         }
 
-        guard let sampleRate = currentProcessingSampleRate else {
+        guard let sampleRate = currentTapSampleRate else {
             oversamplingLabel.stringValue = "HighExciter | Oversampling format waiting"
             oversamplingLabel.textColor = NSColor(calibratedRed: 0.55, green: 0.74, blue: 0.82, alpha: 1)
             return
@@ -3002,16 +2006,11 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
 
     private func updateSpatialControls(from settings: SpatialSettings, notifyProcessor: Bool) {
         spatialControlModel.update(settings)
-        spatialEnabledButton?.state = spatialControlModel.settings.enabled ? .on : .off
-        listenerXField?.stringValue = String(format: "%.2f", spatialControlModel.settings.listenerX)
-        listenerZField?.stringValue = String(format: "%.2f", spatialControlModel.settings.listenerZ)
-        speakerWidthField?.stringValue = String(format: "%.2f", spatialControlModel.settings.speakerWidth)
-        spatialAmountSlider?.doubleValue = Double(spatialControlModel.settings.amount)
-        spatialAmountValueLabel?.stringValue = "\(Int(spatialControlModel.settings.amount.rounded()))%"
-        spatialStageView?.setSettings(spatialControlModel.settings)
-
-        if notifyProcessor {
-            processor?.updateSpatial(spatialControlModel.settings)
+        if notifyProcessor, pendingAudioOperation == nil, let processor {
+            lastSpatialSubmissionRevision = processor.updateSpatial(spatialControlModel.settings)
+            spatialControlModel.appliedStatusText = "오디오 설정 수신 대기 (요청 \(lastSpatialSubmissionRevision))"
+        } else if processor == nil {
+            spatialControlModel.appliedStatusText = "재생 중지: 오디오 설정 적용 대기"
         }
     }
 
@@ -3048,6 +2047,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         }
         sliderChanged()
         statusLabel.stringValue = "\(model.displayName) 프리셋 적용: \(preset.name)"
+        refreshAudioOperationPresentation()
     }
 
     @objc private func startAllAudio() {
@@ -3076,7 +2076,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     }
 
     private func selectedDSPModel() -> Settings.DSPModel {
-        switch modelPopup.indexOfSelectedItem {
+        switch modelSelector.selectedSegment {
         case 1:
             return .circuit
         case 2:
@@ -3106,7 +2106,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
 
     private func loadSliderValues(for model: Settings.DSPModel) -> SliderValues {
         let fallback = defaultSliderValues(for: model)
-        guard let data = UserDefaults.standard.data(forKey: sliderValuesKey(for: model)) else {
+        guard let data = preferenceStore.data(forKey: sliderValuesKey(for: model)) else {
             return fallback
         }
         let decoder = JSONDecoder()
@@ -3116,7 +2116,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     private func saveSliderValues(_ values: SliderValues, for model: Settings.DSPModel) {
         let encoder = JSONEncoder()
         if let data = try? encoder.encode(values) {
-            UserDefaults.standard.set(data, forKey: sliderValuesKey(for: model))
+            preferenceStore.set(data, forKey: sliderValuesKey(for: model))
         }
     }
 
@@ -3130,43 +2130,1070 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     }
 
     private func start(_ settings: Settings) {
-        stopAudio()
-
-        do {
-            let processor = try SystemAudioProcessor(settings: settings)
-            try processor.start()
-            self.processor = processor
-            // Apply any saved output-conditioning selection (e.g. live PCM 2×)
-            // now that the processor is started. Without this the engine stays in
-            // default bypass even though the UI shows the saved selection, until a
-            // control is toggled.
-            processor.updateOutputConditioning(currentOutputConditioningParameters())
-            let analyzer = processor.makeSpectrumAnalyzer(
-                dynamicsModel: dynamicsMeterModel,
-                spectrumModel: spectrumModel
-            )
-            analyzer.start()
-            self.spectrumAnalyzer = analyzer
-            statusLabel.stringValue = "처리 중: \(processor.captureTargetSummary)"
-            startDiagnosticsTimer()
-        } catch {
-            statusLabel.stringValue = "실행 실패: \(error)"
-            self.processor = nil
-            self.spectrumAnalyzer = nil
+        guard pendingAudioOperation == nil else {
+            refreshAudioOperationPresentation()
+            return
+        }
+        let operation = PendingAudioOperation(phase: processor == nil ? .creating : .replacing)
+        pendingAudioOperation = operation
+        stopAnalysisPresentation()
+        refreshAudioOperationPresentation()
+        if let processor {
+            stopOnLifecycleWorker(processor, token: operation.id, nextStart: settings)
+        } else {
+            clearStoppedAudioPresentation()
+            createOnLifecycleWorker(settings, token: operation.id)
         }
     }
 
+    private func createOnLifecycleWorker(_ settings: Settings, token: UUID) {
+        guard pendingAudioOperation?.id == token else { return }
+        if pendingAudioOperation?.stopRequested == true {
+            completeAudioOperation(token: token)
+            return
+        }
+        pendingAudioOperation?.phase = .creating
+        refreshAudioOperationPresentation()
+        let io = audioLifecycleIO
+        audioLifecycleWorker.queue.async { [self] in
+            let result = Result { try audioLifecycleWorker.make(settings, io: io) }
+            DispatchQueue.main.async { [self] in
+                guard pendingAudioOperation?.id == token else { return }
+                switch result {
+                case .failure(let error):
+                    completeAudioOperation(token: token)
+                    showAudioStartError(error)
+                case .success(let created):
+                    // Bind before Start can enqueue a format notification.
+                    // The worker and this property both retain the same owner.
+                    processor = created
+                    if pendingAudioOperation?.stopRequested == true {
+                        stopOnLifecycleWorker(created, token: token)
+                    } else {
+                        pendingAudioOperation?.phase = .starting
+                        refreshAudioOperationPresentation()
+                        let sessionID = created.notificationSessionID
+                        audioLifecycleWorker.queue.async { [self] in
+                            let result = Result { try io.start(created) }
+                            DispatchQueue.main.async { [self] in
+                                completeAudioStart(result, sessionID: sessionID, token: token)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func completeAudioStart(_ result: Result<Void, Error>, sessionID: String,
+                                    token: UUID) {
+        guard pendingAudioOperation?.id == token, let started = processor,
+              started.notificationSessionID == sessionID else { return }
+        switch result {
+        case .failure(let error):
+            if let failure = error as? AudioGraphTransitionFailure, !failure.recovered {
+                // A failed cleanup is not retried by delayed completion, even
+                // when a Stop/Quit was requested during the blocking call.
+                pendingAudioOperation = nil
+                handleAudioStartFailure(error)
+                refreshAudioOperationPresentation()
+                window?.makeKeyAndOrderFront(nil)
+            } else {
+                stopOnLifecycleWorker(started, token: token, startError: error)
+            }
+        case .success:
+            if pendingAudioOperation?.stopRequested == true {
+                stopOnLifecycleWorker(started, token: token)
+                return
+            }
+            pendingAudioOperation = nil
+            currentStopFailure = nil
+            currentProcessingFailure = nil
+            // UI edits were stored while Start was pending. Take the current
+            // values here, never the snapshot from the earlier Apply click.
+            let latest = settings(for: .all)
+            started.updateDSP(intensity: latest.intensity, body: latest.body, outputDb: latest.outputDb,
+                              dspModel: latest.dspModel, exciterOversamplingMode: latest.exciterOversamplingMode)
+            lastSpatialSubmissionRevision = started.updateSpatial(latest.spatial)
+            started.setAutomaticRateMatchingEnabled(automaticRateMatchingEnabled)
+            pushOutputConditioningSettings()
+            if let observation = lastSourceObservation { started.observeSourceFormats(observation.formats) }
+            if let lastSourceSnapshot { updateSourceDisplay(lastSourceSnapshot) }
+            let analyzer = started.makeSpectrumAnalyzer(dynamicsModel: dynamicsMeterModel, spectrumModel: spectrumModel)
+            analyzer.start()
+            spectrumAnalyzer = analyzer
+            refreshAudioFlowPresentation()
+            if lifecycleStartsDiagnosticsTimer { startDiagnosticsTimer() }
+            refreshAudioOperationPresentation()
+        }
+    }
+
+    private func requestStopAudio(quit: Bool = false) {
+        if pendingAudioOperation != nil {
+            pendingAudioOperation?.stopRequested = true
+            if quit { pendingAudioOperation?.quitRequested = true }
+            stopAnalysisPresentation()
+            refreshAudioOperationPresentation()
+            return
+        }
+        guard let processor else {
+            clearStoppedAudioPresentation()
+            return
+        }
+        var operation = PendingAudioOperation(phase: .stopping)
+        operation.stopRequested = true
+        operation.quitRequested = quit
+        pendingAudioOperation = operation
+        stopAnalysisPresentation()
+        refreshAudioOperationPresentation()
+        stopOnLifecycleWorker(processor, token: operation.id)
+    }
+
+    private func stopOnLifecycleWorker(_ stopping: SystemAudioProcessor, token: UUID,
+                                       nextStart: Settings? = nil, startError: Error? = nil) {
+        guard pendingAudioOperation?.id == token, processor === stopping else { return }
+        pendingAudioOperation?.phase = nextStart == nil ? .stopping : .replacing
+        refreshAudioOperationPresentation()
+        let io = audioLifecycleIO
+        let sessionID = stopping.notificationSessionID
+        audioLifecycleWorker.queue.async { [self] in
+            let stopped = io.stop(stopping)
+            let failure = stopping.stopFailureDescription
+            DispatchQueue.main.async { [self] in
+                guard pendingAudioOperation?.id == token, processor?.notificationSessionID == sessionID else { return }
+                if !stopped {
+                    pendingAudioOperation = nil
+                    showAudioStopFailure(failure)
+                    refreshAudioOperationPresentation()
+                    window?.makeKeyAndOrderFront(nil)
+                    return
+                }
+                clearStoppedAudioPresentation()
+                audioLifecycleWorker.retire(sessionID)
+                if let nextStart, pendingAudioOperation?.stopRequested != true {
+                    createOnLifecycleWorker(nextStart, token: token)
+                } else {
+                    completeAudioOperation(token: token)
+                    if let startError { showAudioStartError(startError) }
+                }
+            }
+        }
+    }
+
+    private func completeAudioOperation(token: UUID) {
+        guard let operation = pendingAudioOperation, operation.id == token else { return }
+        pendingAudioOperation = nil
+        refreshAudioOperationPresentation()
+        if operation.quitRequested { finishRequestedQuit() }
+    }
+
+    private func refreshAudioOperationPresentation() {
+        allSystemButton?.isEnabled = pendingAudioOperation == nil
+        routingStartAppButton?.isEnabled = pendingAudioOperation == nil
+        if let operation = pendingAudioOperation {
+            let message: String
+            if operation.stopRequested && operation.phase != .stopping {
+                message = "중지 요청됨 · 진행 중인 오디오 작업의 응답을 기다리는 중"
+            } else if operation.phase == .stopping || operation.phase == .replacing {
+                message = "오디오 중지 중 · 장치 응답 대기"
+            } else {
+                message = "오디오 시작 중 · 장치 응답 대기"
+            }
+            statusLabel?.stringValue = message
+            statusLabel?.toolTip = "작업이 실제로 완료된 뒤 상태를 갱신합니다. 중지는 진행 중인 작업의 응답 후 처리됩니다."
+            allSystemButton?.setAccessibilityLabel(message)
+            allSystemButton?.toolTip = message
+        } else {
+            allSystemButton?.setAccessibilityLabel("전체 시스템 적용")
+            allSystemButton?.toolTip = "전체 시스템 오디오 처리를 시작합니다."
+        }
+        refreshAudioFlowPresentation()
+        refreshOutputConditioningHeadroomState()
+    }
+
+    /// A successful Start owns a graph, but may still be waiting for its first
+    /// audio data. Poll existing atomic counters without waiting for the manager.
+    /// Failure and pending lifecycle messages always take precedence.
+    private func refreshAudioFlowPresentation(_ snapshot: AudioDiagnosticsSnapshot? = nil) {
+        if pendingAudioOperation != nil {
+            diagAudioFlowValue?.stringValue = "장치 응답 대기"
+            diagAudioFlowValue?.toolTip = nil
+            return
+        }
+        if currentStopFailure != nil || currentProcessingFailure != nil {
+            diagAudioFlowValue?.stringValue = "처리 중단"
+            diagAudioFlowValue?.toolTip = currentStopFailure ?? currentProcessingFailure
+            return
+        }
+        guard let processor else {
+            diagAudioFlowValue?.stringValue = "—"
+            diagAudioFlowValue?.toolTip = nil
+            return
+        }
+        let current = snapshot ?? processor.diagnosticsSnapshot()
+        let flow = current.audioFlow
+        let text = flow.isConfirmed ? "처리 중: \(current.captureTarget)" : flow.displayText
+        if statusLabel?.stringValue != text { statusLabel?.stringValue = text }
+        statusLabel?.toolTip = flow.isConfirmed ? nil : AudioFlowProgress.waitingHelp
+        diagAudioFlowValue?.stringValue = flow.displayText
+        diagAudioFlowValue?.toolTip = flow.isConfirmed ? nil : AudioFlowProgress.waitingHelp
+    }
+
+    private func showAudioStartError(_ error: Error) {
+        statusLabel?.stringValue = "실행 실패: \(error)"
+        if error is CaptureInstanceCompatibility.Conflict || error is CaptureSessionLease.Failure {
+            let alert = NSAlert()
+            alert.messageText = "오디오 처리를 시작할 수 없습니다."
+            alert.informativeText = String(describing: error)
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "확인")
+            alert.runModal()
+        }
+    }
+
+    private func handleAudioStartFailure(_ error: Error) {
+        let startError = "실행 실패: \(error)"
+        if let failure = error as? AudioGraphTransitionFailure, !failure.recovered {
+            // SAP already hit a failed teardown barrier. Preserve that graph
+            // and its capture lease; the explicit Stop action owns retry.
+            currentStopFailure = startError
+            statusLabel?.stringValue = "\(startError) · 정리 재시도 필요"
+            rateMatchStatusText = startError
+            currentLivePCM2xFallback = startError
+            refreshDiagnosticsPanel()
+            updateRateMatchPreview()
+        } else {
+            requestStopAudio()
+            statusLabel?.stringValue = startError
+        }
+        spectrumAnalyzer = nil
+    }
+
+    static func runCaptureSessionChecks() throws {
+        try CaptureSessionChecks.run { processor in
+            let owner = NativeAppDelegate()
+            owner.processor = processor
+            return CaptureStartFailureCheckObserver(
+                handle: { owner.handleAudioStartFailure($0) },
+                retainsProcessor: { owner.processor === processor },
+                hasPendingFailure: { owner.currentStopFailure != nil },
+                stop: { owner.stopAndWaitForCheck() })
+        }
+    }
+
+    /// Actual AppKit controls and resize/state refreshes, without starting audio,
+    /// showing a window or writing the user's saved settings.
+    static func runOutputConditioningPresentationChecks() throws {
+        let owner = NativeAppDelegate()
+        owner.outputConditioningEnabled = true
+        owner.outputConditioningModeRaw = OutputConditioningMode.bypass.rawValue
+        owner.outputConditioningFactor = 2
+        owner.outputConditioningHeadroomDB = -6
+        let page = owner.makeOutputConditioningPage()
+        var assertions = 0
+        func require(_ value: @autoclosure () -> Bool, _ message: String) throws {
+            assertions += 1
+            guard value() else { throw AppError.message("Output conditioning UI: \(message)") }
+        }
+        func saveReviewImage(_ name: String) throws {
+            guard let directory = ProcessInfo.processInfo.environment["LOWEND_CONDITIONING_UI_OUTPUT"] else { return }
+            // The test changes private model fields directly; synchronize the
+            // pickers before rendering as a real user selection would do.
+            owner.selectConditioningPopup(owner.outputConditioningModePopup,
+                forRaw: owner.outputConditioningModeRaw, in: OutputConditioningMode.allCases.map { $0.rawValue })
+            owner.selectConditioningPopup(owner.outputConditioningFilterPopup,
+                forRaw: owner.outputConditioningFilterRaw, in: ResamplingFilterMode.allCases.map { $0.rawValue })
+            owner.outputConditioningFactorPopup.selectItem(at: 0)
+            page.appearance = NSAppearance(named: .darkAqua)
+            page.layoutSubtreeIfNeeded()
+            guard let bitmap = page.bitmapImageRepForCachingDisplay(in: page.bounds) else {
+                throw AppError.message("Could not allocate conditioning UI review bitmap")
+            }
+            page.cacheDisplay(in: page.bounds, to: bitmap)
+            guard let data = bitmap.representation(using: .png, properties: [:]) else {
+                throw AppError.message("Could not encode conditioning UI review bitmap")
+            }
+            let folder = URL(fileURLWithPath: directory, isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try data.write(to: folder.appendingPathComponent("\(name).png"))
+        }
+        try require(owner.outputConditioningHeadroomSlider.isEnabled, "Bypass preserves editable headroom for the next 2x run")
+        try require(!owner.outputConditioningFactorPopup.isEnabled, "Bypass has no DAC factor")
+        try require(owner.outputConditioningHeadroomCaption.stringValue.contains("미적용"), "Bypass explains no effect")
+        try saveReviewImage("headroom-bypass")
+        owner.outputConditioningModeRaw = OutputConditioningMode.pcmOversampling.rawValue
+        for factor in [4, 8] {
+            owner.outputConditioningFactor = factor
+            owner.updateOutputConditioningStatus()
+            try require(owner.outputConditioningHeadroomSlider.isEnabled, "Offline factor preserves the requested headroom setting")
+            try require(owner.outputConditioningFactorPopup.isEnabled, "User can return from offline factor to 2x")
+        }
+        owner.outputConditioningFactor = 2
+        owner.updateOutputConditioningStatus()
+        try require(owner.outputConditioningHeadroomSlider.isEnabled, "2x may be configured before starting")
+        try require(owner.outputConditioningHeadroomCaption.stringValue.contains("대기"), "Armed is not active")
+        // Diagnostics has never been constructed: live-state updates must still
+        // refresh the controls on the output page.
+        owner.currentLivePCM2xActive = true
+        owner.refreshDiagnosticsPanel()
+        try require(owner.outputConditioningHeadroomCaption.stringValue.contains("2× 출력 중"), "Active notification reaches output page")
+        try saveReviewImage("headroom-active")
+        owner.outputConditioningEnabled = false
+        owner.updateOutputConditioningStatus()
+        try require(!owner.outputConditioningHeadroomSlider.isEnabled
+                    && owner.outputConditioningHeadroomCaption.stringValue.contains("해제 대기"), "Requested off waits for actual stop")
+        owner.currentLivePCM2xActive = false
+        owner.refreshDiagnosticsPanel()
+        try require(owner.outputConditioningHeadroomCaption.stringValue.contains("꺼짐"), "Confirmed off is explicit")
+        owner.outputConditioningEnabled = true
+        owner.currentLivePCM2xFallback = "장치 미지원 검사"
+        owner.refreshDiagnosticsPanel()
+        try require(owner.outputConditioningHeadroomSlider.isEnabled, "Failed 2x must still allow editing the requested gain")
+        try require(owner.outputConditioningHeadroomCaption.toolTip == "장치 미지원 검사", "Fallback reason remains available")
+        owner.outputConditioningModeRaw = OutputConditioningMode.pcmWithDither.rawValue
+        owner.updateOutputConditioningStatus()
+        try require(owner.outputConditioningHeadroomSlider.isEnabled, "Inactive mode preserves editable headroom without applying it")
+        owner.outputConditioningModeRaw = OutputConditioningMode.pcmOversampling.rawValue
+        owner.updateOutputConditioningStatus()
+        try require(owner.outputConditioningHeadroomSlider.isEnabled, "Returning to 2x does not retain stale fallback")
+        owner.currentStopFailure = "정리 실패 검사"
+        owner.refreshDiagnosticsPanel()
+        try require(owner.outputConditioningHeadroomSlider.isEnabled
+                    && owner.outputConditioningHeadroomCaption.stringValue.contains("중지 미완료"), "Pending teardown preserves editable settings")
+        try require(owner.outputConditioningHeadroomSlider.doubleValue == -6
+                    && owner.outputConditioningHeadroomDB == -6, "State transitions preserve requested gain")
+        try require(owner.outputConditioningHeadroomSlider.isContinuous, "Headroom edits are continuous")
+        for width: CGFloat in [392, 515, 616, 950] {
+            page.setFrameSize(NSSize(width: width, height: 700))
+            let slider = owner.outputConditioningHeadroomSlider.frame
+            let value = owner.outputConditioningHeadroomValueLabel.frame
+            try require(slider.maxX + 15 <= value.minX, "Slider and value must not overlap at page width \(width)")
+            try require(value.maxX <= width - 23 && slider.minX >= 23, "Headroom row stays within page margins")
+            try require(owner.outputConditioningModePopup.frame.width >= 340
+                        && owner.outputConditioningModePopup.frame.maxX <= width - 23,
+                        "Output mode remains readable after resize")
+        }
+        print("OutputConditioningPresentationChecks: \(assertions) assertions; actual controls, live-state refresh without Diagnostics, pending/fallback/stop state, preserved gain, four page widths; no device or visible-window operation.")
+    }
+
+    /// Exercise direct model selection and gain edits against the real manager/IOProc/ring
+    /// with simulated hardware. All preference writes use a disposable suite.
+    static func runLiveControlEditingChecks() throws {
+        let suite = "lowend.control-editing-check.\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let owner = NativeAppDelegate()
+        owner.preferenceStore = preferences
+        owner.outputConditioningEnabled = true
+        owner.outputConditioningModeRaw = OutputConditioningMode.pcmOversampling.rawValue
+        owner.outputConditioningFactor = 2
+        owner.outputConditioningFilterRaw = ResamplingFilterMode.linearPhaseLong.rawValue
+        owner.outputConditioningHeadroomDB = 0
+        let modelPage = owner.makeModelPage()
+        let outputPage = owner.makeOutputConditioningPage()
+        defer { withExtendedLifetime((modelPage, outputPage)) {} }
+        let io = GraphCheckIO()
+        let access = try SystemAudioProcessor.GraphCheckAccess(io: io)
+        access.withProcessorForUICheck { owner.processor = $0 }
+        NotificationCenter.default.addObserver(owner, selector: #selector(audioFormatDidChange(_:)),
+            name: AudioFormatNotifications.didChange, object: nil)
+        defer {
+            NotificationCenter.default.removeObserver(owner)
+            owner.processor = nil
+            io.onPause = nil
+            _ = access.stop()
+        }
+        var assertions = 0
+        func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            assertions += 1
+            if !condition() { throw AppError.message("Live control editing: \(message)") }
+        }
+        func drainNotifications(until condition: () -> Bool) throws {
+            let deadline = Date().addingTimeInterval(1)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+            try require(condition(), "Final manager notification was not consumed")
+        }
+        func selectModel(_ index: Int) throws {
+            try require(owner.modelSelector.isEnabled && (0..<3).allSatisfy { owner.modelSelector.isEnabled(forSegment: $0) },
+                "All models remain selectable")
+            owner.modelSelector.selectedSegment = index
+            try require(owner.modelSelector.sendAction(owner.modelSelector.action, to: owner.modelSelector.target),
+                "Direct model selection must dispatch")
+            try require(owner.modelSelector.selectedSegment == index
+                && preferences.integer(forKey: "selectedModel") == index,
+                "Direct selection and saved model must change together")
+            let names = ["Bypass", "LowEnd", "Exciter Drive"]
+            try require(owner.intensityNameLabel.stringValue == names[index], "Direct selection must refresh the model controls")
+        }
+        func editHeadroom(_ db: Double, synchronize: Bool = true) throws {
+            try require(owner.outputConditioningHeadroomSlider.isEnabled, "Headroom settings remain editable")
+            owner.outputConditioningHeadroomSlider.doubleValue = db
+            try require(owner.outputConditioningHeadroomSlider.sendAction(
+                owner.outputConditioningHeadroomSlider.action, to: owner.outputConditioningHeadroomSlider.target),
+                "Actual headroom action must dispatch")
+            if synchronize { access.managerBarrier() }
+            try require(preferences.double(forKey: "outputConditioningHeadroomDB") == db
+                && owner.outputConditioningHeadroomValueLabel.stringValue == formatDbText(db),
+                "Requested gain and visible number must be saved together")
+        }
+        io.onPause = {
+            let state = access.state()
+            io.capture(256)
+            if io.outputIsRunning {
+                _ = access.consumeOutput(Int(256 * state.outputRate / max(state.tapRate, 1)))
+            }
+        }
+        try access.seed()
+        for index in [1, 2, 0] { try selectModel(index) }
+        access.managerBarrier()
+        // Hold the manager after the initial parameter snapshot is submitted,
+        // then edit twice while activation and its main-thread status are pending.
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        access.stallManager(entered: entered, release: release)
+        defer { release.signal() }
+        try require(entered.wait(timeout: .now() + 1) == .success, "Manager must be held for the activation edit check")
+        owner.pushOutputConditioningSettings()
+        try editHeadroom(-6, synchronize: false)
+        try editHeadroom(-12, synchronize: false)
+        release.signal()
+        access.managerBarrier()
+        let creates = io.counts["createTap"] ?? 0
+        try require(!owner.currentLivePCM2xActive && owner.pendingHeadroomEdit,
+            "Edits must remain pending until the activation notification reaches the UI")
+        try drainNotifications { owner.currentLivePCM2xActive }
+        access.managerBarrier()
+        try require(!owner.pendingHeadroomEdit, "Activation must submit the latest saved gain once")
+        func verifyOutputGain(_ db: Double) throws {
+            let state = access.state()
+            _ = access.consumeOutput(Int((state.written - state.read) / 2), advanceRamp: false)
+            io.capture(1024)
+            let tail = access.consumeOutput(2048, advanceRamp: false).suffix(1024)
+            let mean = tail.reduce(0.0) { $0 + Double($1) } / Double(tail.count)
+            try require(abs(mean - 0.125 * pow(10, db / 20)) < 0.000001,
+                "Live UI gain must reach actual output samples")
+            try require(io.counts["createTap"] == creates, "Live headroom must not rebuild capture")
+        }
+        try verifyOutputGain(-12)
+        for db: Double in [0, -6, -12, 0] {
+            try editHeadroom(db)
+            try verifyOutputGain(db)
+        }
+        access.live2x(false)
+        let beforeStaleActiveEdit = io.counts
+        try require(owner.currentLivePCM2xActive, "UI must still have the older active notification")
+        try editHeadroom(-6)
+        try require(io.counts == beforeStaleActiveEdit && !access.state().live2x,
+            "An edit against stale UI state must not reactivate or rebuild a device")
+        try drainNotifications { !owner.currentLivePCM2xActive }
+        io.rejectRates = [96_000]
+        access.live2x(true)
+        try drainNotifications { !owner.currentLivePCM2xFallback.isEmpty }
+        try require(access.state().started && owner.currentProcessingFailure == nil,
+            "Recovered PCM fallback is still processing")
+        let beforeFallbackEdit = io.counts
+        try editHeadroom(-3)
+        try require(io.counts == beforeFallbackEdit, "Editing inactive gain must not retry the failed rate transition")
+        io.rejectRates = []
+        io.onPause = {
+            if io.outputIsRunning { _ = access.consumeOutput(512) }
+        }
+        access.live2x(true)
+        try drainNotifications { owner.currentProcessingFailure != nil }
+        try require(!access.state().started && !owner.currentLivePCM2xActive,
+            "Failed target and rollback must remain stopped")
+        try require(owner.statusLabel.stringValue.contains("처리 중단")
+            && owner.outputConditioningRuntimeLabel.stringValue.contains("중단"),
+            "Actual processing failure must replace stale running text")
+        let beforeStoppedEdit = io.counts
+        try editHeadroom(-12)
+        try selectModel(2)
+        access.managerBarrier()
+        try require(io.counts == beforeStoppedEdit, "Settings edits must not restart or clean up the failed graph")
+        try require(owner.statusLabel.stringValue.contains("처리 중단"), "Model edit must preserve stopped status")
+        try require(access.stop(), "Explicit Stop must finish simulated cleanup")
+        print("LiveControlEditingChecks: \(assertions) assertions; direct model selection, pending activation edits and active 2x sample gain, recovered fallback and stopped editing, actual manager notifications; simulated hardware, isolated preferences, no visible window.")
+    }
+
     @objc private func stopAudio() {
+        requestStopAudio()
+    }
+
+    /// Real delegate actions, injected graph/lease, and a gated blocking call.
+    /// The main loop must remain usable until the worker is explicitly released.
+    static func runGUIAudioLifecycleChecks() throws {
+        var assertions = 0, cases = 0
+        func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            assertions += 1
+            guard condition() else { throw AppError.message("GUI lifecycle: \(message)") }
+        }
+        func pump(_ label: String, until predicate: () -> Bool) throws {
+            let deadline = Date().addingTimeInterval(2)
+            while !predicate() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.002))
+            }
+            try require(predicate(), label)
+        }
+        func heartbeat() throws {
+            let seen = RuntimeSnapshotBox(false)
+            DispatchQueue.main.async { seen.store(true) }
+            try pump("Main event loop blocked behind lifecycle work") { seen.load() }
+        }
+        func runCase(_ name: String,
+                     _ body: (NativeAppDelegate, GUIAudioLifecycleCheckFixture, RuntimeSnapshotBox<Int>) throws -> Void) throws {
+            let suite = "lowend.gui-lifecycle-check.\(UUID().uuidString)"
+            let preferences = UserDefaults(suiteName: suite)!
+            let fixture = try GUIAudioLifecycleCheckFixture()
+            let owner = NativeAppDelegate()
+            owner.preferenceStore = preferences
+            owner.lifecycleStartsDiagnosticsTimer = false
+            owner.automaticRateMatchingEnabled = false
+            owner.outputConditioningEnabled = false
+            owner.outputConditioningModeRaw = OutputConditioningMode.bypass.rawValue
+            owner.outputConditioningFactor = 2
+            owner.outputConditioningHeadroomDB = 0
+            owner.audioLifecycleIO = fixture.lifecycleIO
+            let modelPage = owner.makeModelPage()
+            let outputPage = owner.makeOutputConditioningPage()
+            owner.allSystemButton = NSButton(title: "", target: owner, action: #selector(startAllAudio))
+            owner.routingStartAppButton = NSButton(title: "특정 앱 적용", target: owner, action: #selector(startSelectedApp))
+            owner.automaticRateMatchButton = NSButton(checkboxWithTitle: "자동", target: owner,
+                                                      action: #selector(automaticRateMatchChanged))
+            let quitCount = RuntimeSnapshotBox(0)
+            owner.finishRequestedQuit = { quitCount.store(quitCount.load() + 1) }
+            NotificationCenter.default.addObserver(owner, selector: #selector(audioFormatDidChange(_:)),
+                name: AudioFormatNotifications.didChange, object: nil)
+            defer {
+                fixture.gate.open()
+                let deadline = Date().addingTimeInterval(6)
+                while owner.pendingAudioOperation != nil && Date() < deadline {
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.002))
+                }
+                if owner.pendingAudioOperation == nil {
+                    fixture.rejectStop.store(false)
+                    fixture.io.failures = [:]
+                    _ = owner.stopAndWaitForCheck()
+                    _ = owner.audioLifecycleWorker.retainedSessionCountForCheck()
+                    fixture.close()
+                }
+                NotificationCenter.default.removeObserver(owner)
+                preferences.removePersistentDomain(forName: suite)
+                withExtendedLifetime((modelPage, outputPage)) {}
+            }
+            try body(owner, fixture, quitCount)
+            try require(fixture.journal.count("gate-timeout") == 0, "\(name): gate expired without explicit release")
+            try require(fixture.journal.count("make-on-main") == 0
+                && fixture.journal.count("start-on-main") == 0
+                && fixture.journal.count("stop-on-main") == 0, "\(name): blocking operation ran on main")
+            cases += 1
+            print("GUIAudioLifecycleChecks \(name): PASS")
+        }
+
+        try runCase("audio-flow-waits-for-real-input-and-output") { owner, f, _ in
+            owner.startAllAudio()
+            try pump("Flow fixture did not complete Start") { owner.pendingAudioOperation == nil }
+            f.access.managerBarrier()
+            owner.diagAudioFlowValue = NSTextField(labelWithString: "")
+            owner.updateDiagnostics()
+            try require(f.access.state().started && f.lease.isHeld && owner.spectrumAnalyzer != nil
+                && owner.statusLabel.stringValue == "오디오 데이터 대기"
+                && owner.diagAudioFlowValue.stringValue == "오디오 데이터 대기",
+                "No-data Start must retain its graph and show waiting, not running")
+            try require(owner.statusLabel.toolTip?.contains("권한") == false
+                && owner.statusLabel.toolTip?.contains("접근 요청") == true,
+                "Waiting must explain conditional access requests, not assert permission denial")
+            _ = f.access.consumeOutput(512)
+            owner.updateDiagnostics()
+            try require(f.processor.diagnosticsSnapshot().outputUnderrunSamples == 1024
+                && !f.processor.diagnosticsSnapshot().audioFlow.isConfirmed
+                && owner.statusLabel.stringValue == "오디오 데이터 대기",
+                "Underrun padding must not count as real input/output progress")
+            owner.modelSelector.selectedSegment = 1
+            owner.modelChanged()
+            owner.applyPreset(at: 0)
+            try require(owner.statusLabel.stringValue == "오디오 데이터 대기",
+                        "Model and preset edits must preserve the waiting status")
+            owner.modelSelector.selectedSegment = 0
+            owner.modelChanged()
+            f.access.managerBarrier()
+            f.io.capture(256, sample: 0)
+            owner.updateDiagnostics()
+            try require(owner.statusLabel.stringValue == "출력 데이터 대기"
+                && f.processor.diagnosticsSnapshot().audioFlow.producedSamples == 512
+                && f.processor.diagnosticsSnapshot().audioFlow.consumedSamples == 0,
+                "Capture without real output consumption must remain waiting")
+            let silent = f.access.consumeOutput(256, advanceRamp: false)
+            owner.updateDiagnostics()
+            try require(silent.count == 512 && silent.allSatisfy { $0 == 0 }
+                && f.processor.diagnosticsSnapshot().audioFlow.isConfirmed
+                && owner.statusLabel.stringValue.contains("처리 중:")
+                && owner.diagAudioFlowValue.stringValue == "입력·출력 데이터 확인",
+                "Legitimate silent PCM must confirm flow without a level threshold")
+            owner.updateDiagnostics()
+            try require(owner.statusLabel.toolTip == nil,
+                        "Confirmed flow must remove initial waiting instructions")
+        }
+
+        try runCase("audio-flow-before-main-completion-is-preserved") { owner, f, _ in
+            let base = f.lifecycleIO
+            owner.audioLifecycleIO = GUIAudioLifecycleIO(make: base.make, start: { processor in
+                try base.start(processor)
+                f.io.capture(128)
+                _ = f.access.consumeOutput(128, advanceRamp: false)
+            }, stop: base.stop)
+            owner.startAllAudio()
+            try pump("Early data fixture did not complete") { owner.pendingAudioOperation == nil }
+            try require(owner.statusLabel.stringValue.contains("처리 중:")
+                && f.processor.diagnosticsSnapshot().audioFlow.producedSamples == 256
+                && f.processor.diagnosticsSnapshot().audioFlow.consumedSamples == 256,
+                "Main completion must not reset a baseline after real data already arrived")
+        }
+
+        try runCase("audio-flow-resets-on-graph-reconfiguration") { owner, f, _ in
+            owner.startAllAudio()
+            try pump("Reconfiguration flow fixture did not start") { owner.pendingAudioOperation == nil }
+            f.access.managerBarrier()
+            f.io.capture(128)
+            _ = f.access.consumeOutput(128, advanceRamp: false)
+            owner.updateDiagnostics()
+            let previous = f.processor.diagnosticsSnapshot().audioFlow
+            try require(previous.isConfirmed, "Original graph must have actual input/output")
+            try f.access.reconfigureHardwareFormat(96_000)
+            owner.updateDiagnostics()
+            let next = f.processor.diagnosticsSnapshot().audioFlow
+            try require(next.generation > previous.generation && !next.isConfirmed
+                && next.producedSamples == 0 && next.consumedSamples == 0
+                && f.access.state().written > 0 && owner.statusLabel.stringValue == "오디오 데이터 대기",
+                "Old cumulative data must not confirm a replacement graph")
+            f.io.capture(128, sample: 0)
+            _ = f.access.consumeOutput(128, advanceRamp: false)
+            owner.updateDiagnostics()
+            try require(f.processor.diagnosticsSnapshot().audioFlow.isConfirmed
+                && owner.statusLabel.stringValue.contains("처리 중:"),
+                "Replacement graph did not become confirmed after its own silent PCM")
+        }
+
+        try runCase("audio-flow-waiting-stop-quit-and-old-session") { owner, f, quit in
+            owner.startAllAudio()
+            try pump("Waiting Stop fixture did not start") { owner.pendingAudioOperation == nil }
+            try require(owner.stopAndWaitForCheck() && owner.statusLabel.stringValue == "중지됨"
+                && owner.processor == nil && !f.lease.isHeld,
+                "Waiting for first data must not prevent a normal Stop")
+            let replacement = try GUIAudioLifecycleCheckFixture()
+            defer { replacement.close() }
+            owner.audioLifecycleIO = replacement.lifecycleIO
+            owner.startAllAudio()
+            try pump("Replacement waiting session did not start") { owner.pendingAudioOperation == nil }
+            owner.audioFormatDidChange(Notification(name: AudioFormatNotifications.didChange,
+                userInfo: ["processorSessionID": f.processor.notificationSessionID,
+                    AudioFormatNotifications.livePCM2xActiveKey: false,
+                    AudioFormatNotifications.isProcessingKey: true,
+                    AudioFormatNotifications.livePCM2xFallbackKey: ""]))
+            try require(owner.processor === replacement.processor
+                && owner.statusLabel.stringValue == "오디오 데이터 대기",
+                "A retired session's success must not confirm current flow")
+            replacement.gate.arm("stop")
+            try require(owner.applicationShouldTerminate(.shared) == .terminateCancel,
+                        "Quit while waiting for data must await actual cleanup")
+            try pump("Waiting Quit did not reach Stop") { replacement.gate.entered }
+            owner.updateDiagnostics()
+            try require(owner.statusLabel.stringValue.contains("중지 중") && quit.load() == 0,
+                        "A diagnostics tick must not overwrite pending Stop with flow status")
+            replacement.gate.open()
+            try pump("Waiting Quit did not finish") { owner.pendingAudioOperation == nil }
+            try require(quit.load() == 1 && owner.processor == nil && !replacement.lease.isHeld,
+                        "Waiting Quit did not release its actual owner and lease")
+            _ = owner.audioLifecycleWorker.retainedSessionCountForCheck()
+        }
+
+        try runCase("initialization-stop-and-duplicate-barrier") { owner, f, quit in
+            f.gate.arm("make")
+            owner.startAllAudio()
+            try pump("Initialization did not reach the worker") { f.gate.entered }
+            try heartbeat()
+            let token = owner.pendingAudioOperation?.id
+            owner.startAllAudio()
+            try require(owner.pendingAudioOperation?.id == token && f.journal.count("make-off-main") == 1,
+                        "Duplicate Apply replaced an initializing operation")
+            try require(owner.processor == nil && !owner.allSystemButton.isEnabled
+                && owner.allSystemButton.accessibilityLabel()?.contains("시작 중") == true,
+                "Pending initialization lacks global accessible state")
+            owner.stopAudio()
+            try heartbeat()
+            try require(f.journal.count("stop-off-main") == 0 && f.journal.count("start-off-main") == 0,
+                        "Stop must not overtake an unfinished initializer")
+            f.gate.open()
+            try pump("Canceled initialization did not finish cleanup") { owner.pendingAudioOperation == nil }
+            try require(owner.processor == nil && owner.spectrumAnalyzer == nil
+                && f.journal.count("start-off-main") == 0 && f.journal.count("stop-off-main") == 1,
+                "Canceled initialization must retire without starting capture")
+            try require(owner.audioLifecycleWorker.retainedSessionCountForCheck() == 0 && quit.load() == 0,
+                        "Canceled initialization retained a worker owner or requested Quit")
+            try require(owner.allSystemButton.isEnabled && owner.allSystemButton.accessibilityLabel() == "전체 시스템 적용",
+                        "Finished operation did not restore the global Apply label")
+        }
+
+        try runCase("capture-start-delayed-stop-and-quit") { owner, f, quit in
+            f.gate.arm("startCapture")
+            owner.outputConditioningEnabled = true
+            owner.outputConditioningModeRaw = OutputConditioningMode.pcmOversampling.rawValue
+            owner.startAllAudio()
+            try pump("Capture Start did not reach its gate") { f.gate.entered }
+            try heartbeat()
+            let token = owner.pendingAudioOperation?.id
+            owner.startAllAudio()
+            owner.stopAudio()
+            try require(owner.applicationShouldTerminate(.shared) == .terminateCancel,
+                        "Quit must not terminate an in-flight owner")
+            try heartbeat()
+            try require(owner.pendingAudioOperation?.id == token && owner.processor === f.processor
+                && f.lease.isHeld && quit.load() == 0, "Pending Stop/Quit lost its token, owner or lease")
+            try require(f.journal.count("stop-off-main") == 0 && f.journal.count("setOutputRate") == 0,
+                        "Pending Stop/Quit ran cleanup or PCM negotiation before Start returned")
+            try require(owner.allSystemButton.accessibilityLabel()?.contains("중지 요청됨") == true,
+                        "Global state does not explain deferred Stop")
+            f.gate.open()
+            try pump("Delayed Stop/Quit did not finish") { owner.pendingAudioOperation == nil }
+            try require(owner.processor == nil && owner.spectrumAnalyzer == nil && !f.lease.isHeld
+                && f.journal.count("stop-off-main") == 1 && f.journal.count("setOutputRate") == 0
+                && quit.load() == 1, "Delayed success must Stop once, skip PCM/analyzer, then finish Quit")
+            try require(owner.audioLifecycleWorker.retainedSessionCountForCheck() == 0,
+                        "Quit completion did not retire the worker owner")
+        }
+
+        try runCase("stop-stall-keeps-main-responsive") { owner, f, _ in
+            owner.startAllAudio()
+            try pump("Initial Start did not complete") { owner.pendingAudioOperation == nil }
+            f.access.managerBarrier()
+            f.gate.arm("stop")
+            owner.stopAudio()
+            try pump("Stop did not reach its worker gate") { f.gate.entered }
+            try heartbeat()
+            owner.startAllAudio()
+            owner.stopAudio()
+            try require(owner.processor === f.processor && f.lease.isHeld
+                && f.journal.count("make-off-main") == 1 && f.journal.count("stop-off-main") == 1,
+                "Repeated Start/Stop replaced or duplicated a pending Stop")
+            f.gate.open()
+            try pump("Stop did not complete after release") { owner.pendingAudioOperation == nil }
+            try require(owner.processor == nil && !f.lease.isHeld
+                && owner.currentDeviceSampleRate == nil, "Confirmed Stop did not clear owner and output cache")
+            try require(owner.audioLifecycleWorker.retainedSessionCountForCheck() == 0,
+                        "Successful Stop did not retire its worker owner")
+        }
+
+        try runCase("pending-edits-and-initial-notification") { owner, f, _ in
+            f.gate.arm("startCapture")
+            owner.startAllAudio()
+            try pump("Edit fixture did not hold Start") { f.gate.entered }
+            owner.modelSelector.selectedSegment = 1
+            owner.modelChanged()
+            owner.intensitySlider.doubleValue = 0
+            owner.bodySlider.doubleValue = 0
+            owner.outputSlider.doubleValue = -6
+            owner.sliderChanged()
+            var spatial = owner.spatialControlModel.settings
+            spatial.listenerX = 1.2; spatial.amount = 71; spatial.enabled = false
+            owner.updateSpatialControls(from: spatial, notifyProcessor: true)
+            owner.observeSourceSnapshot(SourceFormatSnapshot(activePlayers: [], formats: []))
+            owner.outputConditioningEnableButton.state = .on
+            owner.outputConditioningEnableChanged()
+            owner.outputConditioningModePopup.selectItem(at: 1)
+            owner.outputConditioningModeChanged()
+            owner.outputConditioningFilterRaw = ResamplingFilterMode.linearPhaseLong.rawValue
+            owner.outputConditioningHeadroomSlider.doubleValue = -12
+            owner.outputConditioningHeadroomChanged()
+            try heartbeat()
+            try require(owner.outputConditioningHeadroomDB == -12 && owner.pendingHeadroomEdit
+                && owner.statusLabel.stringValue.contains("시작 중")
+                && f.journal.count("setOutputRate") == 0 && f.journal.count("stopCapture") == 0,
+                "Pending edits must be saved without starting a transition or replacing pending status")
+            f.gate.open()
+            try pump("Latest PCM setting did not become active after successful Start") {
+                owner.pendingAudioOperation == nil && owner.currentLivePCM2xActive
+            }
+            f.access.managerBarrier()
+            try require(owner.currentTapSampleRate == 48_000 && owner.currentDeviceSampleRate == 96_000,
+                        "Bind-before-start lost matching-session format notifications")
+            try require(owner.spectrumAnalyzer != nil && owner.selectedDSPModel() == .circuit
+                && owner.spatialControlModel.settings.listenerX == 1.2 && !owner.pendingHeadroomEdit,
+                "Successful Start lost the latest model, spatial or gain edit")
+            let state = f.access.state()
+            _ = f.access.consumeOutput(Int((state.written - state.read) / 2), advanceRamp: false)
+            f.io.capture(4096)
+            let tail = f.access.consumeOutput(8192, advanceRamp: false).suffix(1024)
+            let mean = tail.reduce(0.0) { $0 + Double($1) } / Double(tail.count)
+            try require(abs(mean - 0.125 * pow(10, -18.0 / 20)) < 0.00001,
+                        "Latest Circuit output -6 dB and headroom -12 dB did not reach actual samples (\(mean))")
+            try require(f.access.state().appliedRevision >= owner.lastSpatialSubmissionRevision,
+                        "Latest Spatial submission was not consumed by the actual callback")
+            try require(owner.stopAndWaitForCheck(), "Latest-setting fixture Stop failed")
+            _ = owner.audioLifecycleWorker.retainedSessionCountForCheck()
+            owner.audioFormatDidChange(Notification(name: AudioFormatNotifications.didChange,
+                userInfo: ["processorSessionID": f.processor.notificationSessionID,
+                           AudioFormatNotifications.sampleRateKey: 192_000.0]))
+            try require(owner.currentDeviceSampleRate == nil && owner.processor == nil,
+                        "Retired notification restored stopped output state")
+        }
+
+        try runCase("pending-automatic-edit-survives-initial-format") { owner, f, _ in
+            f.gate.arm("startCapture")
+            owner.startAllAudio()
+            try pump("Automatic-rate fixture did not hold Start") { f.gate.entered }
+            owner.automaticRateMatchButton.state = .on
+            owner.automaticRateMatchChanged()
+            owner.observeSourceSnapshot(SourceFormatSnapshot(activePlayers: [], formats: []))
+            try heartbeat()
+            f.gate.open()
+            try pump("Automatic-rate fixture did not finish Start") { owner.pendingAudioOperation == nil }
+            f.access.managerBarrier()
+            // Drain the real initial false notification and the latest true
+            // submission's notification, rather than inventing either event.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            try require(owner.automaticRateMatchingEnabled && owner.automaticRateMatchButton.state == .on
+                && owner.preferenceStore.bool(forKey: "automaticRateMatchingEnabled"),
+                "Initial stale format notification overwrote the pending automatic-rate edit")
+            try require(owner.currentDeviceSampleRate == 48_000 && owner.lastSourceObservation != nil,
+                        "Successful Start lost source observation or initial format")
+        }
+
+        try runCase("failed-stop-quit-retains-owner-and-retry") { owner, f, quit in
+            owner.startAllAudio()
+            try pump("Stop failure fixture Start failed") { owner.pendingAudioOperation == nil }
+            f.access.managerBarrier()
+            f.rejectStop.store(true)
+            try require(owner.applicationShouldTerminate(.shared) == .terminateCancel, "Quit must wait for Stop")
+            try pump("Injected Stop failure did not complete") { owner.pendingAudioOperation == nil }
+            try require(owner.processor === f.processor && f.lease.isHeld && owner.currentStopFailure != nil
+                && quit.load() == 0 && owner.audioLifecycleWorker.retainedSessionCountForCheck() == 1,
+                "False Stop with default diagnostic must preserve both owners and cancel Quit")
+            owner.startAllAudio()
+            try pump("Replacement Stop failure did not finish") { owner.pendingAudioOperation == nil }
+            try require(f.journal.count("make-off-main") == 1 && owner.processor === f.processor,
+                        "Failed replacement Stop created another processor")
+            f.rejectStop.store(false)
+            try require(owner.stopAndWaitForCheck() && !f.lease.isHeld && quit.load() == 0,
+                        "Explicit retry did not clear owner, or replayed the failed Quit intent")
+            try require(owner.audioLifecycleWorker.retainedSessionCountForCheck() == 0,
+                        "Explicit retry did not retire the worker reference")
+        }
+
+        try runCase("failed-start-cleanup-requires-explicit-retry") { owner, f, _ in
+            f.io.failures["startCapture"] = [1]
+            f.io.failures["unregisterCapture"] = [1]
+            owner.startAllAudio()
+            try pump("Start cleanup failure did not complete") { owner.pendingAudioOperation == nil }
+            f.access.managerBarrier()
+            try require(f.journal.count("unregisterCapture") == 1 && f.journal.count("stop-off-main") == 0
+                && owner.processor === f.processor && f.lease.isHeld && owner.currentStopFailure != nil,
+                "Start completion retried a failed teardown or lost its owner")
+            try require(owner.stopAndWaitForCheck() && !f.lease.isHeld,
+                        "Explicit Stop did not retry failed startup cleanup")
+            try require(owner.audioLifecycleWorker.retainedSessionCountForCheck() == 0,
+                        "Startup cleanup retry did not retire its worker owner")
+        }
+
+        try runCase("initialization-error") { owner, f, _ in
+            f.failMake.store(true)
+            owner.startAllAudio()
+            try pump("Initializer error did not complete") { owner.pendingAudioOperation == nil }
+            try require(owner.processor == nil && owner.spectrumAnalyzer == nil
+                && owner.statusLabel.stringValue.contains("실행 실패") && owner.allSystemButton.isEnabled
+                && f.journal.count("start-off-main") == 0 && f.journal.count("stop-off-main") == 0,
+                "Initializer error started a graph, retained an owner or left Apply disabled")
+        }
+
+        try runCase("final-destructor-on-worker") { owner, _, _ in
+            let weakOwner = GUIAudioWeakOwnerCheck()
+            let journal = GUIAudioCheckJournal()
+            owner.audioLifecycleIO = GUIAudioLifecycleIO(make: { settings in
+                let io = GraphCheckIO()
+                io.onCall = { operation in
+                    if operation == "stopOutput" {
+                        journal.record(Thread.isMainThread ? "stopOutput-main" : "stopOutput-worker")
+                    }
+                }
+                let processor = try SystemAudioProcessor(settings: settings,
+                    initialOutput: { (777, 48_000) }, graphIO: io)
+                weakOwner.observe(processor)
+                return processor
+            }, start: { _ in }, stop: { $0.stop() })
+            owner.startAllAudio()
+            try pump("Retirement fixture did not start") { owner.pendingAudioOperation == nil }
+            try require(weakOwner.isAlive && owner.audioLifecycleWorker.retainedSessionCountForCheck() == 1,
+                        "Worker did not retain the live processor")
+            try require(owner.stopAndWaitForCheck(), "Retirement fixture Stop failed")
+            try require(owner.audioLifecycleWorker.retainedSessionCountForCheck() == 0,
+                        "Retirement table did not clear")
+            try pump("Final processor reference survived worker retirement") { !weakOwner.isAlive }
+            try require(journal.count("stopOutput-main") == 0 && journal.count("stopOutput-worker") >= 2,
+                        "Successful Stop or final destructor entered the graph on main")
+        }
+        print("GUIAudioLifecycleChecks: \(cases) cases; \(assertions) assertions; actual async delegate init/start/stop, gated main-loop responsiveness, duplicate/Stop/Quit ownership, latest edits and samples, failed cleanup/retry, session routing and worker retirement; injected devices/leases, isolated preferences, no visible window.")
+    }
+
+    /// Exercise the real strong property and stop method without launching the
+    /// app, building a window, observing source players or querying a device.
+    static func runStopRestorationChecks() throws {
+        try SystemAudioProcessor.runStopRestorationChecks { processor in
+            let owner = NativeAppDelegate()
+            owner.processor = processor
+            return (
+                attempt: { owner.stopAndWaitForCheck() },
+                retainsProcessor: { owner.processor === processor }
+            )
+        }
+    }
+
+    /// Exercise the real diagnostics observer boundary with no graph, device
+    /// lookup, app launch or timer. Identical snapshots must not invalidate the
+    /// Spatial page; receipt/pending text changes must remain observable.
+    static func runSpatialDiagnosticsChecks() throws {
+        let owner = NativeAppDelegate()
+        let processor = try SystemAudioProcessor(settings: Settings(), initialOutput: { (777, 48_000) })
+        owner.processor = processor
+        owner.diagnosticsLabel = NSTextField(labelWithString: "")
+        var publications = 0
+        var audioSubmissions = 0
+        let observation = owner.spatialControlModel.objectWillChange.sink { publications += 1 }
+        owner.spatialControlModel.onChange = { _ in audioSubmissions += 1 }
+        defer { observation.cancel(); owner.processor = nil; _ = processor.stop() }
+        func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw AppError.message("Spatial diagnostics: \(message)") }
+        }
+        owner.updateDiagnostics()
+        let received = owner.spatialControlModel.appliedStatusText
+        try require(publications == 1 && received?.contains("수신 확인 (0)") == true,
+                    "Initial actual diagnostics did not publish receipt status")
+        for _ in 0..<3 { owner.updateDiagnostics() }
+        try require(publications == 1, "Identical receipt status republished the observed model")
+        owner.lastSpatialSubmissionRevision = 7
+        owner.updateDiagnostics()
+        try require(publications == 2 && owner.spatialControlModel.appliedStatusText?.contains("요청 7, 수신 0") == true,
+                    "Changed pending request did not update its status")
+        for _ in 0..<3 { owner.updateDiagnostics() }
+        try require(publications == 2, "Identical pending status republished the observed model")
+        owner.lastSpatialSubmissionRevision = 0
+        owner.updateDiagnostics()
+        try require(publications == 3 && owner.spatialControlModel.appliedStatusText == received,
+                    "Returning to received status did not publish the change")
+        try require(audioSubmissions == 0 && owner.spatialControlModel.uiEditRevision == 0
+                    && !owner.spatialControlModel.hasPendingEdit && processor.appliedSpatialRevision == 0,
+                    "Read-only diagnostics changed an audio edit or ACK")
+        print("SpatialDiagnosticsChecks: 6 assertions; actual updateDiagnostics, identical receipt/pending status emits no model update, changed status remains observable, no audio edit. Injected unstarted processor; no window/device query.")
+    }
+
+    /// Check the actual notification consumer without posting to the global
+    /// notification center. Device/engine rates must not replace the tap rate
+    /// used by Spatial preview, and a retired processor cannot change the page.
+    static func runSpatialFormatBridgeChecks() throws {
+        let owner = NativeAppDelegate()
+        let old = try SystemAudioProcessor(settings: Settings(), initialOutput: { (777, 48_000) })
+        let current = try SystemAudioProcessor(settings: Settings(), initialOutput: { (777, 44_100) })
+        defer { owner.processor = nil; _ = old.stop(); _ = current.stop() }
+        var settings = SpatialSettings()
+        settings.enabled = true; settings.listenerX = 1.2; settings.listenerZ = 0.7
+        settings.speakerWidth = 2.1; settings.amount = 73
+        owner.spatialControlModel.update(settings)
+        var audioEdits = 0
+        owner.spatialControlModel.onChange = { _ in audioEdits += 1 }
+        var assertions = 0
+        func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            assertions += 1
+            if !condition() { throw AppError.message("Spatial format bridge: \(message)") }
+        }
+        func deliver(_ session: String?, tap: Double, output: Double) {
+            var values: [String: Any] = [
+                AudioFormatNotifications.tapSampleRateKey: tap,
+                AudioFormatNotifications.processingSampleRateKey: output,
+                AudioFormatNotifications.sampleRateKey: output,
+                AudioFormatNotifications.livePCM2xActiveKey: true
+            ]
+            if let session { values["processorSessionID"] = session }
+            owner.audioFormatDidChange(Notification(name: AudioFormatNotifications.didChange,
+                                                    object: nil, userInfo: values))
+        }
+        owner.processor = old
+        deliver(old.notificationSessionID, tap: 48_000, output: 96_000)
+        try require(owner.currentProcessingSampleRate == 96_000 && owner.currentDeviceSampleRate == 96_000,
+                    "Matching session did not update engine/device rates")
+        try require(owner.currentTapSampleRate == 48_000 && owner.spatialControlModel.processingSampleRate == 48_000
+                    && owner.spatialControlModel.preview?.raw.sampleRate == 48_000,
+                    "Spatial preview used output 2x instead of capture 1x")
+        try require(owner.currentLivePCM2xActive, "Matching notification lost live 2x display state")
+        deliver(nil, tap: 192_000, output: 384_000)
+        try require(owner.currentTapSampleRate == 48_000 && owner.currentDeviceSampleRate == 96_000,
+                    "Notification without a session changed the active state")
+        owner.processor = current
+        deliver(old.notificationSessionID, tap: 96_000, output: 192_000)
+        try require(owner.currentTapSampleRate == 48_000 && owner.spatialControlModel.preview?.raw.sampleRate == 48_000,
+                    "Retired processor notification changed preview")
+        deliver(current.notificationSessionID, tap: 44_100, output: 88_200)
+        try require(owner.currentTapSampleRate == 44_100 && owner.currentProcessingSampleRate == 88_200
+                    && owner.currentDeviceSampleRate == 88_200,
+                    "Current session did not apply its split route")
+        try require(owner.spatialControlModel.processingSampleRate == 44_100
+                    && owner.spatialControlModel.preview?.raw.sampleRate == 44_100,
+                    "Current session preview is not precomputed at its tap rate")
+        try require(SpatialControlModel.equal(owner.spatialControlModel.settings, settings)
+                    && audioEdits == 0 && owner.spatialControlModel.uiEditRevision == 0
+                    && !owner.spatialControlModel.hasPendingEdit,
+                    "Read-only format delivery changed an audio edit")
+        owner.compactSourceTitleLabel = NSTextField(labelWithString: "")
+        owner.compactSourceValueLabel = NSTextField(labelWithString: "")
+        owner.compactOutputLabel = NSTextField(labelWithString: "")
+        owner.compactModelLabel = NSTextField(labelWithString: "")
+        owner.modelSelector = NSSegmentedControl(labels: ["Clean", "Circuit", "HighExciter"],
+            trackingMode: .selectOne, target: nil, action: nil)
+        owner.modelSelector.selectedSegment = 0
+        owner.updateCompactFormatSummary()
+        try require(owner.compactOutputLabel.stringValue.contains("88.2 kHz"),
+                    "Compact output must show the current session before Stop")
+        try require(owner.stopAndWaitForCheck() && owner.processor == nil,
+                    "Successful Stop must retire the current processor")
+        try require(owner.currentDeviceSampleRate == nil && owner.currentProcessingSampleRate == nil
+                    && owner.currentTapSampleRate == nil && !owner.currentLivePCM2xActive
+                    && owner.compactOutputLabel.stringValue == "출력 포맷 대기 중",
+                    "Stopped compact output must not retain the previous device rate")
+        deliver(old.notificationSessionID, tap: 48_000, output: 96_000)
+        deliver(current.notificationSessionID, tap: 44_100, output: 88_200)
+        try require(owner.currentDeviceSampleRate == nil && owner.currentProcessingSampleRate == nil
+                    && owner.currentTapSampleRate == nil && !owner.currentLivePCM2xActive
+                    && owner.compactOutputLabel.stringValue == "출력 포맷 대기 중",
+                    "Retired notifications must not restore a stopped output display")
+        try require(old.stop() && current.stop(), "Unstarted fixture cleanup failed")
+        print("SpatialFormatBridgeChecks: \(assertions) assertions; actual format notification consumer, tap/output separation, session routing, stopped compact output and retired notifications, unchanged audio edits; injected processors, no graph/window/device query.")
+    }
+
+    private func stopAnalysisPresentation() {
         diagnosticsTimer?.invalidate()
         diagnosticsTimer = nil
         spectrumAnalyzer?.stop()
         spectrumAnalyzer = nil
         dynamicsMeterModel.reset()
         spectrumModel.reset()
-        processor?.stop()
+    }
+
+    private func showAudioStopFailure(_ failure: String) {
+        currentStopFailure = failure
+        statusLabel?.stringValue = "중지 미완료: \(failure)"
+        rateMatchStatusText = failure
+        currentLivePCM2xFallback = failure
+        refreshDiagnosticsPanel()
+        updateRateMatchPreview()
+    }
+
+    /// Only call after confirmed Stop, or when no processor has been created.
+    private func clearStoppedAudioPresentation() {
         processor = nil
+        currentStopFailure = nil
+        currentProcessingFailure = nil
+        if let lastSourceSnapshot { updateSourceDisplay(lastSourceSnapshot) }
         if statusLabel != nil {
             statusLabel.stringValue = "중지됨"
+            statusLabel.toolTip = nil
         }
         if formatLabel != nil {
             formatLabel.stringValue = "처리 포맷 대기 중"
@@ -3174,6 +3201,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         diagnosticsLabel?.stringValue = "XRuns 대기 중"
         currentProcessingSampleRate = nil
         currentTapSampleRate = nil
+        currentDeviceSampleRate = nil
         currentLivePCM2xActive = false
         currentLivePCM2xFallback = ""
         diagXRunValue?.stringValue = formatXRunCounts(underrun: 0, drop: 0, vis: 0)
@@ -3182,9 +3210,22 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         diagCachedDeviceName = "—"
         diagDeviceNameValue?.stringValue = "—"
         diagCaptureValue?.stringValue = "—"
+        diagAudioFlowValue?.stringValue = "—"
+        diagAudioFlowValue?.toolTip = nil
         refreshDiagnosticsPanel()
         updateOversamplingIndicator()
         updateCompactFormatSummary()
+    }
+
+    /// Existing fixture adapters keep their Bool contract while exercising the
+    /// real asynchronous delegate path and pumping the main event loop.
+    private func stopAndWaitForCheck() -> Bool {
+        requestStopAudio()
+        let deadline = Date().addingTimeInterval(3)
+        while pendingAudioOperation != nil && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.002))
+        }
+        return pendingAudioOperation == nil && processor == nil && currentStopFailure == nil
     }
 
     private func startDiagnosticsTimer() {
@@ -3203,21 +3244,12 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             onUpdate: { [weak self] snapshot in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    self.sourceFormatLabel?.stringValue = snapshot.indicatorText
-                    self.sourceFormatLabel?.toolTip = snapshot.indicatorText
-                    self.currentSourceSampleRate = snapshot.format?.sampleRate
-                    let activePlayerNames =
-                        snapshot.activePlayers.map(\.displayName).joined(separator: " + ")
-                    self.currentSourcePlayerName = snapshot.format?.player.displayName
-                        ?? (activePlayerNames.isEmpty ? nil : activePlayerNames)
-                    self.currentSourceBitDepth = snapshot.format?.bitDepth
-                    self.updateCompactFormatSummary()
-                    self.updateRateMatchPreview()
+                    self.updateSourceDisplay(snapshot)
                 }
             },
             onObservation: { [weak self] snapshot in
                 Task { @MainActor [weak self] in
-                    self?.processor?.observeSourceFormat(snapshot.format)
+                    self?.observeSourceSnapshot(snapshot)
                 }
             }
         )
@@ -3225,16 +3257,47 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         tracker.start()
     }
 
+    private func observeSourceSnapshot(_ snapshot: SourceFormatSnapshot) {
+        lastSourceObservation = snapshot
+        guard pendingAudioOperation == nil else { return }
+        processor?.observeSourceFormats(snapshot.formats)
+    }
+
+    private func updateSourceDisplay(_ snapshot: SourceFormatSnapshot) {
+        lastSourceSnapshot = snapshot
+        let scope = processor?.capturedBundleIDs
+        let selected = SourceFormatSelectionPolicy.select(formats: snapshot.formats, capturedBundleIDs: scope)
+        let text = selected?.indicatorText ?? (scope == nil ? snapshot.indicatorText : "Source: 선택한 캡처 대상의 재생 정보 대기 중")
+        sourceFormatLabel?.stringValue = text
+        sourceFormatLabel?.toolTip = text
+        currentSourceSampleRate = selected?.sampleRate
+        currentSourceBitDepth = selected?.bitDepth
+        currentSourcePlayerName = selected?.player.displayName
+        updateCompactFormatSummary()
+        updateRateMatchPreview()
+    }
+
     @objc private func updateDiagnostics() {
         guard let processor else { return }
         let snapshot = processor.diagnosticsSnapshot()
+        refreshAudioFlowPresentation(snapshot)
+        let applied = processor.appliedSpatialRevision
+        let spatialStatus = applied >= lastSpatialSubmissionRevision
+            ? "오디오 설정 수신 확인 (\(applied)); 짧은 전환 구간은 별도"
+            : "오디오 설정 수신 대기 (요청 \(lastSpatialSubmissionRevision), 수신 \(applied))"
+        // Publishing an unchanged status invalidates the observed Spatial page
+        // and requests another stage frame even while its scene is idle.
+        if spatialControlModel.appliedStatusText != spatialStatus {
+            spatialControlModel.appliedStatusText = spatialStatus
+        }
         diagnosticsLabel.stringValue = snapshot.displayText
         diagnosticsLabel.toolTip = snapshot.displayText
 
         // Diagnostics panel — counters + device identity, refreshed at the 1 Hz
         // timer cadence (these values are not notification-driven). deviceName is
-        // a single off-thread CoreAudio query; outputDeviceID reads via the
-        // proven managerQueue.sync accessor — never the realtime audio callback.
+        // a CoreAudio query performed only when the device changes;
+        // outputDeviceID reads an off-thread-published snapshot without waiting
+        // for the manager queue or the realtime audio callback.
         if diagXRunValue != nil {
             diagXRunValue.stringValue = formatXRunCounts(
                 underrun: snapshot.outputUnderrunSamples,
@@ -3245,7 +3308,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
             diagCaptureValue.stringValue = snapshot.captureTarget
             // Resolve the device name only when the device changes (it rarely
             // does mid-session) to avoid a CoreAudio IPC on the main thread every
-            // tick. outputDeviceID reads off the audio thread via managerQueue.
+            // tick. outputDeviceID reads the last published device snapshot.
             let devID = processor.outputDeviceID
             if devID != diagCachedDeviceID {
                 diagCachedDeviceID = devID
@@ -3269,6 +3332,8 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
     }
 
     @objc private func audioFormatDidChange(_ notification: Notification) {
+        guard let processor,
+              notification.userInfo?["processorSessionID"] as? String == processor.notificationSessionID else { return }
         let userInfo = notification.userInfo
         if let text = userInfo?[AudioFormatNotifications.indicatorTextKey] as? String {
             formatLabel?.stringValue = text
@@ -3280,6 +3345,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         }
         if let tapRate = userInfo?[AudioFormatNotifications.tapSampleRateKey] as? Double {
             currentTapSampleRate = tapRate
+            spatialControlModel.processingSampleRate = Float(tapRate)
         }
         if let deviceRate = userInfo?[AudioFormatNotifications.sampleRateKey] as? Double {
             currentDeviceSampleRate = deviceRate
@@ -3293,7 +3359,7 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         isDeviceSampleRateSettable =
             userInfo?[AudioFormatNotifications.isSampleRateSettableKey] as? Bool
             ?? isDeviceSampleRateSettable
-        if let enabled =
+        if pendingAudioOperation == nil, let enabled =
             userInfo?[AudioFormatNotifications.automaticRateMatchingEnabledKey] as? Bool {
             automaticRateMatchingEnabled = enabled
             automaticRateMatchButton?.state = enabled ? .on : .off
@@ -3310,12 +3376,31 @@ private final class NativeAppDelegate: NSObject, NSApplicationDelegate, NSWindow
         }
         if let fallback = userInfo?[AudioFormatNotifications.livePCM2xFallbackKey] as? String {
             currentLivePCM2xFallback = fallback
+            if let processing = userInfo?[AudioFormatNotifications.isProcessingKey] as? Bool {
+                let hadFailure = currentProcessingFailure != nil
+                currentProcessingFailure = !processing && !fallback.isEmpty ? fallback : nil
+                if let failure = currentProcessingFailure {
+                    statusLabel?.stringValue = "처리 중단 · 오디오 적용에서 중지 후 다시 적용"
+                    statusLabel?.toolTip = failure
+                } else if hadFailure && processing {
+                    refreshAudioFlowPresentation()
+                }
+            }
         }
 
+        // Activation uses an earlier parameter snapshot. Deliver edits made
+        // while it was pending only after a successful, matching-session result.
+        // Inactive/fallback notifications never retry a device transition.
+        if currentLivePCM2xActive && pendingHeadroomEdit && outputConditioningEnabled
+            && OutputConditioningMode(rawValue: outputConditioningModeRaw) == .pcmOversampling
+            && outputConditioningFactor == 2 {
+            pushActiveHeadroomSettings()
+        }
         updateCompactFormatSummary()
         updateRateMatchPreview()
         updateOversamplingIndicator()
         refreshDiagnosticsPanel()
+        refreshAudioOperationPresentation()
     }
 
     private func refreshRateMatchDeviceCapabilities() {
@@ -3380,6 +3465,30 @@ private func installMainMenu(for app: NSApplication) {
     appMenu.addItem(quitItem)
     appMenuItem.submenu = appMenu
     mainMenu.addItem(appMenuItem)
+
+    // Native text fields depend on the application's responder-chain edit
+    // commands for keyboard shortcuts such as Command-A/C/V. A Quit-only menu
+    // leaves precision editing with no standard Select All command.
+    let editMenuItem = NSMenuItem()
+    let editMenu = NSMenu(title: "편집")
+    for (title, action, key) in [
+        ("실행 취소", "undo:", "z"),
+        ("오려두기", "cut:", "x"),
+        ("복사", "copy:", "c"),
+        ("붙여넣기", "paste:", "v"),
+        ("전체 선택", "selectAll:", "a")
+    ] {
+        let item = NSMenuItem(title: title, action: Selector(action), keyEquivalent: key)
+        item.keyEquivalentModifierMask = [.command]
+        // A nil target routes the command to the current native field editor.
+        editMenu.addItem(item)
+    }
+    let redo = NSMenuItem(title: "실행 복귀", action: Selector(("redo:")), keyEquivalent: "z")
+    redo.keyEquivalentModifierMask = [.command, .shift]
+    editMenu.insertItem(redo, at: 1)
+    editMenu.insertItem(.separator(), at: 2)
+    editMenuItem.submenu = editMenu
+    mainMenu.addItem(editMenuItem)
     app.mainMenu = mainMenu
 }
 
@@ -3392,16 +3501,21 @@ private func printUsageAndExit() -> Never {
       SystemAudioProcessor --bundle-id com.spotify.client
       SystemAudioProcessor --list-apps
       SystemAudioProcessor --self-test
+      SystemAudioProcessor --ui-self-test
+      SystemAudioProcessor --benchmark-output-conditioning
+
+    With no arguments, open the app. Diagnostics and the offline benchmark
+    above do not start audio capture. Use each diagnostic flag on its own.
 
     Options:
       --intensity 0...100
       --body 0...100
-      --output dB
+      --output -18...6 dB
       --model clean|circuit|highexciter
       --spatial on|off
-      --listener-x meters
-      --listener-z meters
-      --stage-width meters
+      --listener-x -3...3 meters
+      --listener-z -2.8...2.8 meters
+      --stage-width 0.6...3 meters
       --space 0...100
     """)
     exit(0)
@@ -3420,2940 +3534,6 @@ private func listRunningApps() {
     }
 }
 
-private final class LockFreeFloatRingBuffer {
-    private let handle: OpaquePointer
-
-    init(capacityFrames: Int, channels: Int) throws {
-        let requestedSamples = UInt32(max(capacityFrames * channels, channels * 512))
-        guard let handle = lc_ring_buffer_create(requestedSamples) else {
-            throw AppError.message("Could not allocate audio ring buffer.")
-        }
-        self.handle = handle
-    }
-
-    deinit {
-        lc_ring_buffer_destroy(handle)
-    }
-
-    func push(_ samples: UnsafePointer<Float>, count: Int) {
-        _ = lc_ring_buffer_push(handle, samples, UInt32(max(count, 0)))
-    }
-
-    func droppedWriteSamples() -> UInt64 {
-        lc_ring_buffer_dropped_write_samples(handle)
-    }
-
-    func underrunSamples() -> UInt64 {
-        lc_ring_buffer_underrun_samples(handle)
-    }
-
-    func totalWrittenSamples() -> UInt64 {
-        lc_ring_buffer_total_written_samples(handle)
-    }
-
-    func totalReadSamples() -> UInt64 {
-        lc_ring_buffer_total_read_samples(handle)
-    }
-
-    func resetDiagnostics() {
-        lc_ring_buffer_reset_diagnostics(handle)
-    }
-
-    func availableSamples() -> Int {
-        Int(lc_ring_buffer_available(handle))
-    }
-
-    func popInterleaved(into pointer: UnsafeMutablePointer<Float>, count: Int) {
-        _ = lc_ring_buffer_pop(handle, pointer, UInt32(max(count, 0)))
-    }
-
-    func popStereo(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, frameCount: Int) {
-        _ = lc_ring_buffer_pop_deinterleaved_stereo(handle, left, right, UInt32(max(frameCount, 0)))
-    }
-
-    func clear() {
-        lc_ring_buffer_clear(handle)
-    }
-}
-
-private final class LockFreeControlEventQueue {
-    private let handle: OpaquePointer
-    private var sampleRate: Float
-
-    init(capacity: Int = 4096, sampleRate: Float) throws {
-        guard let handle = lc_control_event_queue_create(UInt32(max(capacity, 16))) else {
-            throw AppError.message("Could not allocate audio control event queue.")
-        }
-        self.handle = handle
-        self.sampleRate = sampleRate
-    }
-
-    deinit {
-        lc_control_event_queue_destroy(handle)
-    }
-
-    func updateSampleRate(_ sampleRate: Float) {
-        self.sampleRate = sampleRate
-    }
-
-    func pushDSP(intensity: Float,
-                 body: Float,
-                 outputDb: Float,
-                 dspModel: Settings.DSPModel,
-                 exciterOversamplingMode: ExciterOversamplingMode) {
-        var event = LCControlEvent()
-        event.type = UInt32(LC_CONTROL_EVENT_DSP)
-        event.dsp = DSPPrecompute.makeDSPSettings(
-            sampleRate: sampleRate,
-            intensity: intensity,
-            body: body,
-            outputDb: outputDb,
-            dspModel: dspModel,
-            exciterOversamplingMode: exciterOversamplingMode
-        )
-        _ = withUnsafePointer(to: &event) { lc_control_event_queue_push(handle, $0) }
-    }
-
-    func pushSpatial(_ settings: SpatialSettings) {
-        var event = LCControlEvent()
-        event.type = UInt32(LC_CONTROL_EVENT_SPATIAL)
-        event.spatial = DSPPrecompute.makeSpatialSettings(sampleRate: sampleRate, settings: settings)
-        _ = withUnsafePointer(to: &event) { lc_control_event_queue_push(handle, $0) }
-    }
-
-    func pushConditioning(_ parameters: OutputConditioningParameters) {
-        var event = LCControlEvent()
-        event.type = UInt32(LC_CONTROL_EVENT_OUTPUT_CONDITIONING)
-        event.conditioning = LCOutputConditioningSettings(
-            enabled: parameters.isEnabled ? 1 : 0,
-            outputMode: parameters.outputMode.rawValue,
-            oversamplingFactor: UInt32(parameters.oversamplingFactor),
-            filterMode: parameters.filterMode.rawValue,
-            headroomGain: parameters.headroomGain,
-            ditherEnabled: parameters.ditherEnabled ? 1 : 0,
-            noiseShapingEnabled: parameters.noiseShapingEnabled ? 1 : 0,
-            dsdMode: parameters.dsdMode.rawValue
-        )
-        _ = withUnsafePointer(to: &event) { lc_control_event_queue_push(handle, $0) }
-    }
-
-    func pop(into event: UnsafeMutablePointer<LCControlEvent>) -> Bool {
-        lc_control_event_queue_pop(handle, event) != 0
-    }
-
-    func drain() {
-        var event = LCControlEvent()
-        while pop(into: &event) {}
-    }
-}
-
-enum DSPPrecompute {
-    static func makeDSPSettings(sampleRate: Float,
-                                intensity: Float,
-                                body: Float,
-                                outputDb: Float,
-                                dspModel: Settings.DSPModel,
-                                exciterOversamplingMode: ExciterOversamplingMode = .auto) -> LCDSPSettings {
-        let normalIntensity = clamp(intensity / 100, 0, 1)
-        let normalBody = clamp(body / 100, 0, 1)
-        let shelfDb = normalIntensity * 6.5
-        let shelfFreq = 68 + normalIntensity * 24
-        let outputGain = pow(10, outputDb / 20)
-        let transformerShelfDb = 0.7 + normalIntensity * 2.2 + normalBody * 0.7
-        let transformerShelfFreq = 78 + normalIntensity * 10 + normalBody * 24
-        let transformerDrive = 1.0 + normalIntensity * 0.24 + normalBody * 0.08
-        let transformerAsymmetry = 0.002 + normalIntensity * 0.008 + normalBody * 0.004
-        let transformerBiasOffset = makePolynomialSoftClip(transformerAsymmetry)
-        let transformerMakeupGain: Float = 1 / max(1 + (transformerDrive - 1) * 0.35, 0.001)
-        let exciterFrequency = min(Float(11_000), sampleRate * 0.45)
-        let exciterDrive = dspModel == .highExciter ? normalIntensity : 0
-        let exciterWetMix = dspModel == .highExciter ? normalBody : 0
-        let exciterOversampleFactor = makeExciterOversampleFactor(
-            sampleRate: sampleRate,
-            mode: exciterOversamplingMode
-        )
-        let exciterLowPassFrequency = min(Float(20_000), sampleRate * 0.40)
-        let exciterStage1Rate = sampleRate * 2
-        let exciterStage2Rate = sampleRate * 4
-        let butterworthQ1: Float = 0.5411961
-        let butterworthQ2: Float = 1.306563
-
-        let bodyInjectionGain = (0.46 + 0.06 * normalIntensity) * normalBody
-        let virtualFeedbackGain = 0.16 * normalIntensity
-        let shelfLinearGain = pow(10, shelfDb / 20)
-        let estimatedCircuitGain = shelfLinearGain + bodyInjectionGain + virtualFeedbackGain
-        let circuitHeadroomGain: Float = 1 / max(estimatedCircuitGain, 1)
-        let circuitMakeupGain = min(sqrt(max(estimatedCircuitGain, 1)), 1.4125376)
-
-        return LCDSPSettings(
-            intensity: normalIntensity,
-            body: normalBody,
-            outputGain: outputGain,
-            headroomGain: pow(10, (-3 * normalIntensity) / 20),
-            dspModel: dspModel.controlID,
-            shelf: makeLowShelf(sampleRate: sampleRate, frequency: shelfFreq, q: 0.72, gainDb: shelfDb),
-            warmthAmount: 0.008 * normalIntensity + 0.004 * normalBody,
-            virtualFeedbackGain: virtualFeedbackGain,
-            bodyInjectionGain: bodyInjectionGain,
-            circuitHeadroomGain: circuitHeadroomGain,
-            circuitMakeupGain: circuitMakeupGain,
-            wetMix: min(max(0.32 * normalIntensity + 0.18 * normalBody, 0), 0.54),
-            bassAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 72 + normalIntensity * 36),
-            subAlpha: makeRcAlpha(sampleRate: sampleRate, frequency: 38 + normalBody * 26),
-            transformerPreEmphasis: makeLowShelf(sampleRate: sampleRate, frequency: transformerShelfFreq, q: 0.72, gainDb: transformerShelfDb),
-            transformerDeEmphasis: makeLowShelf(sampleRate: sampleRate, frequency: transformerShelfFreq, q: 0.72, gainDb: -transformerShelfDb),
-            transformerDrive: transformerDrive,
-            transformerAsymmetry: transformerAsymmetry,
-            transformerBiasOffset: transformerBiasOffset,
-            transformerMakeupGain: transformerMakeupGain,
-            exciterHighPass: makeHighPass(sampleRate: sampleRate, frequency: exciterFrequency, q: 0.707),
-            exciterDrive: exciterDrive,
-            exciterWetMix: exciterWetMix,
-            exciterOversampleFactor: exciterOversampleFactor,
-            exciterStage1LowPass1: makeLowPass(
-                sampleRate: exciterStage1Rate,
-                frequency: exciterLowPassFrequency,
-                q: butterworthQ1
-            ),
-            exciterStage1LowPass2: makeLowPass(
-                sampleRate: exciterStage1Rate,
-                frequency: exciterLowPassFrequency,
-                q: butterworthQ2
-            ),
-            exciterStage2LowPass1: makeLowPass(
-                sampleRate: exciterStage2Rate,
-                frequency: exciterLowPassFrequency,
-                q: butterworthQ1
-            ),
-            exciterStage2LowPass2: makeLowPass(
-                sampleRate: exciterStage2Rate,
-                frequency: exciterLowPassFrequency,
-                q: butterworthQ2
-            )
-        )
-    }
-
-    static func makeExciterOversampleFactor(
-        sampleRate: Float,
-        mode: ExciterOversamplingMode = .auto
-    ) -> UInt32 {
-        ExciterOversamplingPolicy.resolve(
-            processingSampleRate: Double(sampleRate),
-            mode: mode
-        ).effectiveFactor
-    }
-
-    static func makeSpatialSettings(sampleRate: Float, settings: SpatialSettings) -> LCSpatialSettings {
-        let width = clamp(settings.speakerWidth, 0.6, 3.0)
-        let listenerX = clamp(settings.listenerX, -3.0, 3.0)
-        let listenerZ = clamp(settings.listenerZ, -2.8, 2.8)
-        let earOffset: Float = 0.09
-        let speakerZ: Float = 1.8
-        let amount = clamp(settings.amount / 100, 0, 1)
-        let crossfeed = 0.16 + amount * 0.30
-
-        let leftSpeaker = (x: -width / 2, z: speakerZ)
-        let rightSpeaker = (x: width / 2, z: speakerZ)
-        let leftEar = (x: listenerX - earOffset, z: listenerZ)
-        let rightEar = (x: listenerX + earOffset, z: listenerZ)
-
-        let llDistance = distance(leftSpeaker, leftEar)
-        let lrDistance = distance(leftSpeaker, rightEar)
-        let rlDistance = distance(rightSpeaker, leftEar)
-        let rrDistance = distance(rightSpeaker, rightEar)
-        let minimumDistance = min(llDistance, lrDistance, rlDistance, rrDistance)
-
-        let llGain = inverseDistanceGain(llDistance)
-        let rrGain = inverseDistanceGain(rrDistance)
-        let lrGain = inverseDistanceGain(lrDistance) * crossfeed
-        let rlGain = inverseDistanceGain(rlDistance) * crossfeed
-        let normalizer = 1 / max((llGain + rrGain) * 0.5, 0.001)
-
-        return LCSpatialSettings(
-            enabled: settings.enabled ? 1 : 0,
-            amount: amount,
-            ll: makeSpatialPath(distanceOffset: llDistance - minimumDistance, gain: llGain * normalizer, sampleRate: sampleRate),
-            lr: makeSpatialPath(distanceOffset: lrDistance - minimumDistance, gain: lrGain * normalizer, sampleRate: sampleRate),
-            rl: makeSpatialPath(distanceOffset: rlDistance - minimumDistance, gain: rlGain * normalizer, sampleRate: sampleRate),
-            rr: makeSpatialPath(distanceOffset: rrDistance - minimumDistance, gain: rrGain * normalizer, sampleRate: sampleRate)
-        )
-    }
-
-    static func makeLowPass(sampleRate: Float, frequency: Float, q: Float) -> LCBiquadCoefficients {
-        let w0 = 2 * Float.pi * frequency / sampleRate
-        let alpha = sin(w0) / (2 * q)
-        let cosW0 = cos(w0)
-        let a0 = 1 + alpha
-        return LCBiquadCoefficients(
-            b0: ((1 - cosW0) / 2) / a0,
-            b1: (1 - cosW0) / a0,
-            b2: ((1 - cosW0) / 2) / a0,
-            a1: (-2 * cosW0) / a0,
-            a2: (1 - alpha) / a0
-        )
-    }
-
-    static func makeHighPass(sampleRate: Float, frequency: Float, q: Float) -> LCBiquadCoefficients {
-        let clampedFrequency = min(max(frequency, 20), sampleRate * 0.45)
-        let w0 = 2 * Float.pi * clampedFrequency / sampleRate
-        let alpha = sin(w0) / (2 * q)
-        let cosW0 = cos(w0)
-        let a0 = 1 + alpha
-        return LCBiquadCoefficients(
-            b0: ((1 + cosW0) / 2) / a0,
-            b1: (-(1 + cosW0)) / a0,
-            b2: ((1 + cosW0) / 2) / a0,
-            a1: (-2 * cosW0) / a0,
-            a2: (1 - alpha) / a0
-        )
-    }
-
-    static func makeLowShelf(sampleRate: Float, frequency: Float, q: Float, gainDb: Float) -> LCBiquadCoefficients {
-        let a = pow(10, gainDb / 40)
-        let w0 = 2 * Float.pi * frequency / sampleRate
-        let cosW0 = cos(w0)
-        let sinW0 = sin(w0)
-        let alpha = sinW0 / (2 * q)
-        let beta = 2 * sqrt(a) * alpha
-        let a0 = (a + 1) + (a - 1) * cosW0 + beta
-
-        return LCBiquadCoefficients(
-            b0: a * ((a + 1) - (a - 1) * cosW0 + beta) / a0,
-            b1: 2 * a * ((a - 1) - (a + 1) * cosW0) / a0,
-            b2: a * ((a + 1) - (a - 1) * cosW0 - beta) / a0,
-            a1: -2 * ((a - 1) + (a + 1) * cosW0) / a0,
-            a2: ((a + 1) + (a - 1) * cosW0 - beta) / a0
-        )
-    }
-
-    static func makeRcAlpha(sampleRate: Float, frequency: Float) -> Float {
-        let clampedFrequency = min(max(frequency, 5), sampleRate * 0.45)
-        return 1 - exp(-2 * Float.pi * clampedFrequency / sampleRate)
-    }
-
-    private static func makePolynomialSoftClip(_ input: Float) -> Float {
-        if input > 1 {
-            return 1
-        }
-        if input < -1 {
-            return -1
-        }
-        return input - (input * input * input) / 3
-    }
-
-    private static func distance(_ a: (x: Float, z: Float), _ b: (x: Float, z: Float)) -> Float {
-        let dx = a.x - b.x
-        let dz = a.z - b.z
-        return max(sqrt(dx * dx + dz * dz), 0.12)
-    }
-
-    private static func inverseDistanceGain(_ meters: Float) -> Float {
-        1 / max(0.45 + meters * 0.62, 0.2)
-    }
-
-    private static func makeSpatialPath(distanceOffset: Float, gain: Float, sampleRate: Float) -> LCSpatialPathSettings {
-        let speedOfSound: Float = 343.0
-        let samples = Int((max(distanceOffset, 0) / speedOfSound * sampleRate).rounded())
-        return LCSpatialPathSettings(delaySamples: UInt32(max(samples, 0)), gain: gain)
-    }
-}
-
-private struct Biquad {
-    var b0: Float = 1
-    var b1: Float = 0
-    var b2: Float = 0
-    var a1: Float = 0
-    var a2: Float = 0
-    var z1: Float = 0
-    var z2: Float = 0
-
-    mutating func process(_ input: Float) -> Float {
-        let output = b0 * input + z1
-        z1 = b1 * input - a1 * output + z2
-        z2 = b2 * input - a2 * output
-        return output
-    }
-
-    mutating func update(_ coefficients: LCBiquadCoefficients) {
-        b0 = coefficients.b0
-        b1 = coefficients.b1
-        b2 = coefficients.b2
-        a1 = coefficients.a1
-        a2 = coefficients.a2
-    }
-
-    mutating func resetState() {
-        z1 = 0
-        z2 = 0
-    }
-
-    static func lowPass(sampleRate: Float, frequency: Float, q: Float) -> Biquad {
-        var biquad = Biquad()
-        biquad.update(DSPPrecompute.makeLowPass(sampleRate: sampleRate, frequency: frequency, q: q))
-        return biquad
-    }
-
-    static func lowShelf(sampleRate: Float, frequency: Float, q: Float, gainDb: Float) -> Biquad {
-        var biquad = Biquad()
-        biquad.update(DSPPrecompute.makeLowShelf(sampleRate: sampleRate, frequency: frequency, q: q, gainDb: gainDb))
-        return biquad
-    }
-}
-
-private struct OversamplingLowPass {
-    private var section1 = Biquad()
-    private var section2 = Biquad()
-
-    mutating func update(_ first: LCBiquadCoefficients, _ second: LCBiquadCoefficients) {
-        section1.update(first)
-        section2.update(second)
-    }
-
-    mutating func resetState() {
-        section1.resetState()
-        section2.resetState()
-    }
-
-    mutating func process(_ input: Float) -> Float {
-        section2.process(section1.process(input))
-    }
-}
-
-private struct Oversampling2xStage {
-    private var interpolationFilter = OversamplingLowPass()
-    private var decimationFilter = OversamplingLowPass()
-
-    mutating func update(_ first: LCBiquadCoefficients, _ second: LCBiquadCoefficients) {
-        interpolationFilter.update(first, second)
-        decimationFilter.update(first, second)
-    }
-
-    mutating func resetState() {
-        interpolationFilter.resetState()
-        decimationFilter.resetState()
-    }
-
-    mutating func upsample(_ input: Float, first: inout Float, second: inout Float) {
-        first = interpolationFilter.process(input * 2)
-        second = interpolationFilter.process(0)
-    }
-
-    mutating func downsample(_ first: Float, _ second: Float) -> Float {
-        let output = decimationFilter.process(first)
-        _ = decimationFilter.process(second)
-        return output
-    }
-}
-
-private protocol BassProcessor: AnyObject {
-    func process(left: Float, right: Float) -> (Float, Float)
-}
-
-private final class LowEndDSP: BassProcessor {
-    private var shelfL = Biquad()
-    private var shelfR = Biquad()
-    private var subL: Biquad
-    private var subR: Biquad
-    private var intensity: Float = 0
-    private var body: Float = 0
-    private var outputGain: Float = 1
-    private var headroomGain: Float = 1
-
-    init(sampleRate: Float, intensity: Float, body: Float, outputDb: Float) {
-        self.subL = .lowPass(sampleRate: sampleRate, frequency: 135, q: 0.68)
-        self.subR = .lowPass(sampleRate: sampleRate, frequency: 135, q: 0.68)
-        update(DSPPrecompute.makeDSPSettings(
-            sampleRate: sampleRate,
-            intensity: intensity,
-            body: body,
-            outputDb: outputDb,
-            dspModel: .clean
-        ))
-    }
-
-    func update(_ settings: LCDSPSettings) {
-        self.intensity = settings.intensity
-        self.body = settings.body
-        self.outputGain = settings.outputGain
-        self.headroomGain = settings.headroomGain
-        shelfL.update(settings.shelf)
-        shelfR.update(settings.shelf)
-    }
-
-    func resetState() {
-        shelfL.resetState()
-        shelfR.resetState()
-        subL.resetState()
-        subR.resetState()
-    }
-
-    func process(left: Float, right: Float) -> (Float, Float) {
-        var lShelf = shelfL.process(left)
-        var rShelf = shelfR.process(right)
-        let lSub = tanh(subL.process(left) * 2.4) * 0.18 * body
-        let rSub = tanh(subR.process(right) * 2.4) * 0.18 * body
-        lShelf = tanh((lShelf + lSub) * headroomGain * outputGain * 1.05) / 1.05
-        rShelf = tanh((rShelf + rSub) * headroomGain * outputGain * 1.05) / 1.05
-        return (lShelf, rShelf)
-    }
-}
-
-private final class RcLowPass {
-    private var alpha: Float = 0
-    private var z: Float = 0
-
-    init(sampleRate: Float, frequency: Float) {
-        update(alpha: DSPPrecompute.makeRcAlpha(sampleRate: sampleRate, frequency: frequency))
-    }
-
-    func update(alpha: Float) {
-        self.alpha = alpha
-    }
-
-    func resetState() {
-        z = 0
-    }
-
-    func process(_ input: Float) -> Float {
-        z += alpha * (input - z)
-        return z
-    }
-}
-
-final class VirtualCircuitBassDSP: BassProcessor {
-    private final class Channel {
-        private let bassPole: RcLowPass
-        private let subPole: RcLowPass
-        private var bassShelf = Biquad()
-        private var preEmphasis = Biquad()
-        private var deEmphasis = Biquad()
-        private var intensity: Float = 0
-        private var body: Float = 0
-        private var outputGain: Float = 1
-        private var virtualFeedbackGain: Float = 0
-        private var bodyInjectionGain: Float = 0
-        private var headroomGain: Float = 1
-        private var makeupGain: Float = 1
-        private var wetMix: Float = 0
-        private var transformerDrive: Float = 1
-        private var transformerAsymmetry: Float = 0
-        private var transformerBiasOffset: Float = 0
-        private var transformerMakeupGain: Float = 1
-
-        init(sampleRate: Float, intensity: Float, body: Float, outputDb: Float) {
-            self.bassPole = RcLowPass(sampleRate: sampleRate, frequency: 72)
-            self.subPole = RcLowPass(sampleRate: sampleRate, frequency: 38)
-            update(DSPPrecompute.makeDSPSettings(
-                sampleRate: sampleRate,
-                intensity: intensity,
-                body: body,
-                outputDb: outputDb,
-                dspModel: .circuit
-            ))
-        }
-
-        func update(_ settings: LCDSPSettings) {
-            self.intensity = settings.intensity
-            self.body = settings.body
-            self.outputGain = settings.outputGain
-            self.virtualFeedbackGain = settings.virtualFeedbackGain
-            self.bodyInjectionGain = settings.bodyInjectionGain
-            self.headroomGain = settings.circuitHeadroomGain
-            self.makeupGain = settings.circuitMakeupGain
-            self.wetMix = settings.wetMix
-            self.transformerDrive = settings.transformerDrive
-            self.transformerAsymmetry = settings.transformerAsymmetry
-            self.transformerBiasOffset = settings.transformerBiasOffset
-            self.transformerMakeupGain = settings.transformerMakeupGain
-            bassShelf.update(settings.shelf)
-            preEmphasis.update(settings.transformerPreEmphasis)
-            deEmphasis.update(settings.transformerDeEmphasis)
-            bassPole.update(alpha: settings.bassAlpha)
-            subPole.update(alpha: settings.subAlpha)
-        }
-
-        func resetState() {
-            bassShelf.resetState()
-            preEmphasis.resetState()
-            deEmphasis.resetState()
-            bassPole.resetState()
-            subPole.resetState()
-        }
-
-        func process(_ input: Float) -> Float {
-            if intensity < 0.001 && body < 0.001 {
-                return input * outputGain
-            }
-
-            let bassShaped = bassShelf.process(input)
-            let bassNode = bassPole.process(input)
-            let subNode = subPole.process(input)
-            let shaped = bassShaped + subNode * bodyInjectionGain
-            let headroomShaped = shaped * headroomGain
-            let circuitInput = headroomShaped + bassNode * virtualFeedbackGain * headroomGain
-            let emphasized = preEmphasis.process(circuitInput)
-            let saturated = asymmetricSaturate(emphasized)
-            let deEmphasized = deEmphasis.process(saturated)
-            let blended = headroomShaped + (deEmphasized - headroomShaped) * wetMix
-            return fastClamp(softProtect(blended * makeupGain * outputGain))
-        }
-
-        private func asymmetricSaturate(_ input: Float) -> Float {
-            let driven = input * transformerDrive
-            let biased = driven + transformerAsymmetry
-            let clipped: Float
-
-            if biased > 1 {
-                clipped = 1
-            } else if biased < -1 {
-                clipped = -1
-            } else {
-                clipped = biased - (biased * biased * biased) * 0.33333334
-            }
-
-            return (clipped - transformerBiasOffset) * transformerMakeupGain
-        }
-
-        private func softProtect(_ input: Float) -> Float {
-            if !input.isFinite {
-                return 0
-            }
-
-            let magnitude = abs(input)
-            if magnitude <= 0.8 {
-                return input
-            }
-            if magnitude >= 1.2 {
-                return input < 0 ? -1 : 1
-            }
-
-            let t = (magnitude - 0.8) / 0.4
-            let curved = 0.8 + 0.2 * (2 * t - t * t)
-            return input < 0 ? -curved : curved
-        }
-
-        private func fastClamp(_ input: Float) -> Float {
-            if !input.isFinite {
-                return 0
-            }
-            if input > 1 {
-                return 1
-            }
-            if input < -1 {
-                return -1
-            }
-            return input
-        }
-    }
-
-    private let left: Channel
-    private let right: Channel
-
-    init(sampleRate: Float, intensity: Float, body: Float, outputDb: Float) {
-        left = Channel(sampleRate: sampleRate, intensity: intensity, body: body, outputDb: outputDb)
-        right = Channel(sampleRate: sampleRate, intensity: intensity, body: body, outputDb: outputDb)
-    }
-
-    func update(_ settings: LCDSPSettings) {
-        left.update(settings)
-        right.update(settings)
-    }
-
-    func resetState() {
-        left.resetState()
-        right.resetState()
-    }
-
-    func process(left inputLeft: Float, right inputRight: Float) -> (Float, Float) {
-        (left.process(inputLeft), right.process(inputRight))
-    }
-}
-
-final class HighExciterDSP {
-    private final class Channel {
-        private var highPass = Biquad()
-        private var stage1 = Oversampling2xStage()
-        private var stage2 = Oversampling2xStage()
-        private var drive: Float = 0
-        private var wetMix: Float = 0
-        private var oversampleFactor: UInt32 = 1
-        private var transitionSamplesRemaining: UInt32 = 0
-
-        func update(_ settings: LCDSPSettings) {
-            let nextFactor: UInt32
-            switch settings.exciterOversampleFactor {
-            case 4: nextFactor = 4
-            case 2: nextFactor = 2
-            default: nextFactor = 1
-            }
-            if oversampleFactor != nextFactor {
-                stage1.resetState()
-                stage2.resetState()
-                transitionSamplesRemaining = 256
-            }
-            highPass.update(settings.exciterHighPass)
-            stage1.update(settings.exciterStage1LowPass1, settings.exciterStage1LowPass2)
-            stage2.update(settings.exciterStage2LowPass1, settings.exciterStage2LowPass2)
-            drive = settings.exciterDrive
-            wetMix = settings.exciterWetMix
-            oversampleFactor = nextFactor
-        }
-
-        func resetState() {
-            highPass.resetState()
-            stage1.resetState()
-            stage2.resetState()
-        }
-
-        func process(_ input: Float) -> Float {
-            let dry = input.isFinite ? input : 0
-            if wetMix < 0.0001 || drive < 0.0001 {
-                return dry
-            }
-
-            let high = highPass.process(dry)
-            let harmonic: Float
-
-            switch oversampleFactor {
-            case 4:
-                var stage1First: Float = 0
-                var stage1Second: Float = 0
-                stage1.upsample(high, first: &stage1First, second: &stage1Second)
-
-                var sample0: Float = 0
-                var sample1: Float = 0
-                var sample2: Float = 0
-                var sample3: Float = 0
-                stage2.upsample(stage1First, first: &sample0, second: &sample1)
-                stage2.upsample(stage1Second, first: &sample2, second: &sample3)
-
-                let downsampled0 = stage2.downsample(
-                    makeHarmonic(sample0),
-                    makeHarmonic(sample1)
-                )
-                let downsampled1 = stage2.downsample(
-                    makeHarmonic(sample2),
-                    makeHarmonic(sample3)
-                )
-                harmonic = stage1.downsample(downsampled0, downsampled1)
-            case 2:
-                var first: Float = 0
-                var second: Float = 0
-                stage1.upsample(high, first: &first, second: &second)
-                harmonic = stage1.downsample(makeHarmonic(first), makeHarmonic(second))
-            default:
-                harmonic = makeHarmonic(high)
-            }
-
-            var transitionGain: Float = 1
-            if transitionSamplesRemaining > 0 {
-                transitionGain = Float(256 - transitionSamplesRemaining) / 256
-                transitionSamplesRemaining -= 1
-            }
-            return fastClamp(dry + harmonic * wetMix * transitionGain)
-        }
-
-        private func makeHarmonic(_ input: Float) -> Float {
-            let driven = input * drive
-            let driven2 = driven * driven
-            return driven2 + driven2 * driven * 0.5
-        }
-
-        private func fastClamp(_ input: Float) -> Float {
-            if !input.isFinite {
-                return 0
-            }
-            if input > 1 {
-                return 1
-            }
-            if input < -1 {
-                return -1
-            }
-            return input
-        }
-    }
-
-    private let left = Channel()
-    private let right = Channel()
-
-    init(sampleRate: Float,
-         intensity: Float,
-         body: Float,
-         outputDb: Float,
-         dspModel: Settings.DSPModel,
-         exciterOversamplingMode: ExciterOversamplingMode = .auto) {
-        update(DSPPrecompute.makeDSPSettings(
-            sampleRate: sampleRate,
-            intensity: intensity,
-            body: body,
-            outputDb: outputDb,
-            dspModel: dspModel,
-            exciterOversamplingMode: exciterOversamplingMode
-        ))
-    }
-
-    func update(_ settings: LCDSPSettings) {
-        left.update(settings)
-        right.update(settings)
-    }
-
-    func resetState() {
-        left.resetState()
-        right.resetState()
-    }
-
-    func process(left inputLeft: Float, right inputRight: Float) -> (Float, Float) {
-        (left.process(inputLeft), right.process(inputRight))
-    }
-}
-
-private final class DelayLine {
-    private var buffer: [Float]
-    private var writeIndex = 0
-
-    init(capacity: Int) {
-        buffer = Array(repeating: 0, count: max(capacity, 32))
-    }
-
-    func process(_ input: Float, delaySamples: Int) -> Float {
-        let delay = min(max(delaySamples, 0), buffer.count - 1)
-        let readIndex = (writeIndex - delay + buffer.count) % buffer.count
-        let output = buffer[readIndex]
-        buffer[writeIndex] = input
-        writeIndex = (writeIndex + 1) % buffer.count
-        return output
-    }
-
-    func reset() {
-        for index in buffer.indices {
-            buffer[index] = 0
-        }
-        writeIndex = 0
-    }
-}
-
-private final class Spatializer {
-    private struct Path {
-        var delaySamples: Int = 0
-        var gain: Float = 1
-    }
-
-    private let leftToLeft = DelayLine(capacity: 2048)
-    private let leftToRight = DelayLine(capacity: 2048)
-    private let rightToLeft = DelayLine(capacity: 2048)
-    private let rightToRight = DelayLine(capacity: 2048)
-    private var enabled = true
-    private var amount: Float = 0
-    private var ll = Path()
-    private var lr = Path()
-    private var rl = Path()
-    private var rr = Path()
-
-    init(sampleRate: Float, settings: SpatialSettings) {
-        update(DSPPrecompute.makeSpatialSettings(sampleRate: sampleRate, settings: settings))
-    }
-
-    func update(_ settings: LCSpatialSettings) {
-        enabled = settings.enabled != 0
-        amount = settings.amount
-        ll = Path(delaySamples: Int(settings.ll.delaySamples), gain: settings.ll.gain)
-        lr = Path(delaySamples: Int(settings.lr.delaySamples), gain: settings.lr.gain)
-        rl = Path(delaySamples: Int(settings.rl.delaySamples), gain: settings.rl.gain)
-        rr = Path(delaySamples: Int(settings.rr.delaySamples), gain: settings.rr.gain)
-    }
-
-    func resetState() {
-        leftToLeft.reset()
-        leftToRight.reset()
-        rightToLeft.reset()
-        rightToRight.reset()
-    }
-
-    func process(left: Float, right: Float) -> (Float, Float) {
-        guard enabled, amount > 0.001 else {
-            return (left, right)
-        }
-
-        let wetLeft =
-            leftToLeft.process(left, delaySamples: ll.delaySamples) * ll.gain +
-            rightToLeft.process(right, delaySamples: rl.delaySamples) * rl.gain
-        let wetRight =
-            rightToRight.process(right, delaySamples: rr.delaySamples) * rr.gain +
-            leftToRight.process(left, delaySamples: lr.delaySamples) * lr.gain
-
-        let trim: Float = 0.82
-        let outLeft = left * (1 - amount) + wetLeft * trim * amount
-        let outRight = right * (1 - amount) + wetRight * trim * amount
-        return (tanh(outLeft * 1.02) / 1.02, tanh(outRight * 1.02) / 1.02)
-    }
-}
-
-// Lock-protected optional Double shared between queues during a rate change.
-private final class RateBox {
-    private let lock = NSLock()
-    private var value: Double?
-
-    func set(_ rate: Double) {
-        lock.lock()
-        value = rate
-        lock.unlock()
-    }
-
-    func get() -> Double? {
-        lock.lock()
-        defer { lock.unlock() }
-        return value
-    }
-}
-
-final class HardwareSampleRateTracker {
-    struct RateCapabilities {
-        let supportedRates: [Double]
-        let isSettable: Bool
-    }
-
-    private static let standardSampleRates: [Double] = [
-        8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000,
-        44_100, 48_000, 88_200, 96_000, 176_400, 192_000,
-        352_800, 384_000, 705_600, 768_000
-    ]
-
-    private let queue: DispatchQueue
-    private let onChange: (AudioObjectID, Double) -> Void
-    private var outputDeviceID = AudioObjectID(kAudioObjectUnknown)
-    private var defaultOutputListener: AudioObjectPropertyListenerBlock?
-    private var sampleRateListener: AudioObjectPropertyListenerBlock?
-    private var isStarted = false
-
-    // Core Audio's listener must run on a queue other than `queue`, because
-    // `queue` (= the audio manager queue) is blocked by the transition itself
-    // during `performRateTransition`. Without a separate queue the listener
-    // could not fire and the transition would deadlock on the semaphore.
-    private let listenerQueue = DispatchQueue(label: "lowend.hardware-tracker.listener")
-    private let confirmationLock = NSLock()
-    private var confirmRateChange: ((Double) -> Void)?
-
-    init(queue: DispatchQueue, onChange: @escaping (AudioObjectID, Double) -> Void) {
-        self.queue = queue
-        self.onChange = onChange
-    }
-
-    deinit {
-        stop()
-    }
-
-    func start() throws {
-        guard !isStarted else { return }
-
-        let defaultListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.handleDefaultOutputChanged()
-        }
-        defaultOutputListener = defaultListener
-
-        var address = Self.defaultOutputDeviceAddress()
-        try check(
-            AudioObjectAddPropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                queue,
-                defaultListener
-            ),
-            "AudioObjectAddPropertyListenerBlock DefaultOutputDevice"
-        )
-
-        isStarted = true
-        do {
-            try refreshOutputDevice(forceNotify: true)
-        } catch {
-            stop()
-            throw error
-        }
-    }
-
-    func stop() {
-        removeSampleRateListener()
-
-        if let defaultOutputListener {
-            var address = Self.defaultOutputDeviceAddress()
-            AudioObjectRemovePropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                queue,
-                defaultOutputListener
-            )
-            self.defaultOutputListener = nil
-        }
-
-        isStarted = false
-    }
-
-    private func handleDefaultOutputChanged() {
-        do {
-            try refreshOutputDevice(forceNotify: true)
-        } catch {
-            fputs("Default output change handling failed: \(error)\n", stderr)
-        }
-    }
-
-    private func handleSampleRateChanged(registeredDeviceID: AudioObjectID) {
-        do {
-            confirmationLock.lock()
-            let currentDeviceID = outputDeviceID
-            confirmationLock.unlock()
-            // Reject stale callbacks queued for the previously-registered device.
-            guard currentDeviceID == registeredDeviceID else { return }
-            let deviceID = currentDeviceID
-            guard deviceID != kAudioObjectUnknown else { return }
-            let rate = try Self.nominalSampleRate(for: deviceID)
-            confirmationLock.lock()
-            let confirm = confirmRateChange
-            confirmRateChange = nil
-            confirmationLock.unlock()
-            confirm?(rate)
-            // `onChange` must run on the audio manager queue to preserve the
-            // invariant that hardware state observers see consistent ordering
-            // with other manager-queue work.
-            queue.async { [weak self] in
-                self?.onChange(deviceID, rate)
-            }
-        } catch {
-            fputs("Sample rate change handling failed: \(error)\n", stderr)
-        }
-    }
-
-    private func refreshOutputDevice(forceNotify: Bool) throws {
-        let newDeviceID = try Self.defaultOutputDevice()
-        confirmationLock.lock()
-        let previousDeviceID = outputDeviceID
-        confirmationLock.unlock()
-        let deviceChanged = newDeviceID != previousDeviceID
-
-        if deviceChanged {
-            removeSampleRateListener()
-            confirmationLock.lock()
-            outputDeviceID = newDeviceID
-            confirmationLock.unlock()
-            try installSampleRateListener(for: newDeviceID)
-        }
-
-        if forceNotify || deviceChanged {
-            onChange(newDeviceID, try Self.nominalSampleRate(for: newDeviceID))
-        }
-    }
-
-    private func installSampleRateListener(for deviceID: AudioObjectID) throws {
-        guard deviceID != kAudioObjectUnknown else { return }
-
-        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.handleSampleRateChanged(registeredDeviceID: deviceID)
-        }
-        sampleRateListener = listener
-
-        var address = Self.nominalSampleRateAddress()
-        try check(
-            AudioObjectAddPropertyListenerBlock(deviceID, &address, listenerQueue, listener),
-            "AudioObjectAddPropertyListenerBlock NominalSampleRate"
-        )
-    }
-
-    private func removeSampleRateListener() {
-        confirmationLock.lock()
-        let deviceID = outputDeviceID
-        confirmationLock.unlock()
-        guard deviceID != kAudioObjectUnknown, let sampleRateListener else { return }
-        var address = Self.nominalSampleRateAddress()
-        AudioObjectRemovePropertyListenerBlock(deviceID, &address, listenerQueue, sampleRateListener)
-        self.sampleRateListener = nil
-    }
-
-    static func defaultOutputDevice() throws -> AudioObjectID {
-        var deviceID = AudioObjectID(kAudioObjectUnknown)
-        var dataSize = UInt32(MemoryLayout<AudioObjectID>.size)
-        var address = defaultOutputDeviceAddress()
-        try check(
-            AudioObjectGetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                0,
-                nil,
-                &dataSize,
-                &deviceID
-            ),
-            "AudioObjectGetPropertyData DefaultOutputDevice"
-        )
-        return deviceID
-    }
-
-    static func nominalSampleRate(for deviceID: AudioObjectID) throws -> Double {
-        guard deviceID != kAudioObjectUnknown else {
-            throw AppError.message("Default output device is unknown.")
-        }
-
-        var sampleRate = Float64(0)
-        var dataSize = UInt32(MemoryLayout<Float64>.size)
-        var address = nominalSampleRateAddress()
-        try check(
-            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &sampleRate),
-            "AudioObjectGetPropertyData NominalSampleRate"
-        )
-        return Double(sampleRate)
-    }
-
-    /// Best-effort device display name. Runs on the caller's (non-audio) thread;
-    /// returns "—" when the device is unknown or the property cannot be read.
-    /// Used by the read-only Diagnostics panel to label the current output device.
-    static func deviceName(for deviceID: AudioObjectID) -> String {
-        guard deviceID != kAudioObjectUnknown else { return "—" }
-        var name: CFString = "" as CFString
-        var dataSize = UInt32(MemoryLayout<CFString>.size)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioObjectPropertyName,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let status = withUnsafeMutablePointer(to: &name) { ptr in
-            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, ptr)
-        }
-        return status == noErr ? (name as String) : "—"
-    }
-
-    static func setNominalSampleRate(_ sampleRate: Double, for deviceID: AudioObjectID) throws {
-        guard deviceID != kAudioObjectUnknown else {
-            throw AppError.message("Audio device is unknown.")
-        }
-
-        var value = Float64(sampleRate)
-        var address = nominalSampleRateAddress()
-        try check(
-            AudioObjectSetPropertyData(
-                deviceID,
-                &address,
-                0,
-                nil,
-                UInt32(MemoryLayout<Float64>.size),
-                &value
-            ),
-            "AudioObjectSetPropertyData NominalSampleRate"
-        )
-    }
-
-    func requestRateChange(_ sampleRate: Double,
-                           for deviceID: AudioObjectID,
-                           onChange: @escaping (Double) -> Void) throws {
-        confirmationLock.lock()
-        confirmRateChange = onChange
-        confirmationLock.unlock()
-        do {
-            try Self.setNominalSampleRate(sampleRate, for: deviceID)
-        } catch {
-            cancelRateChangeConfirmation()
-            throw error
-        }
-    }
-
-    func cancelRateChangeConfirmation() {
-        confirmationLock.lock()
-        confirmRateChange = nil
-        confirmationLock.unlock()
-    }
-
-    static func rateCapabilities(for deviceID: AudioObjectID) throws -> RateCapabilities {
-        guard deviceID != kAudioObjectUnknown else {
-            throw AppError.message("Audio device is unknown.")
-        }
-
-        var address = availableNominalSampleRatesAddress()
-        var dataSize: UInt32 = 0
-        try check(
-            AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &dataSize),
-            "AudioObjectGetPropertyDataSize AvailableNominalSampleRates"
-        )
-
-        let count = Int(dataSize) / MemoryLayout<AudioValueRange>.stride
-        var ranges = Array(
-            repeating: AudioValueRange(mMinimum: 0, mMaximum: 0),
-            count: count
-        )
-        if count > 0 {
-            try ranges.withUnsafeMutableBytes { bytes in
-                guard let baseAddress = bytes.baseAddress else {
-                    throw AppError.message("Available sample-rate storage is unavailable.")
-                }
-                try check(
-                    AudioObjectGetPropertyData(
-                        deviceID,
-                        &address,
-                        0,
-                        nil,
-                        &dataSize,
-                        baseAddress
-                    ),
-                    "AudioObjectGetPropertyData AvailableNominalSampleRates"
-                )
-            }
-        }
-
-        var settable = DarwinBoolean(false)
-        var nominalAddress = nominalSampleRateAddress()
-        try check(
-            AudioObjectIsPropertySettable(deviceID, &nominalAddress, &settable),
-            "AudioObjectIsPropertySettable NominalSampleRate"
-        )
-
-        let supportedRates = standardSampleRates.filter { rate in
-            ranges.contains { range in
-                rate >= Double(range.mMinimum) - 0.5
-                    && rate <= Double(range.mMaximum) + 0.5
-            }
-        }
-        return RateCapabilities(
-            supportedRates: supportedRates,
-            isSettable: settable.boolValue
-        )
-    }
-
-    private static func defaultOutputDeviceAddress() -> AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-    }
-
-    private static func nominalSampleRateAddress() -> AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-    }
-
-    private static func availableNominalSampleRatesAddress() -> AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyAvailableNominalSampleRates,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-    }
-}
-
-@available(macOS 14.4, *)
-private final class SystemAudioProcessor: @unchecked Sendable {
-    private struct AudioProcessInfo {
-        let objectID: AudioObjectID
-        let pid: pid_t
-        let bundleID: String
-        let isRunningOutput: Bool
-    }
-
-    private let settings: Settings
-    private let ringBuffer: LockFreeFloatRingBuffer
-    private let visualizerRingBuffer: LockFreeFloatRingBuffer
-    private let outputGainRamp: OpaquePointer
-    private let controlQueue: LockFreeControlEventQueue
-    private let scratchFrameCapacity = 8192
-    private let inputScratch: UnsafeMutablePointer<Float>
-    /// Output-conditioning scratch. `processLive` writes its (possibly 2×)
-    /// result here so the live path is never in-place — a rate-changing output
-    /// cannot overwrite its own input. Sized for the 2× interleaved-stereo case
-    /// (`scratchFrameCapacity * 2 * 2`); allocated once, reused every callback.
-    private let conditioningOutputScratch: UnsafeMutablePointer<Float>
-    private let managerQueue = DispatchQueue(label: "com.codexaudiolab.lowendcircuit.audio-manager")
-    private var engine = AVAudioEngine()
-    private var sourceNode: AVAudioSourceNode?
-    private var hardwareTracker: HardwareSampleRateTracker?
-    private var tapFormatListener: AudioObjectPropertyListenerBlock?
-    private var currentOutputDeviceID: AudioObjectID
-    private var currentHardwareSampleRate: Double
-    private var currentTapSampleRate: Double
-    private var currentSampleRate: Double
-    /// Live PCM 2× oversampling. When active, the output device runs at 2× the
-    /// capture (tap) rate while the aggregate/tap stays at the source rate, and
-    /// `ResamplingOutputConditioningEngine.processLive` polyphase-upsamples the
-    /// captured signal 2× before it reaches the output ring buffer. Off by
-    /// default; activating it is a device-rate negotiation that runs on the
-    /// manager queue (never inside the audio callback).
-    private var livePCM2xActive = false
-    private var livePCM2xOutputRate: Double = 0
-    /// Hardware rate/device captured before activating 2×, used to restore PCM
-    /// bypass on disable or on negotiation failure. nil while 2× is not active.
-    private var preLivePCM2xHardwareRate: Double?
-    private var preLivePCM2xDeviceID = AudioObjectID(kAudioObjectUnknown)
-    private var tapID = AudioObjectID(kAudioObjectUnknown)
-    private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
-    private var ioProcID: AudioDeviceIOProcID?
-    private let circuitDSP: VirtualCircuitBassDSP
-    private let exciterDSP: HighExciterDSP
-    private var activeDSPModelID: UInt32
-    private let spatializer: Spatializer
-    /// Independent output-conditioning layer (oversampling / dither / experimental
-    /// DSD-DoP). Lives between the tonal DSP and the output ring buffer; defaults
-    /// to identity bypass on the live path. See ResamplingOutputConditioningEngine.
-    private let conditioningEngine: ResamplingOutputConditioningEngine
-    private var currentIntensity: Float
-    private var currentBody: Float
-    private var currentOutputDb: Float
-    private var currentDSPModel: Settings.DSPModel
-    private var currentExciterOversamplingMode: ExciterOversamplingMode
-    private var automaticRateMatchingEnabled: Bool
-    private var rateMatchGate = SourceRateMatchStabilityGate()
-    private var rateMatchSessionDisabled = false
-    private var isAutomaticRateTransition = false
-    private var originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
-    private var originalRateMatchSampleRate: Double?
-    private var rateMatchStatus = "자동 꺼짐"
-    private var rateMatchPhase: RateMatchPhase = .idle
-    private var rateMatchTransitionID: UInt64 = 0
-    private var rateMatchActiveTransitionID: UInt64 = 0
-    private var rateMatchLastTransitionAt: Date?
-    private var rateMatchLastSourceRate: Double?
-    private var rateMatchLastTargetRate: Double?
-    private var rateMatchCooldownUntil: Date = .distantPast
-    private let rateMatchCooldownInterval: TimeInterval = 2.0
-    private var ringWrittenAtTransitionStart: UInt64 = 0
-    private var ringReadAtTransitionStart: UInt64 = 0
-    private var currentSpatialSettings: SpatialSettings
-    private var currentCaptureTargetSummary = "전체 시스템"
-    private var engineRestartCount: UInt64 = 0
-    private var isStarted = false
-
-    var captureTargetSummary: String {
-        managerQueue.sync { currentCaptureTargetSummary }
-    }
-
-    /// Current output device ID, read off the audio thread. Used by the
-    /// read-only Diagnostics panel (mirrors `captureTargetSummary` / the
-    /// `diagnosticsSnapshot()` managerQueue.sync pattern).
-    var outputDeviceID: AudioObjectID {
-        managerQueue.sync { currentOutputDeviceID }
-    }
-
-    func diagnosticsSnapshot() -> AudioDiagnosticsSnapshot {
-        let managerState = managerQueue.sync {
-            (engineRestartCount, currentCaptureTargetSummary)
-        }
-        return AudioDiagnosticsSnapshot(
-            outputUnderrunSamples: ringBuffer.underrunSamples(),
-            outputDroppedSamples: ringBuffer.droppedWriteSamples(),
-            visualizerDroppedSamples: visualizerRingBuffer.droppedWriteSamples(),
-            engineRestartCount: managerState.0,
-            captureTarget: managerState.1
-        )
-    }
-
-    init(settings: Settings) throws {
-        let outputDeviceID = try HardwareSampleRateTracker.defaultOutputDevice()
-        let detectedSampleRate = try HardwareSampleRateTracker.nominalSampleRate(for: outputDeviceID)
-        let sampleRate = Self.validSampleRate(detectedSampleRate)
-
-        self.settings = settings
-        self.currentOutputDeviceID = outputDeviceID
-        self.currentHardwareSampleRate = sampleRate
-        self.currentTapSampleRate = sampleRate
-        self.currentSampleRate = sampleRate
-        self.currentIntensity = settings.intensity
-        self.currentBody = settings.body
-        self.currentOutputDb = settings.outputDb
-        self.currentDSPModel = settings.dspModel
-        self.currentExciterOversamplingMode = settings.exciterOversamplingMode
-        self.automaticRateMatchingEnabled = settings.automaticRateMatchingEnabled
-        self.rateMatchStatus = settings.automaticRateMatchingEnabled
-            ? "자동 켜짐: 소스 안정화 대기"
-            : "자동 꺼짐"
-        self.currentSpatialSettings = settings.spatial
-        self.ringBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)) * 4, channels: 2)
-        self.visualizerRingBuffer = try LockFreeFloatRingBuffer(capacityFrames: Int(max(sampleRate, 48_000)), channels: 2)
-        self.controlQueue = try LockFreeControlEventQueue(sampleRate: Float(sampleRate))
-        self.inputScratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrameCapacity * 2)
-        self.conditioningOutputScratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchFrameCapacity * 2 * 2)
-        inputScratch.initialize(repeating: 0, count: scratchFrameCapacity * 2)
-        conditioningOutputScratch.initialize(repeating: 0, count: scratchFrameCapacity * 2 * 2)
-        self.circuitDSP = VirtualCircuitBassDSP(
-            sampleRate: Float(sampleRate),
-            intensity: settings.intensity,
-            body: settings.body,
-            outputDb: settings.outputDb
-        )
-        self.exciterDSP = HighExciterDSP(
-            sampleRate: Float(sampleRate),
-            intensity: settings.intensity,
-            body: settings.body,
-            outputDb: settings.outputDb,
-            dspModel: settings.dspModel,
-            exciterOversamplingMode: settings.exciterOversamplingMode
-        )
-        self.activeDSPModelID = settings.dspModel.controlID
-        self.spatializer = Spatializer(sampleRate: Float(sampleRate), settings: settings.spatial)
-        self.conditioningEngine = ResamplingOutputConditioningEngine(maxInputFrames: scratchFrameCapacity)
-        guard let outputGainRamp = lc_output_gain_ramp_create(1) else {
-            inputScratch.deallocate()
-            throw AppError.message("Could not allocate the output gain ramp.")
-        }
-        self.outputGainRamp = outputGainRamp
-    }
-
-    deinit {
-        stop()
-        lc_output_gain_ramp_destroy(outputGainRamp)
-        inputScratch.deallocate()
-        conditioningOutputScratch.deallocate()
-    }
-
-    func start() throws {
-        try managerQueue.sync {
-            guard !isStarted else { return }
-            isStarted = true
-            try createProcessTapAndAggregateDevice()
-            currentSampleRate = syncAggregateSampleRate(preferredSampleRate: currentHardwareSampleRate)
-            refreshTapSampleRate()
-            controlQueue.updateSampleRate(Float(currentTapSampleRate))
-            applyCurrentSettingsDirectly()
-            try startOutput(sampleRate: currentSampleRate)
-            try startCapture()
-            hardwareTracker = HardwareSampleRateTracker(queue: managerQueue) { [weak self] deviceID, sampleRate in
-                self?.handleHardwareFormatChange(deviceID: deviceID, sampleRate: sampleRate)
-            }
-            try hardwareTracker?.start()
-            publishFormatStatus()
-        }
-        print("Audio format: \(managerQueue.sync { makeFormatStatus().indicatorText })")
-        print("Capture target: \(captureTargetSummary)")
-        print("LowEnd system audio processing is running. Press Ctrl-C to stop.")
-    }
-
-    func updateDSP(intensity: Float,
-                   body: Float,
-                   outputDb: Float,
-                   dspModel: Settings.DSPModel,
-                   exciterOversamplingMode: ExciterOversamplingMode) {
-        managerQueue.async { [weak self] in
-            guard let self else { return }
-            currentIntensity = intensity
-            currentBody = body
-            currentOutputDb = outputDb
-            currentDSPModel = dspModel
-            currentExciterOversamplingMode = exciterOversamplingMode
-            controlQueue.pushDSP(
-                intensity: intensity,
-                body: body,
-                outputDb: outputDb,
-                dspModel: dspModel,
-                exciterOversamplingMode: exciterOversamplingMode
-            )
-        }
-    }
-
-    func updateSpatial(_ settings: SpatialSettings) {
-        managerQueue.async { [weak self] in
-            guard let self else { return }
-            currentSpatialSettings = settings
-            controlQueue.pushSpatial(settings)
-        }
-    }
-
-    /// Push output-conditioning parameters, after first performing any device-
-    /// rate negotiation the parameters require. Live PCM 2× (enabled +
-    /// pcmOversampling + 2×) switches the output device to 2× the capture rate;
-    /// every other configuration restores PCM bypass. The negotiation runs on
-    /// the manager queue (never inside the audio callback); the engine only
-    /// receives its snapshot once the device rate has settled — or, on an
-    /// unsupported device/rate or a failed transition, after falling back to a
-    /// bypass snapshot so it never upsamples into a device still running at 1×.
-    func updateOutputConditioning(_ parameters: OutputConditioningParameters) {
-        managerQueue.async { [weak self] in
-            guard let self else { return }
-            self.applyLivePCM2xState(for: parameters)
-        }
-    }
-
-    /// Whether the output device can actually run live PCM 2× for the current
-    /// capture (tap) rate. Queries the device off the audio thread.
-    private func canDeviceRunLivePCM2x(tapRate: Double) -> Bool {
-        guard let capabilities = try? HardwareSampleRateTracker.rateCapabilities(for: currentOutputDeviceID) else {
-            return false
-        }
-        let capability = OutputConditioningCapability(
-            supportedCarriers: [:],
-            supportsWideCarrierBitDepth: true,
-            supportedRates: capabilities.supportedRates,
-            isRateSettable: capabilities.isSettable,
-            deviceID: currentOutputDeviceID
-        )
-        return capability.canAttemptLivePCM2x(tapRate: tapRate)
-    }
-
-    /// Decide whether the parameters activate live PCM 2×, then negotiate the
-    /// device rate (or restore bypass) accordingly.
-    private func applyLivePCM2xState(for parameters: OutputConditioningParameters) {
-        let requested = isStarted
-            && parameters.isEnabled
-            && parameters.outputMode == .pcmOversampling
-            && parameters.oversamplingFactor == 2
-
-        if requested {
-            activateLivePCM2x(parameters: parameters)
-        } else {
-            deactivateLivePCM2x(parameters: parameters)
-        }
-    }
-
-    /// Returns a bypass snapshot (same params, mode forced to bypass) used when
-    /// the device/rate cannot run 2× — the live path must stay a PCM identity.
-    private func bypassConditioning(from parameters: OutputConditioningParameters) -> OutputConditioningParameters {
-        var bypass = parameters
-        bypass.outputMode = .bypass
-        return bypass
-    }
-
-    private func activateLivePCM2x(parameters: OutputConditioningParameters) {
-        if livePCM2xActive {
-            controlQueue.pushConditioning(parameters)
-            return
-        }
-        guard isStarted else {
-            controlQueue.pushConditioning(parameters)
-            return
-        }
-        // Live 2× and automatic rate matching both change the output device
-        // rate and cannot coexist; rate matching yields to the explicit 2× mode.
-        if automaticRateMatchingEnabled {
-            automaticRateMatchingEnabled = false
-            try? restoreOriginalRateMatchIfNeeded()
-        }
-
-        let tapRate = currentTapSampleRate
-        guard tapRate > 1,
-              let target = OutputConditioningCapability.livePCM2xTargetRate(forTapRate: tapRate),
-              canDeviceRunLivePCM2x(tapRate: tapRate) else {
-            fputs("[Live2x] fallback (unsupported): tap=\(Self.rateText(tapRate)) device=\(currentOutputDeviceID)\n", stderr)
-            controlQueue.pushConditioning(bypassConditioning(from: parameters))
-            publishLivePCM2xStatus(active: false,
-                                   fallbackReason: "이 장치/샘플레이트에서는 2× 출력을 지원하지 않아 PCM으로 출력됩니다.")
-            return
-        }
-        do {
-            try performLivePCM2xTransition(tapRate: tapRate, outputRate: target, parameters: parameters)
-            livePCM2xActive = true
-            livePCM2xOutputRate = target
-            fputs("[Live2x] activated: tap \(Self.rateText(tapRate)) → output \(Self.rateText(target)) on device \(currentOutputDeviceID)\n", stderr)
-            publishLivePCM2xStatus(active: true, fallbackReason: nil)
-        } catch {
-            // The transition already rolled the device back to 1×. Clear the
-            // saved pre-2× snapshot so a later device/rate change (or a future
-            // 2× session) does not restore a stale rate from this failed attempt.
-            preLivePCM2xHardwareRate = nil
-            preLivePCM2xDeviceID = kAudioObjectUnknown
-            livePCM2xOutputRate = 0
-            controlQueue.pushConditioning(bypassConditioning(from: parameters))
-            publishLivePCM2xStatus(active: false,
-                                   fallbackReason: "2× 전환 실패(\(error.localizedDescription)): PCM으로 출력됩니다.")
-        }
-    }
-
-    private func deactivateLivePCM2x(parameters: OutputConditioningParameters) {
-        guard livePCM2xActive else {
-            controlQueue.pushConditioning(parameters)
-            return
-        }
-        // Drop the engine to bypass BEFORE rebuilding the 1× graph. performRate-
-        // Transition suspends (stops) the graph before rebuilding, so no audio
-        // callback is running here — setting the engine directly is race-free and
-        // guarantees the restarted callbacks never write doubled-rate frames into
-        // the 1× ring buffer during the restart window.
-        conditioningEngine.updateSettings(bypassConditioning(from: parameters))
-        // Restore the pre-2× hardware rate/device via the proven rate-match
-        // transition (aggregate + output at the same rate again).
-        if let rate = preLivePCM2xHardwareRate,
-           preLivePCM2xDeviceID != kAudioObjectUnknown,
-           abs(rate - currentHardwareSampleRate) > 1 {
-            rateMatchTransitionID &+= 1
-            do {
-                try performRateTransition(
-                    to: rate,
-                    successStatus: "2× 해제: \(Self.rateText(rate))",
-                    transitionID: rateMatchTransitionID
-                )
-            } catch {
-                let recoveryRate = (try? HardwareSampleRateTracker.nominalSampleRate(for: currentOutputDeviceID)) ?? rate
-                try? restartForHardwareFormat(
-                    deviceID: currentOutputDeviceID,
-                    hardwareSampleRate: Self.validSampleRate(recoveryRate)
-                )
-                _ = waitForAudioFlowRecovery(timeout: 0.75)
-            }
-        }
-        livePCM2xActive = false
-        livePCM2xOutputRate = 0
-        preLivePCM2xHardwareRate = nil
-        preLivePCM2xDeviceID = kAudioObjectUnknown
-        controlQueue.pushConditioning(parameters)
-        fputs("[Live2x] deactivated → \(Self.rateText(currentHardwareSampleRate))\n", stderr)
-        publishLivePCM2xStatus(active: false, fallbackReason: nil)
-    }
-
-    /// Device-rate negotiation for live PCM 2×: fade out, suspend, switch the
-    /// output DAC to `outputRate`, reconfigure with the aggregate/tap held at
-    /// `tapRate` and the output graph at `outputRate`, recover flow, fade in.
-    /// Mirrors `performRateTransition`'s safety shape but keeps the tap at 1×
-    /// while the output runs at 2×. On any failure it restores the pre-2× rate.
-    private func performLivePCM2xTransition(tapRate: Double, outputRate: Double,
-                                            parameters: OutputConditioningParameters) throws {
-        guard !isAutomaticRateTransition else { return }
-        isAutomaticRateTransition = true
-        defer { isAutomaticRateTransition = false }
-
-        if preLivePCM2xHardwareRate == nil {
-            preLivePCM2xHardwareRate = currentHardwareSampleRate
-            preLivePCM2xDeviceID = currentOutputDeviceID
-        }
-
-        requestOutputGain(0, duration: 0.05)
-        waitForOutputGain(atMost: 0.001, timeout: 0.25)
-
-        suspendForHardwareReconfigure()
-
-        do {
-            if let tracker = hardwareTracker {
-                let semaphore = DispatchSemaphore(value: 0)
-                let confirmedBox = RateBox()
-                try tracker.requestRateChange(outputRate, for: currentOutputDeviceID) { rate in
-                    confirmedBox.set(rate)
-                    semaphore.signal()
-                }
-                defer { hardwareTracker?.cancelRateChangeConfirmation() }
-                let confirmed = try waitForNominalSampleRate(
-                    outputRate,
-                    deviceID: currentOutputDeviceID,
-                    semaphore: semaphore,
-                    confirmedRate: { confirmedBox.get() }
-                )
-                currentHardwareSampleRate = confirmed
-                try restartForLivePCM2x(tapRate: tapRate, outputRate: confirmed, parameters: parameters)
-            } else {
-                try HardwareSampleRateTracker.setNominalSampleRate(outputRate, for: currentOutputDeviceID)
-                currentHardwareSampleRate = outputRate
-                try restartForLivePCM2x(tapRate: tapRate, outputRate: outputRate, parameters: parameters)
-            }
-            ringWrittenAtTransitionStart = ringBuffer.totalWrittenSamples()
-            ringReadAtTransitionStart = ringBuffer.totalReadSamples()
-            let recovered = waitForAudioFlowRecovery(timeout: 0.5)
-            if !recovered {
-                throw AppError.message("2× 전환 후 캡처/출력 흐름이 회복되지 않았습니다.")
-            }
-            requestOutputGain(1, duration: 0.08)
-            guard waitForOutputGain(atLeast: 0.99, timeout: 0.5) else {
-                throw AppError.message("2× 전환 후 출력 게인이 회복되지 않았습니다.")
-            }
-            publishFormatStatus()
-        } catch {
-            // Roll back UNCONDITIONALLY. A late failure (flow recovery or fade-in
-            // timeout) can happen AFTER restartForLivePCM2x already started the
-            // 2× graph (engine running), and the caller will then enqueue a bypass
-            // snapshot. We must restore the output device's nominal rate AND
-            // reconfigure the engine/aggregate/output at the pre-2× 1× rate so the
-            // device and the (bypass) engine agree — otherwise a 1× producer feeds
-            // a 2× output device and the audio plays at half speed.
-            if let rate = preLivePCM2xHardwareRate {
-                try? HardwareSampleRateTracker.setNominalSampleRate(rate, for: currentOutputDeviceID)
-                currentHardwareSampleRate = rate
-            }
-            engine.stop()
-            let recoveryRate = preLivePCM2xHardwareRate ?? currentHardwareSampleRate
-            try? restartForHardwareFormat(
-                deviceID: currentOutputDeviceID,
-                hardwareSampleRate: Self.validSampleRate(recoveryRate)
-            )
-            _ = waitForAudioFlowRecovery(timeout: 0.75)
-            requestOutputGain(1, duration: 0.08)
-            throw error
-        }
-    }
-
-    /// Reconfigure for live PCM 2×: the aggregate (tap) stays at the source rate
-    /// so the tap captures the 1× signal, while the output graph runs at 2×.
-    /// `currentSampleRate` (output rate) and `currentTapSampleRate` (capture
-    /// rate) therefore differ while 2× is active — the tonal DSP and the ring-
-    /// buffer push both key off the capture rate, and `processLive` doubles it.
-    private func restartForLivePCM2x(tapRate: Double, outputRate: Double,
-                                     parameters: OutputConditioningParameters) throws {
-        try createProcessTapAndAggregateDevice()
-        // Aggregate/tap at the source rate (1× capture).
-        _ = syncAggregateSampleRate(preferredSampleRate: tapRate)
-        refreshTapSampleRate()
-        // Output device/graph at 2×.
-        currentSampleRate = outputRate
-        controlQueue.updateSampleRate(Float(currentTapSampleRate))
-        applyCurrentSettingsDirectly()
-
-        do {
-            replaceOutputEngine()
-            try configureOutputGraph(sampleRate: currentSampleRate)
-            // Push the 2× conditioning snapshot BEFORE capture starts so the first
-            // audio callback drains it: the engine enters 2× mode the instant the
-            // output graph begins running at 2× — device rate and engine state
-            // switch together, with no bypass-into-2× gap or underrun.
-            controlQueue.pushConditioning(parameters)
-            try engine.start()
-            try startCapture()
-        } catch {
-            engine.stop()
-            stopCaptureAndDestroyAggregateDevice()
-            destroyProcessTap()
-            throw error
-        }
-        publishFormatStatus()
-    }
-
-    /// Publish live PCM 2× activation / fallback state to the UI. Runs on the
-    /// manager queue; hops to main for the notification.
-    private func publishLivePCM2xStatus(active: Bool, fallbackReason: String?) {
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(
-                name: AudioFormatNotifications.didChange,
-                object: nil,
-                userInfo: [
-                    AudioFormatNotifications.livePCM2xActiveKey: active,
-                    AudioFormatNotifications.livePCM2xFallbackKey: fallbackReason ?? ""
-                ]
-            )
-        }
-    }
-
-    /// Decode the flat C snapshot back into the Swift parameter value type.
-    /// Runs on the audio thread (from `applyPendingControlEvents`), so it must
-    /// stay allocation- and lock-free: no Swift collection APIs, no static-let
-    /// first-touch (which lazily initializes under a lock). All decoding is plain
-    /// scalar branching.
-    private static func parameters(from c: LCOutputConditioningSettings) -> OutputConditioningParameters {
-        var p = OutputConditioningParameters()
-        p.isEnabled = c.enabled != 0
-        p.outputMode = OutputConditioningMode(rawValue: c.outputMode) ?? .bypass
-        // Inline clamp — avoid touching the `allowedOversamplingFactors` static
-        // array (its lazy init takes a lock on first access) on the audio thread.
-        let factorValue = Int(c.oversamplingFactor)
-        p.oversamplingFactor = (factorValue == 8) ? 8 : (factorValue == 4) ? 4 : 2
-        p.filterMode = ResamplingFilterMode(rawValue: c.filterMode) ?? .linearPhaseShort
-        // c.headroomGain is always positive (it is 10^(headroomDB/20)); guard anyway.
-        p.headroomDB = c.headroomGain > 0 ? 20.0 * log10(c.headroomGain) : -120.0
-        p.ditherEnabled = c.ditherEnabled != 0
-        p.noiseShapingEnabled = c.noiseShapingEnabled != 0
-        p.dsdMode = DSDMode(rawValue: c.dsdMode) ?? .off
-        return p
-    }
-
-    func setAutomaticRateMatchingEnabled(_ enabled: Bool) {
-        managerQueue.async { [weak self] in
-            guard let self else { return }
-            automaticRateMatchingEnabled = enabled
-            rateMatchSessionDisabled = false
-            rateMatchGate.reset()
-            rateMatchPhase = enabled ? .idle : .idle
-            rateMatchCooldownUntil = .distantPast
-            rateMatchLastSourceRate = nil
-            rateMatchLastTargetRate = nil
-            rateMatchStatus = enabled ? "자동 켜짐: 소스 안정화 대기" : "자동 꺼짐"
-            if !enabled {
-                do {
-                    try restoreOriginalRateMatchIfNeeded()
-                } catch {
-                    rateMatchStatus = "자동 꺼짐: 원래 샘플레이트 복구 실패"
-                }
-            }
-            publishFormatStatus()
-        }
-    }
-
-    func observeSourceFormat(_ format: SourceAudioFormat?) {
-        managerQueue.async { [weak self] in
-            guard let self,
-                  automaticRateMatchingEnabled,
-                  !rateMatchSessionDisabled,
-                  isStarted,
-                  !isAutomaticRateTransition else {
-                return
-            }
-
-            guard let format, format.hasUsableSampleRate else {
-                return
-            }
-
-            do {
-                let capabilities = try HardwareSampleRateTracker.rateCapabilities(
-                    for: currentOutputDeviceID
-                )
-                if let targetRate = rateMatchGate.observe(
-                    format: format,
-                    currentDeviceRate: currentHardwareSampleRate,
-                    supportedRates: capabilities.supportedRates,
-                    isDeviceRateSettable: capabilities.isSettable,
-                    observedAt: Date()
-                ) {
-                    try performAutomaticRateTransition(to: targetRate)
-                }
-            } catch {
-                disableAutomaticRateMatchingForSession(error)
-            }
-        }
-    }
-
-    func makeSpectrumAnalyzer(dynamicsModel: DynamicsMeterModel,
-                              spectrumModel: SpectrumModel) -> AudioSpectrumAnalyzer {
-        let sampleRate = managerQueue.sync { currentSampleRate }
-        return AudioSpectrumAnalyzer(
-            ringBuffer: visualizerRingBuffer,
-            sampleRate: Float(sampleRate),
-            dynamicsModel: dynamicsModel,
-            spectrumModel: spectrumModel
-        )
-    }
-
-    func stop() {
-        managerQueue.sync {
-            guard isStarted || hardwareTracker != nil || aggregateDeviceID != kAudioObjectUnknown || tapID != kAudioObjectUnknown else {
-                engine.stop()
-                return
-            }
-
-            hardwareTracker?.stop()
-            hardwareTracker = nil
-            stopCaptureAndDestroyAggregateDevice()
-            destroyProcessTap()
-            engine.stop()
-            if let sourceNode {
-                engine.disconnectNodeOutput(sourceNode)
-                engine.detach(sourceNode)
-                self.sourceNode = nil
-            }
-            ringBuffer.clear()
-            visualizerRingBuffer.clear()
-            ringBuffer.resetDiagnostics()
-            visualizerRingBuffer.resetDiagnostics()
-            if originalRateMatchSampleRate != nil {
-                try? restoreOriginalRateMatchIfNeeded(reconfigureEngine: false)
-            }
-            // If live PCM 2× left the output device at 2×, restore its rate so a
-            // subsequent launch / other apps see the device's normal rate.
-            if livePCM2xActive, let rate = preLivePCM2xHardwareRate,
-               preLivePCM2xDeviceID != kAudioObjectUnknown {
-                try? HardwareSampleRateTracker.setNominalSampleRate(rate, for: preLivePCM2xDeviceID)
-            }
-            livePCM2xActive = false
-            livePCM2xOutputRate = 0
-            preLivePCM2xHardwareRate = nil
-            preLivePCM2xDeviceID = kAudioObjectUnknown
-            isStarted = false
-            isAutomaticRateTransition = false
-            rateMatchPhase = .idle
-            rateMatchActiveTransitionID = 0
-            rateMatchCooldownUntil = .distantPast
-            rateMatchLastSourceRate = nil
-            rateMatchLastTargetRate = nil
-        }
-    }
-
-    private func startOutput(sampleRate: Double) throws {
-        try configureOutputGraph(sampleRate: sampleRate)
-        try engine.start()
-    }
-
-    private func configureOutputGraph(sampleRate: Double) throws {
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
-            throw AppError.message("Could not create AVAudioFormat for \(sampleRate) Hz.")
-        }
-
-        let node = try sourceNode ?? makeSourceNode()
-        if sourceNode == nil {
-            sourceNode = node
-            engine.attach(node)
-        }
-
-        engine.disconnectNodeOutput(node)
-        engine.connect(node, to: engine.mainMixerNode, format: format)
-        engine.prepare()
-    }
-
-    private func makeSourceNode() throws -> AVAudioSourceNode {
-        AVAudioSourceNode { [ringBuffer, outputGainRamp] _, _, frameCount, audioBufferList -> OSStatus in
-            let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            let frames = Int(frameCount)
-
-            if abl.count >= 2 {
-                guard let left = abl[0].mData?.assumingMemoryBound(to: Float.self),
-                      let right = abl[1].mData?.assumingMemoryBound(to: Float.self) else {
-                    return noErr
-                }
-                ringBuffer.popStereo(left: left, right: right, frameCount: frames)
-                lc_output_gain_ramp_apply_stereo(
-                    outputGainRamp,
-                    left,
-                    right,
-                    UInt32(frames)
-                )
-            } else if let buffer = abl.first,
-                      let data = buffer.mData?.assumingMemoryBound(to: Float.self) {
-                let channels = max(Int(buffer.mNumberChannels), 1)
-                ringBuffer.popInterleaved(into: data, count: frames * channels)
-                lc_output_gain_ramp_apply_interleaved(
-                    outputGainRamp,
-                    data,
-                    UInt32(frames),
-                    UInt32(channels)
-                )
-            }
-
-            return noErr
-        }
-    }
-
-    private func performAutomaticRateTransition(to targetRate: Double) throws {
-        guard !isAutomaticRateTransition,
-              abs(targetRate - currentHardwareSampleRate) > 1 else {
-            return
-        }
-
-        let now = Date()
-        if now < rateMatchCooldownUntil {
-            let remaining = rateMatchCooldownUntil.timeIntervalSince(now)
-            rateMatchStatus = "자동 대기: \(String(format: "%.1f", remaining))s"
-            publishFormatStatus()
-            return
-        }
-
-        if originalRateMatchSampleRate == nil {
-            originalRateMatchDeviceID = currentOutputDeviceID
-            originalRateMatchSampleRate = currentHardwareSampleRate
-        }
-
-        if let priorTargetRate = rateMatchLastTargetRate,
-           abs(priorTargetRate - targetRate) < 1,
-           now.timeIntervalSince(rateMatchLastTransitionAt ?? .distantPast) < rateMatchCooldownInterval {
-            return
-        }
-
-        rateMatchTransitionID &+= 1
-        let transitionID = rateMatchTransitionID
-        rateMatchActiveTransitionID = transitionID
-        rateMatchLastSourceRate = currentHardwareSampleRate
-        rateMatchLastTargetRate = targetRate
-        rateMatchLastTransitionAt = now
-        rateMatchCooldownUntil = now.addingTimeInterval(rateMatchCooldownInterval)
-
-        defer {
-            if rateMatchActiveTransitionID == transitionID {
-                rateMatchActiveTransitionID = 0
-            }
-        }
-
-        do {
-            try performRateTransition(
-                to: targetRate,
-                successStatus: "자동 맞춤 완료: \(Self.rateText(targetRate))",
-                transitionID: transitionID
-            )
-        } catch {
-            rateMatchPhase = .rollback
-            let originalRate = originalRateMatchSampleRate
-            let originalDevice = originalRateMatchDeviceID
-            var rollbackSucceeded = false
-            if let originalRate, originalDevice == currentOutputDeviceID {
-                do {
-                    rateMatchTransitionID &+= 1
-                    let rollbackID = rateMatchTransitionID
-                    rateMatchActiveTransitionID = rollbackID
-                    try performRateTransition(
-                        to: originalRate,
-                        successStatus: "자동 되돌리기: \(Self.rateText(originalRate))",
-                        transitionID: rollbackID
-                    )
-                    rollbackSucceeded = true
-                } catch {
-                    rollbackSucceeded = false
-                }
-            }
-            if rollbackSucceeded {
-                originalRateMatchSampleRate = nil
-                originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
-            }
-            throw error
-        }
-    }
-
-    private func restoreOriginalRateMatchIfNeeded(reconfigureEngine: Bool = true) throws {
-        guard let originalRate = originalRateMatchSampleRate,
-              originalRateMatchDeviceID == currentOutputDeviceID else {
-            originalRateMatchSampleRate = nil
-            originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
-            return
-        }
-
-        defer {
-            originalRateMatchSampleRate = nil
-            originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
-        }
-        if reconfigureEngine, isStarted {
-            rateMatchTransitionID &+= 1
-            let restoreID = rateMatchTransitionID
-            rateMatchActiveTransitionID = restoreID
-            defer {
-                if rateMatchActiveTransitionID == restoreID {
-                    rateMatchActiveTransitionID = 0
-                }
-            }
-            try performRateTransition(
-                to: originalRate,
-                successStatus: "자동 꺼짐: \(Self.rateText(originalRate)) 복구",
-                transitionID: restoreID
-            )
-        } else {
-            try HardwareSampleRateTracker.setNominalSampleRate(
-                originalRate,
-                for: currentOutputDeviceID
-            )
-        }
-    }
-
-    private func performRateTransition(to targetRate: Double,
-                                       successStatus: String,
-                                       transitionID: UInt64) throws {
-        guard !isAutomaticRateTransition else { return }
-        isAutomaticRateTransition = true
-        rateMatchPhase = .fadingOut
-        rateMatchStatus = "자동 전환 중: \(Self.rateText(targetRate))"
-        publishFormatStatus()
-        let phaseStarted = Date()
-
-        func finishPhase(_ nextPhase: RateMatchPhase) {
-            let elapsedMs = Date().timeIntervalSince(phaseStarted) * 1000
-            rateMatchLog("tid=\(transitionID) phase=\(nextPhase.rawValue) t=\(String(format: "%.0fms", elapsedMs))")
-            rateMatchPhase = nextPhase
-        }
-
-        defer {
-            isAutomaticRateTransition = false
-        }
-
-        requestOutputGain(0, duration: 0.05)
-        finishPhase(.stopping)
-        waitForOutputGain(atMost: 0.001, timeout: 0.25)
-        let gainAfterFadeOut = lc_output_gain_ramp_current(outputGainRamp)
-
-        suspendForHardwareReconfigure()
-
-        let priorDeviceID = currentOutputDeviceID
-        let priorHardwareRate = currentHardwareSampleRate
-        let priorEngineRestartCount = engineRestartCount
-
-        finishPhase(.changingDeviceRate)
-        do {
-            let rateRequestStarted = Date()
-            let rateSemaphore = DispatchSemaphore(value: 0)
-            // Shared across the manager queue (reader) and the Core Audio
-            // listener queue (writer). Protect with a lock.
-            let confirmedBox = RateBox()
-            if let tracker = hardwareTracker {
-                try tracker.requestRateChange(targetRate, for: currentOutputDeviceID) { rate in
-                    confirmedBox.set(rate)
-                    rateSemaphore.signal()
-                }
-            } else {
-                try HardwareSampleRateTracker.setNominalSampleRate(
-                    targetRate,
-                    for: currentOutputDeviceID
-                )
-            }
-            defer {
-                hardwareTracker?.cancelRateChangeConfirmation()
-            }
-            let confirmed = try waitForNominalSampleRate(
-                targetRate,
-                deviceID: currentOutputDeviceID,
-                semaphore: rateSemaphore,
-                confirmedRate: { confirmedBox.get() }
-            )
-            rateMatchLog("tid=\(transitionID) device-rate-change t=\(String(format: "%.0fms", Date().timeIntervalSince(rateRequestStarted) * 1000)) signaled=\(confirmedBox.get() != nil)")
-            finishPhase(.rebuilding)
-            let rebuildStarted = Date()
-            try restartForHardwareFormat(
-                deviceID: currentOutputDeviceID,
-                hardwareSampleRate: confirmed
-            )
-            rateMatchLog("tid=\(transitionID) rebuild t=\(String(format: "%.0fms", Date().timeIntervalSince(rebuildStarted) * 1000))")
-            ringWrittenAtTransitionStart = ringBuffer.totalWrittenSamples()
-            ringReadAtTransitionStart = ringBuffer.totalReadSamples()
-            finishPhase(.waitingForCapture)
-            let flowStarted = Date()
-            let audioFlowRecovered = waitForAudioFlowRecovery(timeout: 0.5)
-            rateMatchLog("tid=\(transitionID) flow-recovery ok=\(audioFlowRecovered) t=\(String(format: "%.0fms", Date().timeIntervalSince(flowStarted) * 1000))")
-            if !audioFlowRecovered {
-                throw AppError.message(
-                    "capture/output flow did not recover after \(Self.rateText(confirmed)) reconfigure"
-                )
-            }
-            let ringFill = ringBuffer.availableSamples()
-            rateMatchStatus = successStatus
-            finishPhase(.fadingIn)
-            requestOutputGain(1, duration: 0.08)
-            guard waitForOutputGain(atLeast: 0.99, timeout: 0.5) else {
-                throw AppError.message(
-                    "output gain did not recover after \(Self.rateText(confirmed)) reconfigure"
-                )
-            }
-            publishFormatStatus()
-            let engineRunning = engine.isRunning
-            let gainAfterFadeIn = lc_output_gain_ramp_current(outputGainRamp)
-            rateMatchPhase = .running
-            rateMatchLog("tid=\(transitionID) OK src=\(Self.rateText(priorHardwareRate))→\(Self.rateText(targetRate)) device=\(priorDeviceID)→\(currentOutputDeviceID) restarts=\(engineRestartCount - priorEngineRestartCount) gainOut=\(gainAfterFadeOut) gainIn=\(gainAfterFadeIn) ringFill=\(ringFill) engineRunning=\(engineRunning) elapsed=\(String(format: "%.0fms", Date().timeIntervalSince(phaseStarted) * 1000))")
-        } catch {
-            let engineRunningBeforeRecovery = engine.isRunning
-            let writtenBeforeRecovery = ringBuffer.totalWrittenSamples()
-            let readBeforeRecovery = ringBuffer.totalReadSamples()
-            if !engineRunningBeforeRecovery {
-                let recoveryRate =
-                    (try? HardwareSampleRateTracker.nominalSampleRate(for: currentOutputDeviceID))
-                    ?? currentHardwareSampleRate
-                try? restartForHardwareFormat(
-                    deviceID: currentOutputDeviceID,
-                    hardwareSampleRate: Self.validSampleRate(recoveryRate)
-                )
-            }
-            _ = waitForAudioFlowRecovery(timeout: 0.75)
-            requestOutputGain(1, duration: 0.08)
-            rateMatchPhase = .aborted
-            rateMatchLog("tid=\(transitionID) FAIL src=\(Self.rateText(priorHardwareRate))→\(Self.rateText(targetRate)) engine=\(engineRunningBeforeRecovery) written=\(writtenBeforeRecovery)→\(ringBuffer.totalWrittenSamples()) read=\(readBeforeRecovery)→\(ringBuffer.totalReadSamples()) err=\(error)")
-            throw error
-        }
-    }
-
-    private func requestOutputGain(_ target: Float, duration: Double) {
-        let frameCount = UInt32(max(currentSampleRate * max(duration, 0), 0))
-        lc_output_gain_ramp_set_target(outputGainRamp, target, frameCount)
-    }
-
-    private func waitForOutputGain(atMost maximumGain: Float,
-                                   timeout: TimeInterval) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if lc_output_gain_ramp_current(outputGainRamp) <= maximumGain {
-                return
-            }
-            usleep(5_000)
-        }
-    }
-
-    private func waitForOutputGain(atLeast minimumGain: Float,
-                                   timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if lc_output_gain_ramp_current(outputGainRamp) >= minimumGain {
-                return true
-            }
-            usleep(5_000)
-        }
-        return lc_output_gain_ramp_current(outputGainRamp) >= minimumGain
-    }
-
-    private func waitForNominalSampleRate(_ targetRate: Double,
-                                          deviceID: AudioObjectID,
-                                          semaphore: DispatchSemaphore,
-                                          confirmedRate: () -> Double?) throws -> Double {
-        // Event-wait first; if the listener never fires, polls below will still confirm.
-        _ = semaphore.wait(timeout: .now() + .milliseconds(900))
-
-        let fastPollIterations = 30
-        let fastPollIntervalMicros: useconds_t = 2_000
-        var lastRate = (try? HardwareSampleRateTracker.nominalSampleRate(for: deviceID))
-            ?? confirmedRate()
-            ?? currentHardwareSampleRate
-        for _ in 0..<fastPollIterations {
-            if abs(lastRate - targetRate) <= 1 {
-                return lastRate
-            }
-            usleep(fastPollIntervalMicros)
-            lastRate = (try? HardwareSampleRateTracker.nominalSampleRate(for: deviceID))
-                ?? lastRate
-        }
-        throw AppError.message(
-            "DAC did not confirm \(Self.rateText(targetRate)); current \(Self.rateText(lastRate))."
-        )
-    }
-
-    private func waitForAudioFlowRecovery(timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            let captureAdvanced =
-                ringBuffer.totalWrittenSamples() > ringWrittenAtTransitionStart
-            let outputAdvanced =
-                ringBuffer.totalReadSamples() > ringReadAtTransitionStart
-            if captureAdvanced && outputAdvanced && engine.isRunning {
-                return true
-            }
-            usleep(2_000)
-        }
-        return ringBuffer.totalWrittenSamples() > ringWrittenAtTransitionStart
-            && ringBuffer.totalReadSamples() > ringReadAtTransitionStart
-            && engine.isRunning
-    }
-
-    private func disableAutomaticRateMatchingForSession(_ error: Error) {
-        rateMatchSessionDisabled = true
-        rateMatchGate.reset()
-        rateMatchPhase = .aborted
-        rateMatchStatus = "자동 일시정지: \(error)"
-        requestOutputGain(1, duration: 0.08)
-        if !engine.isRunning {
-            let recoveryRate =
-                (try? HardwareSampleRateTracker.nominalSampleRate(for: currentOutputDeviceID))
-                ?? currentHardwareSampleRate
-            try? restartForHardwareFormat(
-                deviceID: currentOutputDeviceID,
-                hardwareSampleRate: Self.validSampleRate(recoveryRate)
-            )
-            _ = waitForAudioFlowRecovery(timeout: 0.75)
-        }
-        publishFormatStatus()
-    }
-
-    private func handleHardwareFormatChange(deviceID: AudioObjectID, sampleRate: Double) {
-        let newHardwareSampleRate = Self.validSampleRate(sampleRate)
-        let deviceChanged = deviceID != currentOutputDeviceID
-        let rateChanged = abs(newHardwareSampleRate - currentHardwareSampleRate) > 0.5
-        var droppedLivePCM2x = false
-
-        if (deviceChanged || rateChanged) && !isAutomaticRateTransition {
-            originalRateMatchSampleRate = nil
-            originalRateMatchDeviceID = AudioObjectID(kAudioObjectUnknown)
-            rateMatchGate.reset()
-            rateMatchStatus = automaticRateMatchingEnabled
-                ? "자동 켜짐: 외부 장치 변경 감지"
-                : "자동 꺼짐"
-            // An external device/rate change invalidates the live PCM 2× split
-            // (tap 1× / output 2×). Drop back to PCM bypass and let the normal
-            // reconfigure run the aggregate and output at the device's new rate.
-            if livePCM2xActive {
-                livePCM2xActive = false
-                livePCM2xOutputRate = 0
-                preLivePCM2xHardwareRate = nil
-                preLivePCM2xDeviceID = kAudioObjectUnknown
-                // Defer the bypass push to AFTER the reconfigure below —
-                // reconfigureForHardwareFormat's suspend drains the control queue,
-                // which would discard a push made here before the callback pops it.
-                droppedLivePCM2x = true
-                publishLivePCM2xStatus(
-                    active: false,
-                    fallbackReason: "출력 장치가 변경되어 2× 모드가 해제되었습니다. PCM으로 출력됩니다."
-                )
-            }
-        }
-
-        rateMatchLog("hardware-change device=\(deviceID) rate=\(Self.rateText(newHardwareSampleRate)) deviceChanged=\(deviceChanged) rateChanged=\(rateChanged) duringAuto=\(isAutomaticRateTransition) phase=\(rateMatchPhase.rawValue)")
-
-        guard isStarted else {
-            currentOutputDeviceID = deviceID
-            currentHardwareSampleRate = newHardwareSampleRate
-            publishFormatStatus()
-            return
-        }
-
-        if isAutomaticRateTransition {
-            rateMatchLog("listener ignored during automatic transition (tid=\(rateMatchActiveTransitionID))")
-            publishFormatStatus()
-            return
-        }
-
-        guard deviceChanged || rateChanged else {
-            publishFormatStatus()
-            return
-        }
-
-        do {
-            try reconfigureForHardwareFormat(deviceID: deviceID, hardwareSampleRate: newHardwareSampleRate)
-        } catch {
-            fputs("Output format reconfigure failed: \(error)\n", stderr)
-        }
-        // Now that the reconfigure (and its control-queue drain) is done, push
-        // the bypass snapshot so the restarted engine drains it on its next
-        // callback instead of carrying stale live-2× settings into a 1× graph.
-        if droppedLivePCM2x {
-            controlQueue.pushConditioning(OutputConditioningParameters())
-        }
-    }
-
-    private func reconfigureForHardwareFormat(deviceID: AudioObjectID, hardwareSampleRate: Double) throws {
-        suspendForHardwareReconfigure()
-        try restartForHardwareFormat(
-            deviceID: deviceID,
-            hardwareSampleRate: hardwareSampleRate
-        )
-    }
-
-    private func suspendForHardwareReconfigure() {
-        engine.stop()
-        stopCaptureAndDestroyAggregateDevice()
-        destroyProcessTap()
-        ringBuffer.clear()
-        visualizerRingBuffer.clear()
-        controlQueue.drain()
-        resetDSPState()
-        engineRestartCount &+= 1
-    }
-
-    private func restartForHardwareFormat(deviceID: AudioObjectID,
-                                          hardwareSampleRate: Double) throws {
-        currentOutputDeviceID = deviceID
-        currentHardwareSampleRate = hardwareSampleRate
-        try createProcessTapAndAggregateDevice()
-        currentSampleRate = syncAggregateSampleRate(preferredSampleRate: hardwareSampleRate)
-        refreshTapSampleRate()
-        controlQueue.updateSampleRate(Float(currentSampleRate))
-        applyCurrentSettingsDirectly()
-
-        do {
-            replaceOutputEngine()
-            try configureOutputGraph(sampleRate: currentSampleRate)
-            try engine.start()
-            try startCapture()
-        } catch {
-            engine.stop()
-            stopCaptureAndDestroyAggregateDevice()
-            destroyProcessTap()
-            throw error
-        }
-        publishFormatStatus()
-        print("Output format re-synced: \(makeFormatStatus().indicatorText)")
-    }
-
-    private func replaceOutputEngine() {
-        engine.stop()
-        if let sourceNode {
-            engine.disconnectNodeOutput(sourceNode)
-            engine.detach(sourceNode)
-            self.sourceNode = nil
-        }
-        engine = AVAudioEngine()
-    }
-
-    private func syncAggregateSampleRate(preferredSampleRate: Double) -> Double {
-        guard aggregateDeviceID != kAudioObjectUnknown else {
-            return preferredSampleRate
-        }
-
-        do {
-            try HardwareSampleRateTracker.setNominalSampleRate(preferredSampleRate, for: aggregateDeviceID)
-        } catch {
-            fputs("Aggregate sample rate set skipped: \(error)\n", stderr)
-        }
-
-        do {
-            return Self.validSampleRate(try HardwareSampleRateTracker.nominalSampleRate(for: aggregateDeviceID))
-        } catch {
-            fputs("Aggregate sample rate read failed: \(error)\n", stderr)
-            return preferredSampleRate
-        }
-    }
-
-    private func stopCaptureAndDestroyAggregateDevice() {
-        if aggregateDeviceID == kAudioObjectUnknown {
-            return
-        }
-
-        if let ioProcID {
-            AudioDeviceStop(aggregateDeviceID, ioProcID)
-            AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
-            self.ioProcID = nil
-        }
-
-        AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
-        aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
-    }
-
-    private func destroyProcessTap() {
-        guard tapID != kAudioObjectUnknown else { return }
-        removeTapFormatListener()
-        AudioHardwareDestroyProcessTap(tapID)
-        tapID = AudioObjectID(kAudioObjectUnknown)
-    }
-
-    private func resetDSPState() {
-        circuitDSP.resetState()
-        exciterDSP.resetState()
-        spatializer.resetState()
-    }
-
-    private func applyCurrentSettingsDirectly() {
-        // DSP/capture runs at the tap rate (the captured signal's rate). This is
-        // distinct from the *output* rate (`currentSampleRate`) once live PCM 2×
-        // is active — the tonal DSP still operates on the 1× captured signal.
-        let sampleRate = Float(currentTapSampleRate)
-        let dspSettings = DSPPrecompute.makeDSPSettings(
-            sampleRate: sampleRate,
-            intensity: currentIntensity,
-            body: currentBody,
-            outputDb: currentOutputDb,
-            dspModel: currentDSPModel,
-            exciterOversamplingMode: currentExciterOversamplingMode
-        )
-        activeDSPModelID = currentDSPModel.controlID
-        circuitDSP.update(dspSettings)
-        exciterDSP.update(dspSettings)
-        spatializer.update(DSPPrecompute.makeSpatialSettings(sampleRate: sampleRate, settings: currentSpatialSettings))
-    }
-
-    private func publishFormatStatus() {
-        let status = makeFormatStatus()
-        let capabilities = try? HardwareSampleRateTracker.rateCapabilities(for: currentOutputDeviceID)
-        let rateMatchingEnabled = automaticRateMatchingEnabled
-        let currentRateMatchStatus = rateMatchStatus
-        let currentRateMatchPhase = rateMatchPhase.rawValue
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(
-                name: AudioFormatNotifications.didChange,
-                object: nil,
-                userInfo: [
-                    AudioFormatNotifications.sampleRateKey: status.sampleRate,
-                    AudioFormatNotifications.tapSampleRateKey: status.tapSampleRate,
-                    AudioFormatNotifications.processingSampleRateKey: status.processingSampleRate,
-                    AudioFormatNotifications.sampleFormatKey: status.sampleFormat,
-                    AudioFormatNotifications.isSampleRateMatchedKey: status.isSampleRateMatched,
-                    AudioFormatNotifications.indicatorTextKey: status.indicatorText,
-                    AudioFormatNotifications.supportedSampleRatesKey: capabilities?.supportedRates ?? [],
-                    AudioFormatNotifications.isSampleRateSettableKey: capabilities?.isSettable ?? false,
-                    AudioFormatNotifications.automaticRateMatchingEnabledKey: rateMatchingEnabled,
-                    AudioFormatNotifications.rateMatchStatusKey: currentRateMatchStatus,
-                    AudioFormatNotifications.rateMatchPhaseKey: currentRateMatchPhase
-                ]
-            )
-        }
-    }
-
-    private func makeFormatStatus() -> AudioFormatStatus {
-        AudioFormatStatus(
-            sampleRate: currentHardwareSampleRate,
-            tapSampleRate: currentTapSampleRate,
-            processingSampleRate: currentSampleRate,
-            sampleFormat: "32-bit Float",
-            isSampleRateMatched: abs(currentHardwareSampleRate - currentSampleRate) <= 0.5
-        )
-    }
-
-    private static func validSampleRate(_ sampleRate: Double) -> Double {
-        guard sampleRate.isFinite, sampleRate >= 8_000 else { return 48_000 }
-        return sampleRate
-    }
-
-    private static func rateText(_ sampleRate: Double) -> String {
-        String(format: "%.1f kHz", sampleRate / 1_000)
-    }
-
-    private func rateMatchLog(_ message: String) {
-        NSLog("[RateMatch] %@", message)
-        let line = "\(Date().timeIntervalSince1970) \(message)\n"
-        let path = NSTemporaryDirectory() + "lowend-ratematch.log"
-        if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: path)) {
-            handle.seekToEndOfFile()
-            if let data = line.data(using: .utf8) {
-                handle.write(data)
-            }
-            try? handle.close()
-        } else {
-            try? line.data(using: .utf8)?.write(to: URL(fileURLWithPath: path))
-        }
-    }
-
-    private func refreshTapSampleRate() {
-        guard tapID != kAudioObjectUnknown else { return }
-        do {
-            currentTapSampleRate = Self.validSampleRate(try Self.tapFormat(for: tapID).mSampleRate)
-        } catch {
-            fputs("Tap format read failed: \(error)\n", stderr)
-        }
-    }
-
-    private func installTapFormatListener() throws {
-        guard tapID != kAudioObjectUnknown, tapFormatListener == nil else { return }
-
-        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
-            refreshTapSampleRate()
-            publishFormatStatus()
-        }
-        tapFormatListener = listener
-        var address = Self.tapFormatAddress()
-        do {
-            try check(
-                AudioObjectAddPropertyListenerBlock(tapID, &address, managerQueue, listener),
-                "AudioObjectAddPropertyListenerBlock TapFormat"
-            )
-        } catch {
-            tapFormatListener = nil
-            throw error
-        }
-    }
-
-    private func removeTapFormatListener() {
-        guard tapID != kAudioObjectUnknown, let tapFormatListener else { return }
-        var address = Self.tapFormatAddress()
-        AudioObjectRemovePropertyListenerBlock(tapID, &address, managerQueue, tapFormatListener)
-        self.tapFormatListener = nil
-    }
-
-    private static func tapFormat(for tapID: AudioObjectID) throws -> AudioStreamBasicDescription {
-        var format = AudioStreamBasicDescription()
-        var dataSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        var address = tapFormatAddress()
-        try check(
-            AudioObjectGetPropertyData(tapID, &address, 0, nil, &dataSize, &format),
-            "AudioObjectGetPropertyData TapFormat"
-        )
-        return format
-    }
-
-    private static func tapFormatAddress() -> AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress(
-            mSelector: kAudioTapPropertyFormat,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-    }
-
-    private func makeTapDescription() throws -> CATapDescription {
-        let description: CATapDescription
-
-        switch settings.mode {
-        case .all:
-            let ownProcess = try audioProcessObjectID(for: getpid())
-            description = CATapDescription(stereoGlobalTapButExcludeProcesses: [ownProcess])
-            currentCaptureTargetSummary = "전체 시스템"
-        case .bundleIDs(let bundleIDs):
-            let processes = try resolveAudioProcesses(for: bundleIDs)
-            description = CATapDescription(
-                stereoMixdownOfProcesses: processes.map(\.objectID)
-            )
-#if compiler(>=6.2)
-            if #available(macOS 26.0, *) {
-                description.isProcessRestoreEnabled = true
-            }
-#endif
-            currentCaptureTargetSummary = processes
-                .map { "\($0.bundleID) (pid \($0.pid))" }
-                .joined(separator: ", ")
-        case .listApps:
-            throw AppError.message("Cannot start capture while listing apps.")
-        case .selfTest:
-            throw AppError.message("Cannot start capture while running self-tests.")
-        }
-
-        description.name = "LowEnd Native System Tap"
-        description.isPrivate = true
-        description.isMixdown = true
-        description.isMono = false
-        description.muteBehavior = .mutedWhenTapped
-        return description
-    }
-
-    private func resolveAudioProcesses(for requestedBundleIDs: [String]) throws -> [AudioProcessInfo] {
-        let requested = requestedBundleIDs
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { !$0.isEmpty }
-        guard !requested.isEmpty else {
-            throw AppError.message("특정 앱 bundle ID가 비어 있습니다.")
-        }
-
-        let connected = try Self.audioProcessInfos()
-        let descriptors = connected.map {
-            AudioProcessDescriptor(
-                objectID: $0.objectID,
-                pid: $0.pid,
-                bundleID: $0.bundleID,
-                isRunningOutput: $0.isRunningOutput
-            )
-        }
-        let resolved = AudioProcessMatcher.resolve(
-            requestedBundleIDs: requestedBundleIDs,
-            from: descriptors
-        )
-        let resolvedIDs = Set(resolved.map(\.objectID))
-        let selected = connected.filter { resolvedIDs.contains($0.objectID) }
-        guard !selected.isEmpty else {
-            throw AppError.message(
-                "Core Audio에서 \(requestedBundleIDs.joined(separator: ", ")) 또는 하위 오디오 프로세스를 찾지 못했습니다. 앱에서 재생을 시작한 뒤 다시 적용하세요."
-            )
-        }
-
-        var seen = Set<AudioObjectID>()
-        return selected.filter { seen.insert($0.objectID).inserted }
-    }
-
-    private static func audioProcessInfos() throws -> [AudioProcessInfo] {
-        let objectIDs = try audioProcessObjectIDs()
-        return objectIDs.compactMap { objectID in
-            guard let bundleID = try? processBundleID(for: objectID), !bundleID.isEmpty else {
-                return nil
-            }
-            let pid = (try? processPID(for: objectID)) ?? 0
-            let isRunningOutput = (try? processIsRunningOutput(for: objectID)) ?? false
-            return AudioProcessInfo(
-                objectID: objectID,
-                pid: pid,
-                bundleID: bundleID,
-                isRunningOutput: isRunningOutput
-            )
-        }
-    }
-
-    private static func audioProcessObjectIDs() throws -> [AudioObjectID] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyProcessObjectList,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var dataSize: UInt32 = 0
-        try check(
-            AudioObjectGetPropertyDataSize(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                0,
-                nil,
-                &dataSize
-            ),
-            "AudioObjectGetPropertyDataSize ProcessObjectList"
-        )
-
-        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
-        guard count > 0 else { return [] }
-        var objectIDs = Array(repeating: AudioObjectID(kAudioObjectUnknown), count: count)
-        let status = objectIDs.withUnsafeMutableBytes { storage in
-            AudioObjectGetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                0,
-                nil,
-                &dataSize,
-                storage.baseAddress!
-            )
-        }
-        try check(status, "AudioObjectGetPropertyData ProcessObjectList")
-        return objectIDs.filter { $0 != kAudioObjectUnknown }
-    }
-
-    private static func processBundleID(for objectID: AudioObjectID) throws -> String {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioProcessPropertyBundleID,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var bundleID: Unmanaged<CFString>?
-        var dataSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        try check(
-            AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &bundleID),
-            "AudioObjectGetPropertyData ProcessBundleID"
-        )
-        return bundleID?.takeRetainedValue() as String? ?? ""
-    }
-
-    private static func processPID(for objectID: AudioObjectID) throws -> pid_t {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioProcessPropertyPID,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var pid: pid_t = 0
-        var dataSize = UInt32(MemoryLayout<pid_t>.size)
-        try check(
-            AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &pid),
-            "AudioObjectGetPropertyData ProcessPID"
-        )
-        return pid
-    }
-
-    private static func processIsRunningOutput(for objectID: AudioObjectID) throws -> Bool {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioProcessPropertyIsRunningOutput,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var value: UInt32 = 0
-        var dataSize = UInt32(MemoryLayout<UInt32>.size)
-        try check(
-            AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &value),
-            "AudioObjectGetPropertyData ProcessIsRunningOutput"
-        )
-        return value != 0
-    }
-
-    private func audioProcessObjectID(for pid: pid_t) throws -> AudioObjectID {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var processID = pid
-        var processObjectID = AudioObjectID(kAudioObjectUnknown)
-        var dataSize = UInt32(MemoryLayout<AudioObjectID>.size)
-        let qualifierSize = UInt32(MemoryLayout<pid_t>.size)
-
-        let status = withUnsafePointer(to: &processID) { qualifier in
-            AudioObjectGetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                qualifierSize,
-                qualifier,
-                &dataSize,
-                &processObjectID
-            )
-        }
-
-        try check(status, "AudioObjectGetPropertyData TranslatePIDToProcessObject")
-
-        if processObjectID == kAudioObjectUnknown {
-            throw AppError.message("Could not find current Core Audio process object.")
-        }
-
-        return processObjectID
-    }
-
-    private func createProcessTapAndAggregateDevice() throws {
-        guard tapID == kAudioObjectUnknown,
-              aggregateDeviceID == kAudioObjectUnknown,
-              ioProcID == nil else {
-            throw AppError.message("Capture graph must be fully destroyed before recreation.")
-        }
-
-        let tapDescription = try makeTapDescription()
-        do {
-            try check(
-                AudioHardwareCreateProcessTap(tapDescription, &tapID),
-                "AudioHardwareCreateProcessTap"
-            )
-            refreshTapSampleRate()
-            do {
-                try installTapFormatListener()
-            } catch {
-                fputs("Tap format listener unavailable: \(error)\n", stderr)
-            }
-
-            let tapUID = tapDescription.uuid.uuidString
-            let aggregateUID = "com.codexaudiolab.lowendcircuit.aggregate.\(UUID().uuidString)"
-            let tapEntry: [String: Any] = [
-                kAudioSubTapUIDKey: tapUID,
-                kAudioSubTapDriftCompensationKey: true
-            ]
-
-            let aggregateDescription: [String: Any] = [
-                kAudioAggregateDeviceNameKey: "LowEnd Native Audio",
-                kAudioAggregateDeviceUIDKey: aggregateUID,
-                kAudioAggregateDeviceIsPrivateKey: true,
-                kAudioAggregateDeviceTapListKey: [tapEntry],
-                kAudioAggregateDeviceTapAutoStartKey: true
-            ]
-
-            try check(
-                AudioHardwareCreateAggregateDevice(
-                    aggregateDescription as CFDictionary,
-                    &aggregateDeviceID
-                ),
-                "AudioHardwareCreateAggregateDevice"
-            )
-        } catch {
-            stopCaptureAndDestroyAggregateDevice()
-            destroyProcessTap()
-            throw error
-        }
-    }
-
-    private func startCapture() throws {
-        let callback: AudioDeviceIOProc = { _, _, inputData, _, _, _, clientData in
-            guard let clientData else { return noErr }
-            let processor = Unmanaged<SystemAudioProcessor>.fromOpaque(clientData).takeUnretainedValue()
-            processor.handleInput(inputData)
-            return noErr
-        }
-
-        try check(
-            AudioDeviceCreateIOProcID(aggregateDeviceID, callback, Unmanaged.passUnretained(self).toOpaque(), &ioProcID),
-            "AudioDeviceCreateIOProcID"
-        )
-
-        try check(AudioDeviceStart(aggregateDeviceID, ioProcID), "AudioDeviceStart")
-    }
-
-    private func handleInput(_ inputData: UnsafePointer<AudioBufferList>) {
-        let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
-        guard let first = buffers.first, first.mDataByteSize > 0 else { return }
-
-        let frameCount = Int(first.mDataByteSize) / MemoryLayout<Float>.size
-        applyPendingControlEvents()
-
-        if buffers.count >= 2,
-           let leftData = buffers[0].mData?.assumingMemoryBound(to: Float.self),
-           let rightData = buffers[1].mData?.assumingMemoryBound(to: Float.self) {
-            processAndPushStereo(left: leftData, right: rightData, frameCount: frameCount)
-        } else if first.mNumberChannels == 2,
-                  let interleaved = first.mData?.assumingMemoryBound(to: Float.self) {
-            let stereoFrames = frameCount / 2
-            processAndPushInterleavedStereo(interleaved, frameCount: stereoFrames)
-        } else if let mono = first.mData?.assumingMemoryBound(to: Float.self) {
-            processAndPushMono(mono, frameCount: frameCount)
-        }
-    }
-
-    private func applyPendingControlEvents() {
-        var event = LCControlEvent()
-        var latestDSP = LCDSPSettings()
-        var hasDSP = false
-        var latestSpatial = LCSpatialSettings()
-        var hasSpatial = false
-        var latestConditioning = LCOutputConditioningSettings()
-        var hasConditioning = false
-
-        while controlQueue.pop(into: &event) {
-            switch event.type {
-            case UInt32(LC_CONTROL_EVENT_DSP):
-                latestDSP = event.dsp
-                hasDSP = true
-            case UInt32(LC_CONTROL_EVENT_SPATIAL):
-                latestSpatial = event.spatial
-                hasSpatial = true
-            case UInt32(LC_CONTROL_EVENT_OUTPUT_CONDITIONING):
-                latestConditioning = event.conditioning
-                hasConditioning = true
-            default:
-                break
-            }
-        }
-
-        if hasDSP {
-            activeDSPModelID = latestDSP.dspModel
-            switch activeDSPModelID {
-            case DSPModelID.circuit:
-                circuitDSP.update(latestDSP)
-            case DSPModelID.highExciter:
-                exciterDSP.update(latestDSP)
-            default:
-                break
-            }
-        }
-
-        if hasSpatial {
-            spatializer.update(latestSpatial)
-        }
-
-        if hasConditioning {
-            conditioningEngine.updateSettings(Self.parameters(from: latestConditioning))
-        }
-    }
-
-    private func processAndPushStereo(left: UnsafePointer<Float>,
-                                      right: UnsafePointer<Float>,
-                                      frameCount: Int) {
-        var offset = 0
-        while offset < frameCount {
-            let chunkFrames = min(scratchFrameCapacity, frameCount - offset)
-            let leftChunk = left.advanced(by: offset)
-            let rightChunk = right.advanced(by: offset)
-
-            for frame in 0..<chunkFrames {
-                let processed = processSelectedModel(left: leftChunk[frame], right: rightChunk[frame])
-                let output = processPostModel(left: processed.0, right: processed.1)
-                inputScratch[frame * 2] = output.0
-                inputScratch[frame * 2 + 1] = output.1
-            }
-
-            // Output-conditioning layer. Bypass (verbatim copy) unless the live
-            // PCM 2× mode is active, in which case this upsamples 2× and the
-            // returned frame count is 2× the input. Never in-place: it writes into
-            // conditioningOutputScratch so a rate-changing output cannot overwrite
-            // its own input. Push the produced frames at the *output* rate.
-            let conditioningFrames = conditioningEngine.processLive(
-                input: inputScratch,
-                inputFrames: chunkFrames,
-                output: conditioningOutputScratch
-            )
-            ringBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
-            visualizerRingBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
-            offset += chunkFrames
-        }
-    }
-
-    private func processAndPushInterleavedStereo(_ interleaved: UnsafePointer<Float>, frameCount: Int) {
-        var offset = 0
-        while offset < frameCount {
-            let chunkFrames = min(scratchFrameCapacity, frameCount - offset)
-            let chunk = interleaved.advanced(by: offset * 2)
-
-            for frame in 0..<chunkFrames {
-                let processed = processSelectedModel(left: chunk[frame * 2], right: chunk[frame * 2 + 1])
-                let output = processPostModel(left: processed.0, right: processed.1)
-                inputScratch[frame * 2] = output.0
-                inputScratch[frame * 2 + 1] = output.1
-            }
-
-            // Output-conditioning layer. Bypass (verbatim copy) unless the live
-            // PCM 2× mode is active, in which case this upsamples 2× and the
-            // returned frame count is 2× the input. Never in-place: it writes into
-            // conditioningOutputScratch so a rate-changing output cannot overwrite
-            // its own input. Push the produced frames at the *output* rate.
-            let conditioningFrames = conditioningEngine.processLive(
-                input: inputScratch,
-                inputFrames: chunkFrames,
-                output: conditioningOutputScratch
-            )
-            ringBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
-            visualizerRingBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
-            offset += chunkFrames
-        }
-    }
-
-    private func processAndPushMono(_ mono: UnsafePointer<Float>, frameCount: Int) {
-        var offset = 0
-        while offset < frameCount {
-            let chunkFrames = min(scratchFrameCapacity, frameCount - offset)
-            let chunk = mono.advanced(by: offset)
-
-            for frame in 0..<chunkFrames {
-                let processed = processSelectedModel(left: chunk[frame], right: chunk[frame])
-                let output = processPostModel(left: processed.0, right: processed.1)
-                inputScratch[frame * 2] = output.0
-                inputScratch[frame * 2 + 1] = output.1
-            }
-
-            // Output-conditioning layer. Bypass (verbatim copy) unless the live
-            // PCM 2× mode is active, in which case this upsamples 2× and the
-            // returned frame count is 2× the input. Never in-place: it writes into
-            // conditioningOutputScratch so a rate-changing output cannot overwrite
-            // its own input. Push the produced frames at the *output* rate.
-            let conditioningFrames = conditioningEngine.processLive(
-                input: inputScratch,
-                inputFrames: chunkFrames,
-                output: conditioningOutputScratch
-            )
-            ringBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
-            visualizerRingBuffer.push(conditioningOutputScratch, count: conditioningFrames * 2)
-            offset += chunkFrames
-        }
-    }
-
-    private func processSelectedModel(left: Float, right: Float) -> (Float, Float) {
-        let safeLeft = left.isFinite ? left : 0
-        let safeRight = right.isFinite ? right : 0
-
-        switch activeDSPModelID {
-        case DSPModelID.circuit:
-            return circuitDSP.process(left: safeLeft, right: safeRight)
-        case DSPModelID.highExciter:
-            return exciterDSP.process(left: safeLeft, right: safeRight)
-        default:
-            return (safeLeft, safeRight)
-        }
-    }
-
-    private func processPostModel(left: Float, right: Float) -> (Float, Float) {
-        // Spatial audio is an INDEPENDENT stage. The model bypass (Clean) only
-        // skips the tonal DSP (Circuit / HighExciter); it must not silence the
-        // spatializer. The spatializer itself no-ops when its `enabled` flag is
-        // off or its amount is ~0, so Clean + spatial-off stays a pure pass-through.
-        return spatializer.process(left: left, right: right)
-    }
-}
 
 do {
     if CommandLine.arguments.count == 1 {
@@ -6363,6 +3543,20 @@ do {
         launchGUI()
     }
 
+    if CommandLine.arguments.dropFirst() == ["--benchmark-output-conditioning"] {
+        runOutputConditioningBenchmark()
+        exit(0)
+    }
+    if CommandLine.arguments.dropFirst() == ["--ui-self-test"] {
+        guard #available(macOS 14.4, *) else { throw AppError.message("UI checks need macOS 14.4") }
+        try runSpatialUIChecks()
+        try NativeAppDelegate.runSpatialDiagnosticsChecks()
+        try NativeAppDelegate.runSpatialFormatBridgeChecks()
+        try NativeAppDelegate.runOutputConditioningPresentationChecks()
+        try NativeAppDelegate.runLiveControlEditingChecks()
+        try NativeAppDelegate.runGUIAudioLifecycleChecks()
+        exit(0)
+    }
     let settings = try parseArguments()
 
     if case .listApps = settings.mode {
@@ -6370,8 +3564,21 @@ do {
         exit(0)
     }
     if case .selfTest = settings.mode {
+        try runInputValidationChecks()
         try runDSPParityChecks()
         try runOutputConditioningChecks()
+        try runRuntimeChecks()
+        try runSourceFormatTrackerChecks()
+        try AudioSpectrumAnalyzer.runOfflineChecks()
+        if #available(macOS 14.4, *) {
+            try NativeAppDelegate.runStopRestorationChecks()
+            try SystemAudioProcessor.runManagerResponsivenessChecks()
+            try SystemAudioProcessor.runCaptureTargetRefreshChecks()
+            try SystemAudioProcessor.runInputBufferLayoutChecks()
+            try AudioGraphChecks.run()
+            try HardwareEventChecks.run()
+            try NativeAppDelegate.runCaptureSessionChecks()
+        }
         exit(0)
     }
 
@@ -6383,8 +3590,11 @@ do {
     let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
     signal(SIGINT, SIG_IGN)
     signalSource.setEventHandler {
-        processor.stop()
-        exit(0)
+        if processor.stop() {
+            exit(0)
+        }
+        let reason = processor.stopFailureDescription
+        fputs("중지 미완료: \(reason). SIGINT로 다시 시도할 수 있습니다.\n", stderr)
     }
     signalSource.resume()
 

@@ -1,7 +1,8 @@
 #include "../include/Core/Core.h"
+#include "../include/Core/SpatialGeometry.h"
 
 // ─────────────────────────────────────────────
-// Biquad — Direct Form I
+// Biquad — transposed Direct Form II
 // Matches Swift Biquad (main.swift:2196-2236)
 // ─────────────────────────────────────────────
 
@@ -80,6 +81,48 @@ LCBiquadCoefficients Biquad::makeHighPass(float sampleRate,
     c.a1 = (-2.0f * cosW0) / a0;
     c.a2 = (1.0f - alpha) / a0;
     return c;
+}
+
+void Biquad64::update(const LCBiquadCoefficients64& c) {
+    b0_ = c.b0;
+    b1_ = c.b1;
+    b2_ = c.b2;
+    a1_ = c.a1;
+    a2_ = c.a2;
+}
+
+void Biquad64::update(const LCBiquadCoefficients& c) {
+    update(LCBiquadCoefficients64 { c.b0, c.b1, c.b2, c.a1, c.a2 });
+}
+
+float Biquad64::process(float input) {
+    const double output = b0_ * static_cast<double>(input) + z1_;
+    z1_ = b1_ * static_cast<double>(input) - a1_ * output + z2_;
+    z2_ = b2_ * static_cast<double>(input) - a2_ * output;
+    return static_cast<float>(output);
+}
+
+void Biquad64::reset() {
+    z1_ = z2_ = 0.0;
+}
+
+LCBiquadCoefficients64 Biquad64::makeLowShelf(double sampleRate,
+                                              double frequency,
+                                              double q,
+                                              double gainDb) {
+    const double a = std::pow(10.0, gainDb / 40.0);
+    const double w0 = 2.0 * 3.14159265358979323846 * frequency / sampleRate;
+    const double cosW0 = std::cos(w0);
+    const double alpha = std::sin(w0) / (2.0 * q);
+    const double beta = 2.0 * std::sqrt(a) * alpha;
+    const double a0 = (a + 1.0) + (a - 1.0) * cosW0 + beta;
+    return {
+        a * ((a + 1.0) - (a - 1.0) * cosW0 + beta) / a0,
+        2.0 * a * ((a - 1.0) - (a + 1.0) * cosW0) / a0,
+        a * ((a + 1.0) - (a - 1.0) * cosW0 - beta) / a0,
+        -2.0 * ((a - 1.0) + (a + 1.0) * cosW0) / a0,
+        ((a + 1.0) + (a - 1.0) * cosW0 - beta) / a0
+    };
 }
 
 // ─────────────────────────────────────────────
@@ -193,6 +236,13 @@ LCDSPSettings DSPPrecompute::makeDSPSettings(float sampleRate,
         exciterStage2Rate, exciterLowPassFrequency, butterworthQ1);
     s.exciterStage2LowPass2 = Biquad::makeLowPass(
         exciterStage2Rate, exciterLowPassFrequency, butterworthQ2);
+    s.exciterDCBlockPole = std::exp(-2.0f * 3.141592653589793f * 5.0f / sampleRate);
+    s.preciseCircuitCoefficientsEnabled = 1u;
+    s.preciseShelf = Biquad64::makeLowShelf(sampleRate, shelfFreq, 0.72, shelfDb);
+    s.preciseTransformerPreEmphasis = Biquad64::makeLowShelf(
+        sampleRate, transformerShelfFreq, 0.72, transformerShelfDb);
+    s.preciseTransformerDeEmphasis = Biquad64::makeLowShelf(
+        sampleRate, transformerShelfFreq, 0.72, -transformerShelfDb);
     return s;
 }
 
@@ -202,41 +252,12 @@ LCSpatialSettings DSPPrecompute::makeSpatialSettings(float sampleRate,
                                                       float speakerWidth,
                                                       float amount,
                                                       bool enabled) {
-    float width = clamp(speakerWidth, 0.6f, 3.0f);
-    float lx = clamp(listenerX, -3.0f, 3.0f);
-    float lz = clamp(listenerZ, -2.8f, 2.8f);
-    float earOffset = 0.09f;
-    float speakerZ = 1.8f;
-    float amt = clamp(amount / 100.0f, 0.0f, 1.0f);
-    float crossfeed = 0.16f + amt * 0.30f;
-
-    float leftSpeakerX = -width / 2.0f;
-    float rightSpeakerX = width / 2.0f;
-
-    float leftEarX = lx - earOffset;
-    float rightEarX = lx + earOffset;
-
-    float llDist = distance(leftSpeakerX, speakerZ, leftEarX, lz);
-    float lrDist = distance(leftSpeakerX, speakerZ, rightEarX, lz);
-    float rlDist = distance(rightSpeakerX, speakerZ, leftEarX, lz);
-    float rrDist = distance(rightSpeakerX, speakerZ, rightEarX, lz);
-
-    float minDist = std::fmin(std::fmin(llDist, lrDist), std::fmin(rlDist, rrDist));
-
-    float llGain = inverseDistanceGain(llDist);
-    float rrGain = inverseDistanceGain(rrDist);
-    float lrGain = inverseDistanceGain(lrDist) * crossfeed;
-    float rlGain = inverseDistanceGain(rlDist) * crossfeed;
-    float normalizer = 1.0f / std::fmax((llGain + rrGain) * 0.5f, 0.001f);
-
-    LCSpatialSettings s{};
-    s.enabled = enabled ? 1u : 0u;
-    s.amount = amt;
-    s.ll = makeSpatialPath(llDist - minDist, llGain * normalizer, sampleRate);
-    s.lr = makeSpatialPath(lrDist - minDist, lrGain * normalizer, sampleRate);
-    s.rl = makeSpatialPath(rlDist - minDist, rlGain * normalizer, sampleRate);
-    s.rr = makeSpatialPath(rrDist - minDist, rrGain * normalizer, sampleRate);
-    return s;
+    const LCSpatialGeometryInput input = {
+        enabled ? 1u : 0u, listenerX, listenerZ, speakerWidth, amount
+    };
+    LCSpatialGeometryResult result{};
+    (void) calculateSpatialGeometry(sampleRate, input, LC_SPATIAL_DEFAULT_DELAY_CAPACITY, result);
+    return result.settings;
 }
 
 // ─────────────────────────────────────────────
@@ -248,31 +269,12 @@ float DSPPrecompute::clamp(float value, float lower, float upper) {
 }
 
 float DSPPrecompute::makePolynomialSoftClip(float input) {
-    if (input > 1.0f) return 1.0f;
-    if (input < -1.0f) return -1.0f;
+    // x - x^3/3 reaches +/-2/3 with zero slope at x = +/-1.
+    // A ceiling of +/-1 would introduce a 1/3 step at each boundary.
+    if (input > 1.0f) return 2.0f / 3.0f;
+    if (input < -1.0f) return -2.0f / 3.0f;
     return input - (input * input * input) / 3.0f;
 }
 
-float DSPPrecompute::distance(float ax, float az, float bx, float bz) {
-    float dx = ax - bx;
-    float dz = az - bz;
-    return std::fmax(std::sqrt(dx * dx + dz * dz), 0.12f);
-}
-
-float DSPPrecompute::inverseDistanceGain(float meters) {
-    return 1.0f / std::fmax(0.45f + meters * 0.62f, 0.2f);
-}
-
-LCSpatialPathSettings DSPPrecompute::makeSpatialPath(float distanceOffset,
-                                                      float gain,
-                                                      float sampleRate) {
-    float speedOfSound = 343.0f;
-    int32_t samples = static_cast<int32_t>(
-        (std::fmax(distanceOffset, 0.0f) / speedOfSound * sampleRate) + 0.5f);
-    LCSpatialPathSettings p{};
-    p.delaySamples = static_cast<uint32_t>(std::fmax(samples, 0));
-    p.gain = gain;
-    return p;
-}
 
 } // namespace lowend

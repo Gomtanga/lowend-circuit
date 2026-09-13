@@ -3,6 +3,8 @@ import AudioRingBufferC
 import LowEndDSPCoreC
 import LowEndSupport
 
+try runSourceCoordinatorChecks()
+
 private func require(_ condition: @autoclosure () -> Bool, _ message: String) {
     guard condition() else {
         fputs("FAIL: \(message)\n", stderr)
@@ -38,6 +40,29 @@ require(
     AudioProcessMatcher.resolve(requestedBundleIDs: ["com.tidal.desktop"], from: sibling).isEmpty,
     "bundle matching must respect dot boundaries"
 )
+
+let multipleRequestedApps = [
+    AudioProcessDescriptor(objectID: 40, pid: 400, bundleID: "com.example.a.player", isRunningOutput: true),
+    AudioProcessDescriptor(objectID: 41, pid: 401, bundleID: "com.example.b.player", isRunningOutput: false)
+]
+require(
+    AudioProcessMatcher.resolve(
+        requestedBundleIDs: [" COM.EXAMPLE.A ", "com.example.b", "com.example.a"],
+        from: multipleRequestedApps
+    ).map(\.objectID) == [40, 41],
+    "an active requested app must not remove another requested app's idle fallback; duplicate roots must deduplicate"
+)
+
+let restartedHelper = AudioProcessDescriptor(objectID: 72, pid: 702,
+    bundleID: "com.example.player.audio", isRunningOutput: true)
+require(AudioProcessMatcher.resolve(requestedBundleIDs: ["com.example.player"],
+    from: [restartedHelper]).map(\.objectID) == [72],
+    "reapplying a bundle resolves its restarted helper's current object ID and PID")
+let newlyCreatedHelper = AudioProcessDescriptor(objectID: 73, pid: 703,
+    bundleID: "com.example.player.renderer", isRunningOutput: true)
+require(AudioProcessMatcher.resolve(requestedBundleIDs: ["com.example.player"],
+    from: [restartedHelper, newlyCreatedHelper]).map(\.objectID) == [72, 73],
+    "a fresh resolution includes newly known active helpers under the same bundle root")
 
 require(ExciterOversamplingPolicy.factor(for: 44_100) == 4, "44.1 kHz must use 4x")
 require(ExciterOversamplingPolicy.factor(for: 48_000) == 4, "48 kHz must use 4x")
@@ -423,6 +448,46 @@ require(
     "TIDAL sink close must invalidate playback when no later start exists"
 )
 
+var tidalEvidence = TIDALPlaybackEvidenceTracker(maximumEvidenceAge: 15)
+tidalEvidence.ingest(tidalPlayerLogEntries)
+guard case let .format(initialEvidence) = tidalEvidence.snapshot(observedAt: now.addingTimeInterval(1)) else {
+    fputs("FAIL: fresh TIDAL playback evidence must be usable\n", stderr)
+    exit(1)
+}
+require(initialEvidence.observedAt == now.addingTimeInterval(0.1),
+        "the format timestamp must come from playback evidence, not the poll")
+tidalEvidence.ingest([SourceFormatLogEntry(date: now.addingTimeInterval(20), message: "unrelated network heartbeat")])
+require(tidalEvidence.snapshot(observedAt: now.addingTimeInterval(20)) == .stale,
+        "unrelated appended log lines must not refresh stale playback evidence")
+require(SourceFormatParser.parseTIDALPlayerLogResult(
+    entries: tidalPlayerLogEntries, observedAt: now.addingTimeInterval(86_400)
+) == .stale, "historical open/start records must not become current on a later poll")
+tidalEvidence.ingest([SourceFormatLogEntry(date: now.addingTimeInterval(21), message: "CoreaudioSink::start")])
+guard case let .format(resumedEvidence) = tidalEvidence.snapshot(observedAt: now.addingTimeInterval(22)) else {
+    fputs("FAIL: new same-session sink start must refresh retained format\n", stderr)
+    exit(1)
+}
+require(resumedEvidence.sampleRate == 96_000, "same-session resume may retain its established sink format")
+tidalEvidence.reset()
+tidalEvidence.ingest([SourceFormatLogEntry(date: now.addingTimeInterval(23), message: "CoreaudioSink::start")])
+require(tidalEvidence.snapshot(observedAt: now.addingTimeInterval(24)) == .unavailable,
+        "a new session must not inherit the previous session's sink format")
+
+var tidalCursor = TIDALLogReadCursor()
+require(tidalCursor.plan(sessionID: "pid1:file1", fileSize: 1_000) == .newSession,
+        "attaching to a log must skip preexisting historical bytes")
+require(tidalCursor.plan(sessionID: "pid1:file1", fileSize: 1_000) == .unchanged,
+        "an unchanged file must not be reread with a new observation timestamp")
+require(tidalCursor.plan(sessionID: "pid1:file1", fileSize: 1_200) == .read(from: 1_000),
+        "only appended bytes may become newly observed evidence")
+tidalCursor.didRead(through: 1_200)
+require(tidalCursor.plan(sessionID: "pid2:file1", fileSize: 1_200) == .newSession,
+        "player restart with the same log must invalidate the old playback session")
+require(tidalCursor.plan(sessionID: "pid2:file2", fileSize: 900) == .newSession,
+        "log rotation must invalidate evidence even when the player PID is unchanged")
+require(tidalCursor.plan(sessionID: "pid2:file2", fileSize: 20) == .newSession,
+        "in-place log truncation must start a new evidence session")
+
 let newerOutputEntry = SourceFormatLogEntry(
     date: now.addingTimeInterval(2),
     message: "device sampleRate = 96000, 32-bit Float"
@@ -542,10 +607,65 @@ require(
         currentDeviceRate: 48_000,
         supportedRates: [44_100, 48_000, 96_000],
         isDeviceRateSettable: true,
+        observedAt: now.addingTimeInterval(1.5)
+    ) == 96_000,
+    "a proposal deferred by cooldown must remain eligible until accepted"
+)
+stabilityGate.acknowledge(targetRate: 192_000)
+require(stabilityGate.observe(
+    format: stableFormat, currentDeviceRate: 48_000, supportedRates: [48_000, 96_000],
+    isDeviceRateSettable: true, observedAt: now.addingTimeInterval(1.75)
+) == 96_000, "an unrelated rate acknowledgment must not consume a pending proposal")
+stabilityGate.acknowledge(targetRate: 96_000)
+require(
+    stabilityGate.observe(
+        format: stableFormat,
+        currentDeviceRate: 48_000,
+        supportedRates: [44_100, 48_000, 96_000],
+        isDeviceRateSettable: true,
         observedAt: now.addingTimeInterval(2)
     ) == nil,
     "one stable source must not repeatedly emit the same transition"
 )
+
+var interruptedGate = SourceRateMatchStabilityGate()
+require(interruptedGate.observe(
+    format: stableFormat, currentDeviceRate: 48_000, supportedRates: [48_000, 96_000],
+    isDeviceRateSettable: true, observedAt: now
+) == nil, "the first observation must establish a fresh stability candidate")
+require(interruptedGate.observe(
+    format: nil, currentDeviceRate: 48_000, supportedRates: [48_000, 96_000],
+    isDeviceRateSettable: true, observedAt: now.addingTimeInterval(0.5)
+) == nil, "missing source evidence must invalidate the current candidate")
+require(interruptedGate.observe(
+    format: stableFormat, currentDeviceRate: 48_000, supportedRates: [48_000, 96_000],
+    isDeviceRateSettable: true, observedAt: now.addingTimeInterval(100)
+) == nil, "one observation after a long gap must not inherit pre-gap stability")
+require(interruptedGate.observe(
+    format: stableFormat, currentDeviceRate: .nan, supportedRates: [48_000, 96_000],
+    isDeviceRateSettable: true, observedAt: now.addingTimeInterval(101)
+) == nil, "invalid hardware rates must not trap during stability-key conversion")
+
+let musicSelectionFormat = SourceAudioFormat(
+    player: .appleMusic, sampleRate: 44_100, bitDepth: nil, confidence: .inferred,
+    evidence: .appleScript, observedAt: now
+)
+require(SourceFormatSelectionPolicy.select(formats: [stableFormat, musicSelectionFormat]) == nil,
+        "the global tap must not pick one arbitrary player from a mixed source")
+require(SourceFormatSelectionPolicy.select(
+    formats: [stableFormat, musicSelectionFormat], capturedBundleIDs: ["COM.APPLE.MUSIC"]
+) == musicSelectionFormat, "a process tap must select only its matching source")
+require(SourceFormatSelectionPolicy.select(
+    formats: [stableFormat], capturedBundleIDs: ["com.spotify.client"]
+) == nil, "a noncaptured player's metadata must not change the capture device rate")
+require(SourceFormatSelectionPolicy.select(
+    formats: [stableFormat], capturedBundleIDs: ["com.tidal.desktop.player"]
+) == stableFormat, "a selected player helper must retain the player identity")
+require(SourceFormatSelectionPolicy.select(
+    formats: [stableFormat], capturedBundleIDs: ["com.tidal.desktopish"]
+) == nil, "source scope matching must respect bundle dot boundaries")
+require(SourceFormatSelectionPolicy.select(formats: [stableFormat], capturedBundleIDs: []) == nil,
+        "an empty explicit scope must not act like a global tap")
 
 guard let sharedCore = lc_dsp_core_create() else {
     fputs("FAIL: shared DSP core allocation\n", stderr)
