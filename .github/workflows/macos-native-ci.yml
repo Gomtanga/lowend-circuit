@@ -42,6 +42,16 @@ jobs:
       - name: Run portable Core tests
         run: ctest --test-dir build/core-tests -C Release --output-on-failure
 
+      - name: Capture native self-test backtrace
+        if: failure()
+        timeout-minutes: 2
+        continue-on-error: true
+        run: |
+          executable=SystemAudioProcessor/.build/debug/SystemAudioProcessor
+          if [ -x "$executable" ]; then
+            SWIFT_BACKTRACE=disable lldb --batch -o run -o "thread backtrace all" -- "$executable" --self-test > "$RUNNER_TEMP/lowend-debug-backtrace.log" 2>&1
+          fi
+
       - name: Collect native crash diagnostics
         if: failure()
         run: |
@@ -63,4 +73,5 @@ jobs:
           name: lowend-native-failure
           path: |
             ${{ runner.temp }}/lowend-debug-self-test.log
+            ${{ runner.temp }}/lowend-debug-backtrace.log
             ${{ runner.temp }}/lowend-crash-reports/
