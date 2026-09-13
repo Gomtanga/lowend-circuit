@@ -1,270 +1,116 @@
-# LowEnd Circuit — Audio DSP for Bass Enhancement and Spatial Processing
-
-[한국어](README.md) | **English**
-
-[![Latest release](https://img.shields.io/github/v/release/Gomtanga/lowend-circuit?display_name=tag&sort=semver)](https://github.com/Gomtanga/lowend-circuit/releases/latest)
-[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
-[![Cross-Platform Core CI](https://github.com/Gomtanga/lowend-circuit/actions/workflows/cross-platform-core-ci.yml/badge.svg)](https://github.com/Gomtanga/lowend-circuit/actions/workflows/cross-platform-core-ci.yml)
-[![macOS Native and Core CI](https://github.com/Gomtanga/lowend-circuit/actions/workflows/macos-native-ci.yml/badge.svg)](https://github.com/Gomtanga/lowend-circuit/actions/workflows/macos-native-ci.yml)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/hero-light.svg">
+  <img src="docs/assets/hero-dark.svg" width="1200" alt="LowEnd Circuit — Bass. Harmonics. Space.">
+</picture>
 
 <p align="center">
-  <img src="SystemAudioProcessor/Assets/LowEndNativeAudioIcon.png" width="180" alt="LowEnd Native Audio app icon">
+  <strong>Add bass weight, harmonic texture, and headphone space to your Mac.</strong><br>
+  Open-source DSP for system-wide or per-application audio, in real time.
 </p>
 
-LowEnd Circuit is an open-source audio DSP project for bass enhancement, high-frequency harmonic generation, headphone spatial processing, and real-time signal analysis. The repository includes a macOS system-audio application and a portable C++ DSP core (`Source/Core/`).
+<p align="center">
+  <a href="https://github.com/Gomtanga/lowend-circuit/releases/download/v0.3.0/LowEnd-Native-Audio-macOS-v0.3.0.zip"><strong>Download for macOS ↗</strong></a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.3.0">v0.3.0 release notes</a>
+</p>
 
-This is an original DSP design. It is not affiliated with or endorsed by any hardware or software manufacturer, and it does not claim to reproduce a third party's proprietary circuit.
+[![Release](https://img.shields.io/github/v/release/Gomtanga/lowend-circuit?display_name=tag&sort=semver&color=c68b32)](https://github.com/Gomtanga/lowend-circuit/releases/latest)
+[![macOS CI](https://github.com/Gomtanga/lowend-circuit/actions/workflows/macos-native-ci.yml/badge.svg)](https://github.com/Gomtanga/lowend-circuit/actions/workflows/macos-native-ci.yml)
+[![Core CI](https://github.com/Gomtanga/lowend-circuit/actions/workflows/cross-platform-core-ci.yml/badge.svg)](https://github.com/Gomtanga/lowend-circuit/actions/workflows/cross-platform-core-ci.yml)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-486b87)](LICENSE)
 
-The current macOS interface uses Korean control labels. This guide includes their English meanings where you need to find a specific control.
+[한국어](README.md) · **English**
 
-## Which build should I use?
+## Shape your sound and your listening space
 
-`LowEnd Circuit` is the name of the overall project. Choose the program that matches how you plan to use it.
+**LowEnd Native Audio**, the macOS app from **LowEnd Circuit**, processes music, browser audio, and games before sending them to your current output device. Shape the bass, add harmonics, and position virtual speakers and the listener to adjust headphone space.
 
-| What you want to do | Choose | Availability | Important detail |
-|---|---|---|---|
-| Process all Mac audio or one application | **LowEnd Native Audio** | Prebuilt macOS app | macOS 14.4 or newer; Apple Silicon only |
+<img src="docs/assets/spatial-stage.jpg" width="1224" alt="Actual LowEnd Native Audio Spatial Stage interface, showing left and right virtual speakers and a listener in a 3D stage, with position and spatial controls on the right.">
 
-The project is organized as follows:
+<p align="center"><sub>Spatial Stage · Actual app interface with direct control of speaker and listener positions</sub></p>
 
-```text
-LowEnd Circuit
-└─ LowEnd Native Audio
-   └─ System-wide or per-application processing on macOS
-```
+| Bass and texture | Space and signal insight |
+|---|---|
+| **Circuit** — Shape bass weight and saturation texture with LowEnd and Body. | **Spatial Stage** — Adjust speaker width, listener position, distance gain, and crossfeed. |
+| **HighExciter** — Generate and blend harmonics from high-frequency content, with internal nonlinear-stage oversampling. | **Analysis** — Inspect the signal with a real-time spectrum, Peak, RMS, and Crest Factor. |
 
-## Download
+Spatial Stage is a geometry-based stereo processor. It does not provide individualized HRTF rendering or room reverb.
 
-The download baseline documented here is [v0.3.0](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.3.0). See the release notes for changes and verification results.
+### A few controls. Your own sound.
 
-### Prebuilt files
+Start with Circuit **IEM · Gentle · LowEnd · Deep · Clear** or HighExciter **Soft · Air · Detail · Shimmer · Off**, then adjust the details. Presets can differ in loudness, so compare output levels as well as tone.
 
-| Platform | File | Purpose |
-|---|---|---|
-| macOS 14.4 or newer, Apple Silicon | [`LowEnd-Native-Audio-macOS-v0.3.0.zip`](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.3.0/LowEnd-Native-Audio-macOS-v0.3.0.zip) | System-wide or per-application processing |
+<img src="docs/assets/circuit.jpg" width="1080" alt="Actual LowEnd Native Audio Circuit interface, with LowEnd, Body, and Output sliders and the IEM, Gentle, LowEnd, Deep, and Clear presets.">
 
-Previous versions are available from [GitHub Releases](https://github.com/Gomtanga/lowend-circuit/releases).
+<p align="center"><sub>Circuit · Model selection, bass controls, and presets in one view</sub></p>
 
-### Distribution scope and cautions
+<a id="quick-start"></a>
 
-- The downloadable macOS build is `arm64` only. There is no Intel Mac binary.
-- The macOS app is signed ad hoc and is not notarized by Apple.
-- Public binaries now cover only the macOS build of LowEnd Native Audio. The former Windows/JUCE distribution targets and historical Windows release assets were retired in August 2026.
+## Download and start listening
 
-## Start in one minute
+| Supported system | App |
+|---|---|
+| **macOS 14.4 or newer · Apple Silicon** | [Download LowEnd Native Audio v0.3.0 ZIP](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.3.0/LowEnd-Native-Audio-macOS-v0.3.0.zip) |
 
-### macOS: process all system audio
+1. Extract the ZIP and move **LowEnd Native Audio.app** to **Applications**.
+2. Open the app and allow macOS **system-audio recording** permission.
+3. Start with **Circuit → IEM or Gentle**, or **HighExciter → Soft or Air**.
+4. Press the **speaker button at the bottom left (전체 시스템 적용 / Apply System-wide)**, then play music.
 
-1. Extract the macOS ZIP file.
-2. Move `LowEnd Native Audio.app` to Applications.
-3. If the first launch is blocked, right-click the app in Finder and choose **Open**.
-4. Allow system-audio recording when macOS asks.
-5. Select `Circuit`, `HighExciter`, or `Clean`.
-6. Start with `IEM` or `Gentle` for Circuit, or `Soft` or `Air` for HighExciter.
-7. Press **전체 시스템 적용 (Apply System-wide)**.
+The app is **ad-hoc signed and not notarized by Apple**. If macOS blocks the first launch, check its source, then use **System Settings → Privacy & Security → Open Anyway**. See [Getting started](docs/getting-started.en.md) for installation and per-application processing. The current app interface uses Korean labels.
 
-Press **중지 (Stop)** before changing the output device. If audio becomes silent while processing, stop and apply the mode again.
+**Run only one copy of the app.** Disable exclusive output in players such as TIDAL, and press **중지 (Stop)** before changing output devices.
 
-### macOS: process one application
+<a id="faq"></a>
 
-1. Start playback in the target application.
-2. Enter its main bundle ID in LowEnd Native Audio.
-3. Press **특정 앱 적용 (Apply to App)**.
-
-The running-app list near the bottom of the window helps identify bundle IDs. Entering a main ID such as `com.tidal.desktop` also lets the app find an active child audio process. If no matching Core Audio process exists, start playback and apply the target again.
-
-## Core features
-
-| Feature | What it does | Available in |
-|---|---|---|
-| **Clean** | Bypasses the Circuit/HighExciter tonal model. Spatial and Output Conditioning remain independent; disable both for a dry comparison. | LowEnd Native Audio |
-| **Circuit** | Combines `LowEnd`, `Body`, a parallel wet path, asymmetric saturation, and output protection to shape bass weight and texture. | LowEnd Native Audio |
-| **HighExciter** | Generates harmonics from content above roughly 11 kHz and adapts nonlinear-stage oversampling to the sample rate. | LowEnd Native Audio |
-| **Spatial Stage** | Uses virtual-speaker width, listener position, distance gain, interaural timing, and crossfeed to shape headphone space. | LowEnd Native Audio |
-| **Analysis** | Displays a 16,384-point FFT, 128 spectrum bars, Peak, RMS, and Crest Factor. | LowEnd Native Audio |
-| **Source and Rate Match** | Conservatively derives source-format information from player metadata or logs and previews a matching DAC rate. | LowEnd Native Audio |
-
-Spatial Stage is a geometry-based stereo processor. It is not room reverb or an individualized HRTF renderer.
-
-### Presets
-
-Presets are starting points. Circuit presets are not loudness-matched, so you may hear both tonal and playback-level differences when comparing them.
+## Common questions
 
 <details>
-<summary>Show Circuit and HighExciter preset values</summary>
+<summary><strong>Are HighExciter oversampling and PCM Oversampling 2× the same feature?</strong></summary>
 
-#### Circuit
-
-| Preset | LowEnd | Body | Output |
-|---|---:|---:|---:|
-| IEM | 30% | 8% | -2.0 dB |
-| Gentle | 22% | 8% | -1.0 dB |
-| LowEnd | 42% | 18% | -1.8 dB |
-| Deep | 54% | 22% | -2.8 dB |
-| Clear | 0% | 0% | 0.0 dB |
-
-Stronger bass settings use lower output values to preserve headroom and reduce the risk of clipping.
-
-#### HighExciter
-
-| Preset | Exciter Drive | Wet Mix |
-|---|---:|---:|
-| Soft | 0.12 | 0.04 |
-| Air | 0.22 | 0.07 |
-| Detail | 0.35 | 0.11 |
-| Shimmer | 0.50 | 0.16 |
-| Off | 0.00 | 0.00 |
-
-HighExciter presets change only `Exciter Drive` and `Wet Mix`. They do not change Circuit `Output` or Spatial Stage settings.
+They act at different points. HighExciter oversamples its nonlinear harmonic-generation stage and returns to the processing rate. Output Conditioning PCM 2× raises the output rate after tonal and Spatial processing. You can use both together. Supported devices can output at 44.1 → 88.2 kHz or 48 → 96 kHz.
 
 </details>
 
-## Audio formats and Rate Match
+<details>
+<summary><strong>Why does headroom leave the volume unchanged? Do I need an external DAC?</strong></summary>
 
-LowEnd Native Audio keeps several format values separate:
+Headroom affects audio only while **PCM 2× is actually active**. Check the active status as well as the selected setting. An external DAC is optional; a built-in output can work if it supports the target rate. See the [Audio guide](docs/audio-guide.en.md) for the conditions.
 
-- `Tap`: the format delivered by Core Audio Process Tap
-- `Engine`: the output graph format. With Live PCM 2×, tonal/Spatial DSP runs at the Tap rate before upsampling to this output rate.
-- `DAC`: the output device's nominal sample rate
-- `Source`: playback-source information obtained independently from Apple Music or TIDAL
+</details>
 
-`Source` is labeled `Detected` or `Inferred` according to the available evidence. A value that cannot be established remains `unknown`; the app never substitutes the Tap or DAC rate and presents it as the source-file format.
+<details>
+<summary><strong>Does Clean turn off all processing?</strong></summary>
 
-For TIDAL, the app watches `player.log` for filesystem changes and rechecks the source format after an approximately 80 ms debounce. It rearms the watcher when the log is replaced or rotated and retains periodic polling as a recovery path. `CoreaudioSink::start` and `CoreaudioSink::close` are also treated as playback-state evidence, covering track changes where TIDAL delays or omits `media.state=active`.
+Clean bypasses the Circuit and HighExciter tonal models. Spatial and Output Conditioning operate independently; turn them off separately for a dry comparison.
 
-Source monitoring tracks the player PID, log-file identity, and read offset. Old log bytes are not promoted to fresh observations. Source can remain `unknown` until a new playback/sink record arrives after monitoring begins, or when evidence has not refreshed for 15 seconds. Mixed sources and sources outside the capture scope do not trigger automatic rate changes.
+</details>
 
-`Rate Match Preview` is read-only. It compares a detected source rate with rates reported by the DAC and shows a candidate without changing the device.
+<details>
+<summary><strong>What should I check if applying processing produces silence?</strong></summary>
 
-`자동 Rate Match (Automatic Rate Match)` is experimental, independent of the detailed format display, and off by default. After stable source observations, it fades out, stops the engine, changes the DAC and Engine rates, rebuilds capture and output, verifies flow, and fades back in. Changing to a different source rate can introduce silence while the device relocks; duration depends on the device and transition result. Live PCM 2× and automatic matching are mutually exclusive rate-changing modes.
+Check for another running copy of the app, system-audio recording permission, and the selected output device. Disable the player's exclusive mode, then **Stop → apply again**. For per-application capture, start playback in the target app first. Follow the checks in [Getting started](docs/getting-started.en.md).
 
-To avoid device reconfiguration between tracks, leave Automatic Rate Match off and use a fixed rate supported by the DAC. See [Rate Matching](docs/rate-matching.md) and the [Source Rate Tracking and Device Lock Plan](docs/source-rate-and-device-lock-plan.md) for transition and recovery details.
+</details>
 
-## Limitations to read first
+<a id="documentation"></a>
 
-- DSP intentionally changes the signal, so the output is not bit-perfect in the strict sense.
-- Exclusive output such as TIDAL **Use Exclusive Mode** can bypass or starve Core Audio Process Tap. Disable exclusive mode during system-wide or per-application processing.
-- TIDAL provides no public source-format API. `Source` may remain `unknown` when the installed player emits no recognized message.
-- The Apple Music metadata fallback may request macOS Automation permission.
-- The target application's Core Audio output process must be active when per-application capture starts.
-- The macOS app is not Developer ID signed or notarized by Apple.
-- Spatial Stage is not an individualized HRTF.
+## Explore the documentation
 
-## System requirements
-
-| Target | Minimum | Recommended or additional condition |
-|---|---|---|
-| LowEnd Native Audio | macOS 14.4 or newer, Apple Silicon M1 or newer, 8 GB memory, Metal-capable GPU, roughly 100 MB free space | Apple M2 or newer and 16 GB memory for combined 96/192 kHz processing and Analysis |
-
-These requirements do not guarantee identical performance across every device, sample rate, and buffer size.
-
-## Detailed documentation
-
-| Document | Subject |
+| Guide | Find out about |
 |---|---|
-| [System-Wide and Per-App Use](docs/system-wide-and-per-app.md) | macOS system-wide and per-application processing |
-| [Rate Matching](docs/rate-matching.md) | Automatic sample-rate transitions and recovery |
-| [HighExciter Oversampling](docs/high-exciter-oversampling.md) | Factor policy, filters, and real-time constraints |
-| [Source Format Validation](docs/source-format-validation-2026-06-11.md) | Apple Music and TIDAL source-detection evidence |
-| [Source Rate Tracking and Device Lock Plan](docs/source-rate-and-device-lock-plan.md) | Source, automatic transition, and Device Lock design |
-| [Cross-Platform Core Architecture](docs/cross-platform-core-architecture.md) | Swift and C++ DSP-core integration design and migration plan |
-| [GitHub Releases](https://github.com/Gomtanga/lowend-circuit/releases) | Version changes, downloadable files, and verification results |
+| [Getting started](docs/getting-started.en.md) | Downloads, permissions, system-wide and per-app use, silence checks |
+| [Audio guide](docs/audio-guide.en.md) | Models, preset values, PCM 2×, headroom, Source, and Rate Match |
+| [Development](docs/development.en.md) | Building from source, verification commands, Swift/C++ architecture, design references |
+| [Contributing](CONTRIBUTING.md) | Useful bug reports and change proposals |
+| [Release notes](https://github.com/Gomtanga/lowend-circuit/releases) | Changes and verification scope for each version |
 
-Design documents and dated validation records describe the state at the time they were written. Check the latest code and release notes when you need the current behavior.
+Source information depends on available evidence. **Automatic Rate Match is experimental and off by default.** Live Output Conditioning supports **PCM 2×**. The audio and development guides cover the conditions and experimental scope.
 
-## Build from source
+## Build with us
 
-### LowEnd Native Audio
+Report bugs and ideas in [GitHub Issues](https://github.com/Gomtanga/lowend-circuit/issues). For code contributions, start with [Development](docs/development.en.md) and [Contributing](CONTRIBUTING.md). This repository develops both the macOS app and a portable C++ DSP core.
 
-You need macOS 14.4 or newer and a current Xcode command-line or Swift toolchain.
-
-```sh
-git clone https://github.com/Gomtanga/lowend-circuit.git
-cd lowend-circuit
-./scripts/build-native-system-audio-app.sh
-open "build/LowEndCircuit_artefacts/Release/NativeSystemAudio/LowEnd Native Audio.app"
-```
-
-The following helpers can start system-wide or per-application modes from the command line:
-
-```sh
-./scripts/run-system-wide-lowend.sh
-./scripts/list-audio-apps.sh
-./scripts/run-app-lowend.sh com.spotify.client
-```
-
-## Verification
-
-The repository CI checks the portable C++ Core, Swift support cases, Swift and C++ DSP parity, and the LowEnd Native Audio build separately. Run the commands that match your change.
-
-```sh
-cmake -S Source/Core -B build/core-tests -DCMAKE_BUILD_TYPE=Release -DLOWEND_CORE_BUILD_TESTING=ON
-cmake --build build/core-tests --parallel
-ctest --test-dir build/core-tests --output-on-failure
-```
-
-On macOS, you can also run:
-
-```sh
-swift run --package-path SystemAudioProcessor -c release LowEndSupportChecks
-swift run --package-path SystemAudioProcessor -c release SystemAudioProcessor --self-test
-```
-
-`--self-test` runs fast offline regressions. Run CPU throughput measurements separately with `--benchmark-output-conditioning`. `RateMatchBench` defaults to read-only `--dry-run`; physical rate changes require `--execute --device ID` and can interrupt other audio. This manual tool is never part of routine builds or CI.
-
-The bundle script builds Release, runs support checks, assembles and signs a staged app, checks its SwiftPM shader bundle, and runs that exact executable's offline self-test and CLI argument regressions before replacing an existing app. The CLI checks verify invalid-argument rejection and help output. Isolate QA output with absolute overrides:
-
-```sh
-LOWEND_BUILD_DIR=/tmp/lowend-build-qa \
-LOWEND_APP_DIR="/tmp/lowend-app-qa/LowEnd Native Audio.app" \
-./scripts/build-native-system-audio-app.sh
-```
-
-`LOWEND_SWIFT_SCRATCH_DIR` and a numeric `LOWEND_BUILD_NUMBER` are optional. A shallow clone's commit count is not a globally monotonic build identity. Offline checks do not verify Process Tap permission, physical DAC transitions, listening quality, or VoiceOver interaction.
-
-To validate a specific toolchain configuration, set `LOWEND_SWIFT_SDK` to an installed macOS SDK path and `LOWEND_SWIFT_BUILD_SYSTEM` to a build system supported by that Swift installation. Both product builds and the binary-path query receive the same options. Omit them to use Swift's defaults; these options do not change the system developer directory.
-
-The real-time audio callback is designed to avoid memory allocation, locks, logging and file I/O, UI access, and filter-coefficient calculation. See the source and [Cross-Platform Core Architecture](docs/cross-platform-core-architecture.md) for details.
-
-## Current source implementation and experimental scope
-
-The Native live callback uses the Swift Circuit/HighExciter implementations in `TonalDSP.swift` and Spatial processing in `SpatialDSP.swift`. C++ `Source/Core` provides portable kernels and the parity comparison path. Spatial geometry is shared through its pure C++ function and C ABI. Agreement between two implementations is supplemented by independent impulse, response, DC, and transition fixtures.
-
-Live Output Conditioning supports PCM 2×. Higher factors, dither/noise shaping, and DSD/DoP are not connected to live output. The offline DoP packer stores 16 DSD bits and an 8-bit marker per channel in a 32-bit little-endian container `[payloadLow, payloadHigh, marker, 0]`, preserving partial payloads and marker phase across blocks. This format check does not establish complete DSD64/128/256 transport or hardware compatibility.
-
-v0.3.0 includes the Spatial Stage redesign and audio-processing stabilization. See its release notes for included features and verification scope.
-
-## Reporting issues and contributing
-
-Report bugs and feature requests in [GitHub Issues](https://github.com/Gomtanga/lowend-circuit/issues). Audio problems depend heavily on the environment, so include as much of the following as you reasonably can:
-
-- operating system and version
-- CPU and application version
-- input and output devices, including the DAC model
-- sample rate and buffer settings
-- selected model and preset
-- system-wide or per-application use
-- exclusive-mode and Automatic Rate Match state
-- reproduction steps and expected result
-- relevant logs or screenshots
-
-Before attaching logs, remove account information, user names, private paths, listening history, and anything else that does not need to be public.
-
-When proposing a change, state the affected platform, the checks you ran, and anything you did not verify. Pull requests run the repository's macOS and cross-platform CI workflows.
-
-## Repository layout
-
-```text
-Source/Core/                    Testable portable Circuit and HighExciter DSP
-SystemAudioProcessor/           Native macOS Swift and C engine
-SystemAudioProcessor/Shaders/   Metal spectrum shader
-SystemAudioProcessor/Assets/    Native app icon
-scripts/                        Build and launch helpers
-docs/                           Usage, design, and validation records
-```
-
-## License and third-party terms
-
-This repository is distributed under [GNU AGPL-3.0-or-later](LICENSE).
-
-Third-party names and trademarks belong to their respective owners. The project does not use another company's product name as its brand or claim an exact emulation of a proprietary circuit.
+Released under [GNU AGPL-3.0-or-later](LICENSE). This is an original DSP design, without manufacturer affiliation or claims of exact proprietary-circuit reproduction. Third-party names and trademarks belong to their respective owners.
