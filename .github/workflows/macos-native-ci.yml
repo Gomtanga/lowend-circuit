@@ -49,7 +49,7 @@ jobs:
         run: |
           executable=SystemAudioProcessor/.build/debug/SystemAudioProcessor
           if [ -x "$executable" ]; then
-            SWIFT_BACKTRACE=disable lldb --batch -o run -o "thread backtrace all" -- "$executable" --self-test > "$RUNNER_TEMP/lowend-debug-backtrace.log" 2>&1
+            SWIFT_BACKTRACE=disable lldb --batch -o run --one-line-on-crash "thread backtrace all" -- "$executable" --self-test > "$RUNNER_TEMP/lowend-debug-backtrace.log" 2>&1
           fi
 
       - name: Collect native crash diagnostics

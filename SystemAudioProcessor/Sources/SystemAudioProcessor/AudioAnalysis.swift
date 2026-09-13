@@ -700,7 +700,9 @@ final class AudioSpectrumAnalyzer: NSObject, @unchecked Sendable {
                     blit.copy(from: source, sourceOffset: 0, to: destination, destinationOffset: 0, size: 256)
                     blit.endEncoding()
                     delayedSlots.releaseAfterCompletion(slot, of: command)
-                    command.addCompletedHandler { _ in callbacks.signal() }
+                    // Older SDKs do not annotate the Metal callback as Sendable.
+                    // Do not inherit this check's MainActor on Metal's queue.
+                    command.addCompletedHandler { @Sendable _ in callbacks.signal() }
                     commands.append(command); sources.append(source); destinations.append(destination)
                     command.commit()
                 }
