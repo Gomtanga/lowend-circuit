@@ -27,7 +27,7 @@
 
 **LowEnd Native Audio**, the macOS app from **LowEnd Circuit**, processes music, browser audio, and games before sending them to your current output device. Shape the bass, add harmonics, and position virtual speakers and the listener to adjust headphone space.
 
-<img src="docs/assets/spatial-stage.jpg" width="1224" alt="Actual LowEnd Native Audio Spatial Stage interface, showing left and right virtual speakers and a listener in a 3D stage, with position and spatial controls on the right.">
+<img src="docs/assets/spatial-stage.png" width="1224" alt="Actual LowEnd Native Audio Spatial Stage interface, showing left and right virtual speakers and a listener in a 3D stage, with position and spatial controls on the right.">
 
 <p align="center"><sub>Spatial Stage · Actual app interface with direct control of speaker and listener positions</sub></p>
 
@@ -42,7 +42,7 @@ Spatial Stage is a geometry-based stereo processor. It does not provide individu
 
 Start with Circuit **IEM · Gentle · LowEnd · Deep · Clear** or HighExciter **Soft · Air · Detail · Shimmer · Off**, then adjust the details. Presets can differ in loudness, so compare output levels as well as tone.
 
-<img src="docs/assets/circuit.jpg" width="1080" alt="Actual LowEnd Native Audio Circuit interface, with LowEnd, Body, and Output sliders and the IEM, Gentle, LowEnd, Deep, and Clear presets.">
+<img src="docs/assets/circuit.png" width="1080" alt="Actual LowEnd Native Audio Circuit interface, with LowEnd, Body, and Output sliders and the IEM, Gentle, LowEnd, Deep, and Clear presets.">
 
 <p align="center"><sub>Circuit · Model selection, bass controls, and presets in one view</sub></p>
 

@@ -27,7 +27,7 @@
 
 **LowEnd Circuit**의 macOS 앱 **LowEnd Native Audio**는 음악, 브라우저, 게임의 소리를 현재 출력 장치로 전달하기 전에 조절합니다. 저역을 다듬고, 배음을 더하고, 가상 스피커와 청취자의 위치로 헤드폰의 공간감을 바꿔 보세요.
 
-<img src="docs/assets/spatial-stage.jpg" width="1224" alt="LowEnd Native Audio의 실제 Spatial Stage 화면. 3D 공간에 좌우 가상 스피커와 청취자가 표시되고, 오른쪽에서 위치와 공간 처리 값을 조절합니다.">
+<img src="docs/assets/spatial-stage.png" width="1224" alt="LowEnd Native Audio의 실제 Spatial Stage 화면. 3D 공간에 좌우 가상 스피커와 청취자가 표시되고, 오른쪽에서 위치와 공간 처리 값을 조절합니다.">
 
 <p align="center"><sub>Spatial Stage · 가상 스피커와 청취자 위치를 직접 조절하는 실제 앱 화면</sub></p>
 
@@ -42,7 +42,7 @@ Spatial Stage는 기하학 기반의 스테레오 공간 처리입니다. 개인
 
 Circuit의 **IEM · Gentle · LowEnd · Deep · Clear**, HighExciter의 **Soft · Air · Detail · Shimmer · Off** 프리셋으로 시작해 세부 값을 조절하세요. 프리셋마다 음량이 다를 수 있으므로 비교할 때는 출력 레벨도 함께 확인하세요.
 
-<img src="docs/assets/circuit.jpg" width="1080" alt="LowEnd Native Audio의 실제 Circuit 화면. LowEnd, Body, Output 슬라이더와 IEM, Gentle, LowEnd, Deep, Clear 프리셋이 있습니다.">
+<img src="docs/assets/circuit.png" width="1080" alt="LowEnd Native Audio의 실제 Circuit 화면. LowEnd, Body, Output 슬라이더와 IEM, Gentle, LowEnd, Deep, Clear 프리셋이 있습니다.">
 
 <p align="center"><sub>Circuit · 모델 선택, 저역 조절, 프리셋을 한 화면에서</sub></p>
 
