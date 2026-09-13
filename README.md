@@ -27,6 +27,8 @@
 
 **LowEnd Circuit**의 macOS 앱 **LowEnd Native Audio**는 음악, 브라우저, 게임의 소리를 현재 출력 장치로 전달하기 전에 조절합니다. 저역을 다듬고, 배음을 더하고, 가상 스피커와 청취자의 위치로 헤드폰의 공간감을 바꿔 보세요.
 
+유선 헤드폰뿐 아니라 **Bluetooth 무선 이어폰**에서도 사용할 수 있습니다. 무선 이어폰을 Mac에 연결하고 macOS의 출력 장치로 선택한 뒤, 전체 시스템 또는 특정 앱에 오디오 처리를 적용하세요.
+
 <img src="docs/assets/spatial-stage.png" width="1224" alt="LowEnd Native Audio의 실제 Spatial Stage 화면. 3D 공간에 좌우 가상 스피커와 청취자가 표시되고, 오른쪽에서 위치와 공간 처리 값을 조절합니다.">
 
 <p align="center"><sub>Spatial Stage · 가상 스피커와 청취자 위치를 직접 조절하는 실제 앱 화면</sub></p>

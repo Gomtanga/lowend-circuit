@@ -27,6 +27,8 @@
 
 **LowEnd Native Audio**, the macOS app from **LowEnd Circuit**, processes music, browser audio, and games before sending them to your current output device. Shape the bass, add harmonics, and position virtual speakers and the listener to adjust headphone space.
 
+You can use **Bluetooth wireless earbuds** as well as wired headphones. Connect your earbuds to your Mac, select them as the macOS output device, then apply system-wide or per-application audio processing.
+
 <img src="docs/assets/spatial-stage.png" width="1224" alt="Actual LowEnd Native Audio Spatial Stage interface, showing left and right virtual speakers and a listener in a 3D stage, with position and spatial controls on the right.">
 
 <p align="center"><sub>Spatial Stage · Actual app interface with direct control of speaker and listener positions</sub></p>
