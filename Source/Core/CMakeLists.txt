@@ -8,9 +8,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Core.h reuses the C ABI types from AudioRingBufferC.h.
 # The header lives in SystemAudioProcessor/ — we reference it by relative
 # path so Core/ can be built independently without moving files.
-get_filename_component(AUDIO_RING_BUFFER_INCLUDE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../SystemAudioProcessor/Sources/AudioRingBufferC/include"
+get_filename_component(AUDIO_RING_BUFFER_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../SystemAudioProcessor/Sources/AudioRingBufferC"
     ABSOLUTE)
+get_filename_component(AUDIO_RING_BUFFER_INCLUDE
+    "${AUDIO_RING_BUFFER_ROOT}/include"
+    ABSOLUTE)
+set(AUDIO_RING_BUFFER_SOURCE "${AUDIO_RING_BUFFER_ROOT}/AudioRingBufferC.c")
 
 # ─── Core static library ────────────────────────────────────────────
 add_library(lowend_core STATIC
@@ -19,6 +23,9 @@ add_library(lowend_core STATIC
     src/HighExciter.cpp
     src/Processor.cpp
     src/SpatialGeometry.cpp
+    src/SpatialProcessor.cpp
+    src/PcmResampler.cpp
+    src/OutputConditioning.cpp
 )
 
 target_include_directories(lowend_core
@@ -28,6 +35,27 @@ target_include_directories(lowend_core
 )
 
 target_compile_features(lowend_core PUBLIC cxx_std_17)
+
+# ─── Lock-free C ABI building blocks ────────────────────────────────
+# AudioRingBufferC.c is C11, not C++: the SPSC ring, control queue, spectrum
+# snapshot and gain ramp are shared with the Swift and Windows engines, so the
+# atomic ABI must stay identical to the SwiftPM target. Defined once here so
+# every consumer gets the same compiler flags.
+add_library(lowend_ring_buffer STATIC "${AUDIO_RING_BUFFER_SOURCE}")
+target_include_directories(lowend_ring_buffer PUBLIC "${AUDIO_RING_BUFFER_INCLUDE}")
+target_compile_features(lowend_ring_buffer PUBLIC c_std_11)
+if(MSVC)
+    # MSVC ships <stdatomic.h> for C but only enables the C11 atomics keywords
+    # behind this switch. Without it the C11 atomic_* types fail to compile.
+    # Set it on the individual C source, not the target: a COMPILE_LANGUAGE
+    # generator expression is not honored by the Visual Studio generator, which
+    # would leave the flag out of the generated .vcxproj entirely.
+    set_source_files_properties("${AUDIO_RING_BUFFER_SOURCE}"
+        TARGET_DIRECTORY lowend_ring_buffer
+        PROPERTIES COMPILE_OPTIONS "/experimental:c11atomics")
+elseif(UNIX AND NOT APPLE)
+    target_link_libraries(lowend_ring_buffer PUBLIC m)
+endif()
 
 # ─── Tests (optional) ───────────────────────────────────────────────
 option(LOWEND_CORE_BUILD_TESTING "Build Core tests" OFF)

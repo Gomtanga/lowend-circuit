@@ -2,7 +2,9 @@
 
 [← Home](../README.en.md) · [한국어](getting-started.md)
 
-The app is **LowEnd Native Audio**. The project is **LowEnd Circuit**. The downloadable app supports **macOS 14.4 or newer on Apple Silicon**. Intel Mac and Windows binaries are not provided.
+The app is **LowEnd Native Audio**. The project is **LowEnd Circuit**. The downloadable app supports **macOS 14.4 or newer on Apple Silicon**. Intel Mac binaries are not provided.
+
+On Windows the project builds a **CLI from source** (no downloadable binary yet). There is no GUI, and system-wide processing is not transparent the way it is on macOS. See the [Windows guide](windows.md).
 
 Download [v0.3.0 for macOS](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.3.0/LowEnd-Native-Audio-macOS-v0.3.0.zip). Read the [release notes](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.3.0) for changes and verification scope. The app is **ad-hoc signed and not notarized by Apple**. See [Apple’s app-opening guidance](https://support.apple.com/en-us/102445) if the first launch is blocked.
 

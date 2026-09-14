@@ -12,12 +12,13 @@
 
 | 구성 요소 | 상태 |
 |---|---|
-| `Source/Core/` — C++ portable DSP (CircuitBass, HighExciter, Processor) | ✅ 구현 |
-| `SystemAudioProcessor/` — macOS Native App | 메인 타깃. 톤 DSP는 `TonalDSP.swift`, 공간 DSP는 `SpatialDSP.swift` |
-| `Source/Core/test/` — C++ 단위 테스트 | ✅ CI에서 실행 |
+| `Source/Core/` — C++ portable DSP (CircuitBass, HighExciter, Processor, SpatialGeometry, **SpatialProcessor**) | ✅ 구현 |
+| `SystemAudioProcessor/` — macOS Native App | 메인 타깃. 톤 DSP는 `TonalDSP.swift` |
+| `Source/Core/test/` — C++ 단위 테스트 | ✅ CI에서 실행 (Ubuntu + Windows) |
 | Swift ↔ C++ DSP parity self-test | ✅ macOS CI에서 실행 |
+| `Windows/` — WASAPI 기반 Windows CLI | ✅ Phase 2 구현, 로컬 검증 진행 중 |
 | JUCE Plugin (Standalone / VST3 / AU) | ❌ 폐기 (2026-08) |
-| Windows Adapter / Windows Native | ❌ 폐기 (2026-08) |
+| Windows Adapter / Windows Native (구 계획) | ❌ 폐기 (2026-08), [`windows-port-plan.md`](windows-port-plan.md)로 대체 |
 
 ---
 
@@ -37,7 +38,54 @@
 
 JUCE 타깃 폐기는 Native의 Swift 톤 DSP와 C++ portable DSP를 하나의 구현으로 합치지 않았습니다. 실제 callback은 `VirtualCircuitBassDSP`와 `HighExciterDSP`를 호출하며 두 클래스는 `TonalDSP.swift`에 있습니다. `SharedDSPCore`/`LowEndDSPCoreC`의 톤 processor는 parity self-test에서 비교합니다. 톤 계산을 수정하면 두 경로와 독립 expected fixture를 함께 갱신해야 합니다.
 
-공간 geometry는 `Source/Core/src/SpatialGeometry.cpp`의 순수 함수를 C ABI로 공유합니다. UI preview와 manager packet precompute는 같은 geometry 계약을 사용하지만, runtime delay/mix는 Swift `SpatialDSP.swift`에서 수행합니다. geometry의 공유와 톤 processor의 공통화는 서로 다른 범위입니다.
+공간 geometry는 `Source/Core/src/SpatialGeometry.cpp`의 순수 함수를 C ABI로 공유하고,
+런타임 delay/mix는 `Source/Core/src/SpatialProcessor.cpp`가 담당합니다. 이 클래스는
+플랫폼 독립 알고리즘이므로 `Source/Core`에 두었고, **Windows 엔진은 이 구현을 직접 사용**합니다.
+
+현재 상태를 정확히 구분하면:
+
+| 경로 | 런타임 delay/mix 구현 | 상태 |
+|---|---|---|
+| Windows (`Windows/`) | `lowend::SpatialProcessor` (`Source/Core`) | ✅ 사용 중 |
+| macOS live callback | `Spatializer` (`SpatialDSP.swift`) | ⚠️ 아직 Swift 구현을 사용 |
+
+즉 두 플랫폼이 **아직 하나의 구현을 공유하지는 않습니다.** `SpatialProcessor`는
+`SystemAudioProcessor/Package.swift`의 `LowEndDSPCoreC` 타깃에 아직 포함되지 않았고,
+macOS live 경로를 이 구현으로 옮기는 작업은 별도 범위입니다(옮기려면 패리티 회귀를
+기존 macOS CI에서 함께 검증해야 합니다).
+
+### 이식 충실성 근거
+
+런타임 교차 검증(Swift ↔ C++ 동일 입력 비교)은 이 워크스테이션에서 불가능합니다 — macOS와
+Swift 도구 체인이 없습니다. 대신 다음 세 가지로 근거를 남깁니다:
+
+1. **구조·연산 순서 일치**: `SpatialProcessor::process`가 `Spatializer.process`와 같은 순서로
+   동작함을 소스 대조로 확인했습니다. 양쪽 모두 (a) 두 delay line에 먼저 write, (b) mix
+   ramp, (c) `progress` 계산, (d) `ll/lr/rl/rr` 동일 라우팅의 tap, (e) 전환 카운터 갱신,
+   (f) activation 0이면 원본 반환, (g) `left*(1-amount) + wet*0.82*amount` 후
+   `tanh(x*1.02)/1.02` 블렌드. 상수(0.82, 1.02), `transitionFrames = 256`,
+   `delayCapacity = 8192`도 동일합니다. `DelayLine`의 5개 메서드도 1:1 대응합니다.
+2. **macOS가 쓰는 컴파일러에서 검증**: Clang(`clang++`)으로 Core 전체를 빌드해
+   **11/11 테스트 통과, 경고 0**. macOS CI도 Clang을 사용하므로, 새로 옮긴 코드가
+   MSVC 전용이 아님을 확인했습니다. GCC에서도 동일하게 11/11 통과, 경고 0입니다.
+3. **독립 기준 모델 검사**: `test_spatial_processor.cpp`가 기대값을 구현이 아니라 계약에서
+   계산해 impulse 위치·경로 라우팅·전환·리셋·비유한 입력을 검사합니다.
+
+다만 (1)은 소스 대조이고 (2)(3)는 C++ 쪽 자체 검증이므로, **Swift 구현과 지속적으로 같은
+결과를 낸다는 보장은 아닙니다.** 이를 보장하려면 macOS CI에 두 구현을 비교하는 회귀를
+추가해야 합니다.
+
+`SpatialProcessor`는 `LCSpatialSettings`(C ABI POD)를 직접 입력으로 받으므로 어떤 플랫폼
+헤더에도 의존하지 않습니다. geometry의 공유와 톤 processor의 공통화는 서로 다른 범위입니다.
+
+출력 레이트 처리(PCM 2× polyphase 리샘플러와 conditioning 스테이지)도 같은 이유로
+`Source/Core`의 `PcmResampler`/`OutputConditioning`에 있습니다. macOS의 `PCMResampler.swift`가
+`vDSP`와 스칼라 두 커널을 제공하고 두 결과가 동일하다고 문서화하므로, 이식 시 Accelerate 의존은
+넘기지 않고 스칼라 경로만 옮겼습니다. 프로토타입 설계(입력 주기 기준 sinc, Blackman 창,
+per-phase DC 정규화, 탭 역순 저장)와 계수 계산은 macOS 구현과 동일합니다.
+
+여기서도 현재 상태는 위 표와 같습니다: Windows가 Core 구현을 사용하고, macOS live 경로는
+아직 Swift 구현을 사용합니다.
 
 ---
 

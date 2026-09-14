@@ -25,7 +25,7 @@ The following helpers can start system-wide or per-application modes from the co
 
 ## Verification
 
-The repository CI checks the portable C++ Core, Swift support cases, Swift and C++ DSP parity, and the LowEnd Native Audio build separately. Run the commands that match your change.
+The repository CI checks the portable C++ Core, Swift support cases, Swift and C++ DSP parity, the LowEnd Native Audio build, and the Windows CLI separately. Run the commands that match your change.
 
 ```sh
 cmake -S Source/Core -B build/core-tests -DCMAKE_BUILD_TYPE=Release -DLOWEND_CORE_BUILD_TESTING=ON
@@ -38,6 +38,12 @@ On macOS, you can also run:
 ```sh
 swift run --package-path SystemAudioProcessor -c release LowEndSupportChecks
 swift run --package-path SystemAudioProcessor -c release SystemAudioProcessor --self-test
+```
+
+On Windows, run the build script, which configures CMake, builds, runs `ctest`, and then runs the CLI argument regressions. See the [Windows guide](windows.md) for details.
+
+```bat
+scripts\build-windows-cli.bat Release
 ```
 
 `--self-test` runs fast offline regressions. Run CPU throughput measurements separately with `--benchmark-output-conditioning`. `RateMatchBench` defaults to read-only `--dry-run`; physical rate changes require `--execute --device ID` and can interrupt other audio. This manual tool is never part of routine builds or CI.
@@ -60,6 +66,8 @@ The real-time audio callback is designed to avoid memory allocation, locks, logg
 
 The Native live callback uses the Swift Circuit/HighExciter implementations in `TonalDSP.swift` and Spatial processing in `SpatialDSP.swift`. C++ `Source/Core` provides portable kernels and the parity comparison path. Spatial geometry is shared through its pure C++ function and C ABI. Agreement between two implementations is supplemented by independent impulse, response, DC, and transition fixtures.
 
+The **Windows** engine uses `Source/Core` directly as its live DSP: `lowend::Processor` for tone and `lowend::SpatialProcessor` for spatial. There is no Windows-only DSP implementation. The macOS live path still runs the Swift spatial stage, so the two platforms do not yet share one spatial runtime implementation. See the [Windows guide](windows.md).
+
 Live Output Conditioning supports PCM 2×. Higher factors, dither/noise shaping, and DSD/DoP are not connected to live output. The offline DoP packer stores 16 DSD bits and an 8-bit marker per channel in a 32-bit little-endian container `[payloadLow, payloadHigh, marker, 0]`, preserving partial payloads and marker phase across blocks. This format check does not establish complete DSD64/128/256 transport or hardware compatibility.
 
 v0.3.0 includes the Spatial Stage redesign and audio-processing stabilization. See its release notes for included features and verification scope.
@@ -67,10 +75,11 @@ v0.3.0 includes the Spatial Stage redesign and audio-processing stabilization. S
 ## Repository layout
 
 ```text
-Source/Core/                    Testable portable Circuit and HighExciter DSP
+Source/Core/                    Testable portable Circuit, HighExciter, and Spatial DSP
 SystemAudioProcessor/           Native macOS Swift and C engine
 SystemAudioProcessor/Shaders/   Metal spectrum shader
 SystemAudioProcessor/Assets/    Native app icon
+Windows/                        Windows CLI and GUI audio engine (WASAPI)
 scripts/                        Build and launch helpers
 docs/                           Usage, design, and validation records
 ```
@@ -81,6 +90,8 @@ docs/                           Usage, design, and validation records
 
 | Document | Subject |
 |---|---|
+| [Windows Guide](windows.md) | Windows build, CLI usage, limitations, and verification scope |
+| [Windows Port Plan](windows-port-plan.md) | Windows porting phases and architecture decisions |
 | [System-Wide and Per-App Use](system-wide-and-per-app.md) | macOS system-wide and per-application processing |
 | [Rate Matching](rate-matching.md) | Automatic sample-rate transitions and recovery |
 | [HighExciter Oversampling](high-exciter-oversampling.md) | Factor policy, filters, and real-time constraints |
