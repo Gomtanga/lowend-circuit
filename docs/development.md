@@ -4,7 +4,7 @@
 
 ## 소스에서 빌드
 
-### LowEnd Native Audio
+### LowEnd Native Audio (macOS)
 
 macOS 14.4 이상과 최신 Xcode 명령줄 도구 또는 Swift 도구 체인이 필요합니다.
 
@@ -25,7 +25,8 @@ open "build/LowEndCircuit_artefacts/Release/NativeSystemAudio/LowEnd Native Audi
 
 ## 검증
 
-이 저장소의 CI는 휴대용 C++ Core, Swift 지원 검사, Swift·C++ DSP 비교, LowEnd Native Audio 빌드를 나누어 검사합니다. 로컬에서는 필요한 범위에 맞춰 다음 명령을 사용할 수 있습니다.
+이 저장소의 CI는 휴대용 C++ Core, Swift 지원 검사, Swift·C++ DSP 비교, LowEnd Native Audio 빌드,
+그리고 **Windows CLI**를 나누어 검사합니다. 로컬에서는 필요한 범위에 맞춰 다음 명령을 사용할 수 있습니다.
 
 ```sh
 cmake -S Source/Core -B build/core-tests -DCMAKE_BUILD_TYPE=Release -DLOWEND_CORE_BUILD_TESTING=ON
@@ -38,6 +39,12 @@ macOS에서는 다음 검사도 실행할 수 있습니다.
 ```sh
 swift run --package-path SystemAudioProcessor -c release LowEndSupportChecks
 swift run --package-path SystemAudioProcessor -c release SystemAudioProcessor --self-test
+```
+
+Windows에서는 다음을 실행합니다. 자세한 내용은 [Windows 가이드](windows.md)를 참고하세요.
+
+```bat
+scripts\build-windows-cli.bat Release
 ```
 
 `--self-test`는 빠른 오프라인 회귀 검사입니다. CPU 처리량 벤치마크는 `--benchmark-output-conditioning`으로 별도 실행합니다. `RateMatchBench`는 기본적으로 `--dry-run`이며 장치의 지원율과 제안만 읽습니다. 실제 변경에는 `--execute --device ID`가 필요하고 다른 앱의 오디오가 끊길 수 있습니다. 이 수동 도구는 일반 빌드·CI에서 실행하지 않습니다.
@@ -58,7 +65,9 @@ LOWEND_APP_DIR="/tmp/lowend-app-qa/LowEnd Native Audio.app" \
 
 ## 현재 소스의 처리 구현과 실험 범위
 
-Native live callback은 `TonalDSP.swift`의 Swift Circuit/HighExciter와 `SpatialDSP.swift`를 실행합니다. C++ `Source/Core`는 portable DSP 및 parity 비교 경로이며, 공간 geometry는 C++ 순수 계산을 C ABI로 공유합니다. 두 언어의 출력 일치는 동일한 오류를 배제하지 않으므로 독립 impulse·주파수 응답·DC·전환 fixture도 검사합니다.
+Native live callback은 `TonalDSP.swift`의 Swift Circuit/HighExciter와 `SpatialDSP.swift`를 실행합니다. C++ `Source/Core`는 휴대용 DSP이며, 공간 geometry는 C++ 순수 계산을 C ABI로 공유합니다. 두 언어의 출력 일치는 동일한 오류를 배제하지 않으므로 독립 impulse·주파수 응답·DC·전환 fixture도 검사합니다.
+
+**Windows** 엔진은 `Source/Core`를 live DSP로 직접 사용합니다. 톤 처리는 `lowend::Processor`, 공간 처리는 `lowend::SpatialProcessor`이며 Windows 전용 DSP 구현은 없습니다. 다만 macOS live 경로는 아직 `SpatialDSP.swift`를 사용하므로 두 플랫폼이 공간 런타임 구현을 공유하지는 않습니다. 자세한 내용은 [Windows 가이드](windows.md)를 참고하세요.
 
 Output Conditioning의 live 범위는 PCM 2×입니다. 4×/8×, dither/noise shaping, DSD/DoP는 live 출력에 연결되어 있지 않습니다. offline DoP packer는 채널별 16 DSD bits와 8-bit marker를 32-bit little-endian container `[payloadLow, payloadHigh, marker, 0]`에 담으며, block 사이의 marker phase와 잔여 bits를 보존합니다. 이 형식 검사는 완성된 DSD64/128/256 transport 또는 DAC 호환성 검증을 뜻하지 않습니다.
 
@@ -67,10 +76,11 @@ v0.3.0에는 Spatial Stage 개편과 오디오 처리 안정화가 포함됩니�
 ## 저장소 구조
 
 ```text
-Source/Core/                    테스트 가능한 휴대용 Circuit·HighExciter DSP
+Source/Core/                    테스트 가능한 휴대용 Circuit·HighExciter·Spatial DSP
 SystemAudioProcessor/           macOS Native Swift·C 엔진
 SystemAudioProcessor/Shaders/   Metal 스펙트럼 셰이더
 SystemAudioProcessor/Assets/    Native 앱 아이콘
+Windows/                        Windows CLI + GUI 오디오 엔진 (WASAPI)
 scripts/                        빌드 및 실행 도구
 docs/                           사용법, 설계, 검증 기록
 ```
@@ -81,6 +91,8 @@ docs/                           사용법, 설계, 검증 기록
 
 | 문서 | 내용 |
 |---|---|
+| [Windows Guide](windows.md) | Windows 빌드, CLI 사용, 제한사항과 검증 범위 |
+| [Windows Port Plan](windows-port-plan.md) | Windows 포팅 단계와 아키텍처 결정 근거 |
 | [System-Wide and Per-App Use](system-wide-and-per-app.md) | macOS 전체 시스템 및 특정 앱 처리 |
 | [Rate Matching](rate-matching.md) | 자동 샘플레이트 전환과 복구 흐름 |
 | [HighExciter Oversampling](high-exciter-oversampling.md) | 배율 정책, 필터, 실시간 처리 규칙 |

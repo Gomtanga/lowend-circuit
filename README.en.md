@@ -19,6 +19,7 @@
 [![Release](https://img.shields.io/github/v/release/Gomtanga/lowend-circuit?display_name=tag&sort=semver&color=c68b32)](https://github.com/Gomtanga/lowend-circuit/releases/latest)
 [![macOS CI](https://github.com/Gomtanga/lowend-circuit/actions/workflows/macos-native-ci.yml/badge.svg)](https://github.com/Gomtanga/lowend-circuit/actions/workflows/macos-native-ci.yml)
 [![Core CI](https://github.com/Gomtanga/lowend-circuit/actions/workflows/cross-platform-core-ci.yml/badge.svg)](https://github.com/Gomtanga/lowend-circuit/actions/workflows/cross-platform-core-ci.yml)
+[![Windows CI](https://github.com/Gomtanga/lowend-circuit/actions/workflows/windows-cli-ci.yml/badge.svg)](https://github.com/Gomtanga/lowend-circuit/actions/workflows/windows-cli-ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-486b87)](LICENSE)
 
 [한국어](README.md) · **English**
@@ -55,6 +56,7 @@ Start with Circuit **IEM · Gentle · LowEnd · Deep · Clear** or HighExciter *
 | Supported system | App |
 |---|---|
 | **macOS 14.4 or newer · Apple Silicon** | [Download LowEnd Native Audio v0.3.0 ZIP](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.3.0/LowEnd-Native-Audio-macOS-v0.3.0.zip) |
+| **Windows 10 2004 or newer · x64** | CLI and GUI built from source; no downloadable binary. See the [Windows guide](docs/windows.md) |
 
 1. Extract the ZIP and move **LowEnd Native Audio.app** to **Applications**.
 2. Open the app and allow macOS **system-audio recording** permission.
@@ -106,6 +108,7 @@ Check for another running copy of the app, system-audio recording permission, an
 | [Getting started](docs/getting-started.en.md) | Downloads, permissions, system-wide and per-app use, silence checks |
 | [Audio guide](docs/audio-guide.en.md) | Models, preset values, PCM 2×, headroom, Source, and Rate Match |
 | [Development](docs/development.en.md) | Building from source, verification commands, Swift/C++ architecture, design references |
+| [Windows guide](docs/windows.md) | Windows build, CLI usage, limitations, and verification scope |
 | [Contributing](CONTRIBUTING.md) | Useful bug reports and change proposals |
 | [Release notes](https://github.com/Gomtanga/lowend-circuit/releases) | Changes and verification scope for each version |
 

@@ -1,0 +1,113 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+jobs:
+  windows-cli:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build-type: [Debug, Release]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure Windows CLI
+        run: cmake -S Windows -B build/win-cli -DLOWEND_WINDOWS_BUILD_TESTING=ON
+
+      - name: Build Windows CLI
+        run: cmake --build build/win-cli --config ${{ matrix.build-type }} --parallel
+
+      - name: Run offline checks
+        run: ctest --test-dir build/win-cli -C ${{ matrix.build-type }} --output-on-failure
+
+      - name: Verify CLI argument rejection and device-free commands
+        # GitHub-hosted runners have no audio endpoint, so this job deliberately
+        # exercises only the device-free surface: argument validation, the
+        # offline self-test, and the settings dump. Device opening, negotiated
+        # latency, Bluetooth and shared-mode behaviour are not covered here.
+        run: python scripts/check-windows-cli.py build/win-cli/${{ matrix.build-type }}/lowend_windows.exe
+
+      - name: Verify the GUI control inventory
+        # Runs without audio hardware: the window is created and its controls
+        # enumerated, but no device is opened. Catches a control that fails to
+        # create, which the source-level view cannot show.
+        #
+        # Each GUI step tees its output and appends a VERIFIED/SKIPPED line to
+        # the job summary. A green step alone cannot say which happened: these
+        # scripts report SKIPPED rather than passing when the environment cannot
+        # support them (no desktop to present the window on, no endpoint to
+        # route to, no input desktop to drive the mouse), so the summary is what
+        # distinguishes "checked" from "not checked here".
+        shell: pwsh
+        run: |
+          python scripts/check-windows-gui-controls.py build/win-cli/${{ matrix.build-type }}/lowend_gui.exe 2>&1 |
+            Tee-Object -Variable out
+          $status = if ($out -match 'SKIPPED') { 'SKIPPED' } else { 'VERIFIED' }
+          "control inventory: $status" | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Verify the GUI slider path
+        # Drags each trackbar with real mouse input and checks the readout
+        # follows. A synthesized position change does not send WM_HSCROLL, so it
+        # would not exercise the notification path a user actually takes.
+        shell: pwsh
+        run: |
+          python scripts/check-windows-gui-sliders.py build/win-cli/${{ matrix.build-type }}/lowend_gui.exe 2>&1 |
+            Tee-Object -Variable out
+          $status = if ($out -match 'SKIPPED') { 'SKIPPED' } else { 'VERIFIED' }
+          "slider path (real mouse input): $status" | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Verify the GUI keeps its device selection across a refresh
+        # Refresh rebuilds both device lists. This checks the capture selection
+        # survives, which needs no audio hardware; the live-route half self-skips
+        # on a runner without endpoints.
+        shell: pwsh
+        run: |
+          python scripts/check-windows-gui-refresh.py build/win-cli/${{ matrix.build-type }}/lowend_gui.exe 2>&1 |
+            Tee-Object -Variable out
+          $status = if ($out -match 'SKIPPED') { 'SKIPPED' } else { 'VERIFIED' }
+          "device selection across refresh: $status" | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Report missing audio endpoint
+        # Documents explicitly that the absence of an endpoint is expected on
+        # this runner and is not a passing signal about device behaviour.
+        continue-on-error: true
+        run: |
+          $devices = & build/win-cli/${{ matrix.build-type }}/lowend_windows.exe --list-devices 2>&1
+          Write-Output "--- --list-devices output ---"
+          Write-Output $devices
+          Write-Output "--- end ---"
+
+  windows-no-ui:
+    # The DSP and the audio engine must not depend on the user interface. This
+    # job enforces that in the two ways a build alone cannot: it checks the
+    # source and link boundaries directly, then builds the engine and CLI with
+    # the GUI target switched off and runs the offline checks against that
+    # binary.
+    #
+    # The build step alone would not catch the common erosion - one `#include`
+    # of a GUI header from the engine still compiles, because the GUI sources
+    # remain on disk. The script checks that boundary and the link line.
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check UI independence of the engine and DSP
+        run: python scripts/check-windows-ui-independence.py
+
+      - name: Configure without the GUI target
+        run: cmake -S Windows -B build/win-no-ui -DLOWEND_WINDOWS_BUILD_GUI=OFF -DLOWEND_WINDOWS_BUILD_TESTING=ON
+
+      - name: Build engine and CLI
+        run: cmake --build build/win-no-ui --config Release --parallel
+
+      - name: Run offline checks
+        run: ctest --test-dir build/win-no-ui -C Release --output-on-failure
+
+      - name: Verify the CLI runs without the GUI present
+        run: python scripts/check-windows-cli.py build/win-no-ui/Release/lowend_windows.exe

@@ -2,7 +2,10 @@
 
 [← 홈](../README.md) · [English](getting-started.en.md)
 
-실제로 실행하는 앱 이름은 **LowEnd Native Audio**이며, 프로젝트 이름은 **LowEnd Circuit**입니다. 배포 앱은 **macOS 14.4 이상, Apple Silicon**을 지원합니다. Intel Mac 및 Windows 바이너리는 제공하지 않습니다.
+실제로 실행하는 앱 이름은 **LowEnd Native Audio**이며, 프로젝트 이름은 **LowEnd Circuit**입니다. 배포 앱은 **macOS 14.4 이상, Apple Silicon**을 지원합니다. Intel Mac 바이너리는 제공하지 않습니다.
+
+Windows는 **소스에서 빌드하는 CLI**로 사용할 수 있습니다(배포 바이너리 없음). 아직 GUI가 없으며
+시스템 전체 처리가 macOS처럼 투명하지 않습니다. [Windows 가이드](windows.md)를 참고하세요.
 
 [macOS용 v0.3.0 다운로드](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.3.0/LowEnd-Native-Audio-macOS-v0.3.0.zip) · [릴리스 노트와 검증 범위](https://github.com/Gomtanga/lowend-circuit/releases/tag/v0.3.0)
 

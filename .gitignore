@@ -43,3 +43,6 @@ private/
 .omo/
 .sisyphus/
 dist/
+
+# Scratch output from local firecrawl CLI research
+.firecrawl/

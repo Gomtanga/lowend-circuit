@@ -19,6 +19,7 @@
 [![Release](https://img.shields.io/github/v/release/Gomtanga/lowend-circuit?display_name=tag&sort=semver&color=c68b32)](https://github.com/Gomtanga/lowend-circuit/releases/latest)
 [![macOS CI](https://github.com/Gomtanga/lowend-circuit/actions/workflows/macos-native-ci.yml/badge.svg)](https://github.com/Gomtanga/lowend-circuit/actions/workflows/macos-native-ci.yml)
 [![Core CI](https://github.com/Gomtanga/lowend-circuit/actions/workflows/cross-platform-core-ci.yml/badge.svg)](https://github.com/Gomtanga/lowend-circuit/actions/workflows/cross-platform-core-ci.yml)
+[![Windows CI](https://github.com/Gomtanga/lowend-circuit/actions/workflows/windows-cli-ci.yml/badge.svg)](https://github.com/Gomtanga/lowend-circuit/actions/workflows/windows-cli-ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-486b87)](LICENSE)
 
 **한국어** · [English](README.en.md)
@@ -55,6 +56,7 @@ Circuit의 **IEM · Gentle · LowEnd · Deep · Clear**, HighExciter의 **Soft �
 | 지원 환경 | 배포 앱 |
 |---|---|
 | **macOS 14.4 이상 · Apple Silicon** | [LowEnd Native Audio v0.3.0 ZIP 다운로드](https://github.com/Gomtanga/lowend-circuit/releases/download/v0.3.0/LowEnd-Native-Audio-macOS-v0.3.0.zip) |
+| **Windows 10 2004 이상 · x64** | 소스에서 빌드하는 CLI + GUI. 배포 바이너리 없음. [Windows 가이드](docs/windows.md) |
 
 1. ZIP을 풀고 **LowEnd Native Audio.app**을 **응용 프로그램** 폴더로 옮깁니다.
 2. 앱을 실행하고 macOS의 **시스템 오디오 녹음 권한**을 허용합니다.
@@ -106,6 +108,7 @@ Clean은 Circuit와 HighExciter 톤 모델만 우회합니다. Spatial과 Output
 | [설치와 사용 시작](docs/getting-started.md) | 다운로드, 권한, 전체 시스템·특정 앱 처리, 무음 점검 |
 | [오디오 가이드](docs/audio-guide.md) | 모델, 프리셋 수치, PCM 2×, 헤드룸, Source와 Rate Match |
 | [개발 가이드](docs/development.md) | 소스 빌드, 검증 명령, Swift·C++ 구조, 상세 설계 문서 |
+| [Windows 가이드](docs/windows.md) | Windows 빌드, CLI 사용, 제한사항과 검증 범위 |
 | [기여 안내](CONTRIBUTING.md) | 버그 신고에 필요한 정보와 변경 제안 방법 |
 | [릴리스 노트](https://github.com/Gomtanga/lowend-circuit/releases) | 버전별 변경 사항과 검증 범위 |
 
