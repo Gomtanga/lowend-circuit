@@ -36,19 +36,41 @@ jobs:
         # Runs without audio hardware: the window is created and its controls
         # enumerated, but no device is opened. Catches a control that fails to
         # create, which the source-level view cannot show.
-        run: python scripts/check-windows-gui-controls.py build/win-cli/${{ matrix.build-type }}/lowend_gui.exe
+        #
+        # Each GUI step tees its output and appends a VERIFIED/SKIPPED line to
+        # the job summary. A green step alone cannot say which happened: these
+        # scripts report SKIPPED rather than passing when the environment cannot
+        # support them (no desktop to present the window on, no endpoint to
+        # route to, no input desktop to drive the mouse), so the summary is what
+        # distinguishes "checked" from "not checked here".
+        shell: pwsh
+        run: |
+          python scripts/check-windows-gui-controls.py build/win-cli/${{ matrix.build-type }}/lowend_gui.exe 2>&1 |
+            Tee-Object -Variable out
+          $status = if ($out -match 'SKIPPED') { 'SKIPPED' } else { 'VERIFIED' }
+          "control inventory: $status" | Add-Content $env:GITHUB_STEP_SUMMARY
 
       - name: Verify the GUI slider path
         # Drags each trackbar with real mouse input and checks the readout
         # follows. A synthesized position change does not send WM_HSCROLL, so it
         # would not exercise the notification path a user actually takes.
-        run: python scripts/check-windows-gui-sliders.py build/win-cli/${{ matrix.build-type }}/lowend_gui.exe
+        shell: pwsh
+        run: |
+          python scripts/check-windows-gui-sliders.py build/win-cli/${{ matrix.build-type }}/lowend_gui.exe 2>&1 |
+            Tee-Object -Variable out
+          $status = if ($out -match 'SKIPPED') { 'SKIPPED' } else { 'VERIFIED' }
+          "slider path (real mouse input): $status" | Add-Content $env:GITHUB_STEP_SUMMARY
 
       - name: Verify the GUI keeps its device selection across a refresh
         # Refresh rebuilds both device lists. This checks the capture selection
         # survives, which needs no audio hardware; the live-route half self-skips
         # on a runner without endpoints.
-        run: python scripts/check-windows-gui-refresh.py build/win-cli/${{ matrix.build-type }}/lowend_gui.exe
+        shell: pwsh
+        run: |
+          python scripts/check-windows-gui-refresh.py build/win-cli/${{ matrix.build-type }}/lowend_gui.exe 2>&1 |
+            Tee-Object -Variable out
+          $status = if ($out -match 'SKIPPED') { 'SKIPPED' } else { 'VERIFIED' }
+          "device selection across refresh: $status" | Add-Content $env:GITHUB_STEP_SUMMARY
 
       - name: Report missing audio endpoint
         # Documents explicitly that the absence of an endpoint is expected on
