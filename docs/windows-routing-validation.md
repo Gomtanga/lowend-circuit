@@ -41,7 +41,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 브랜치 | `feature/windows-virtual-routing` (PR #24 `feature/windows-port` head `400fa25` 기반) |
 | PR #24 실행 시점 재확인 | 2026-09-15: `state=open`, `merged=false`, `draft=false`, head `400fa2574472907294b834a97a0985e6cb0f5568`, base `main`(`52f745421cf17e5f070c690263ec8d79f51ff3ae`), `mergeable_state=clean`. 따라서 후속 PR의 base는 `feature/windows-port`입니다 |
 | 이정표 시작 시점의 HEAD | `400fa2574472907294b834a97a0985e6cb0f5568` |
-| 이 문서가 기록하는 검증 대상 commit | `814f29b` (푸시됨, `origin/feature/windows-virtual-routing`) |
+| 이 문서가 기록하는 검증 대상 commit | `fbde9bb` (푸시됨, `origin/feature/windows-virtual-routing`). 이 브랜치의 모든 커밋이 CI green이며, 아래 실기기 측정은 `296efd3` 이후 빌드에서 수행했습니다 |
 | 이 저장소의 빌드 산출물 | `build/win-cli/Release/lowend_windows.exe`, `build/win-cli/Debug/lowend_windows.exe`, `build/win-cli/Release/lowend_gui.exe`, `build/win-routing-no-ui/Release/lowend_windows.exe` |
 
 ### 이 워크스테이션의 오디오 엔드포인트 (검증 시점)
@@ -108,7 +108,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | **3상태(OFF/바이패스/Circuit) 방법을 실제 라우트에서 실행** (케이블 경로 아님) | 캡처 = ZH3 loopback(48 kHz) → 렌더 = Odyssey G5, 톤은 ZH3로. `--monitor 6 --capture-device <Odyssey>` + `--dump-wav`, 엔진 유/무, `--play-tone 3` | **OFF**: tone이 케이블 대신 ZH3로 갔고(이 실행은 케이블 대신 loopback 경로), Odyssey loopback은 **프레임 0** — 엔진이 없으면 목적지에 아무것도 도달하지 않음. **바이패스**(clean/0/0/0/spatial off): 228,000 프레임, peak **0.999054** (L 0.962952, R 0.999054), **440.0 Hz**. **Circuit**(기본): 223,680 프레임, peak **0.554871**, 440.0 Hz, 바이패스의 **0.555×**. 즉 이 방법(신호원→엔진→목적지 loopback 관측)이 실제 장치에서 동작하고, 두 채널·피치·DSP 감쇠가 관측됨 |
 | 3상태 실행에서 드러난 판정 기준 결함 → 수정 | 위 실행의 레벨 | 바이패스 peak 0.999는 소스 진폭 0.40의 **2.5배**였습니다. 같은 엔진 출력이 어떤 endpoint의 loopback에서는 0.40으로, 다른 endpoint에서는 1.0으로 읽힙니다(엔드포인트 볼륨·드라이버 효과가 render 스트림과 loopback 탭 사이에 있음). 즉 "바이패스는 소스의 0.5~1.05배"라는 절대 기준은 **정상 경로를 실패로 판정**합니다. 검사기는 이제 엔진을 끈 상태에서 같은 톤을 **목적지 endpoint에 직접** 보내 그 loopback으로 기준값을 먼저 측정하고, 바이패스를 그 기준의 0.50~1.15배로 판정합니다. 기준을 얻지 못하면 상대 판정을 하지 않고 중단합니다 |
 | 위 수정의 자체 검증 | `--self-check` | 기준 대비 0.75배 바이패스는 수용, **2.5배**(증폭·중복 경로)와 **0.25배**(무음 감쇠)는 거부, 감쇠 없는 Circuit은 거부 |
-| **GitHub CI (푸시된 모든 커밋)** | push `814f29b`, `8cee17d`, `296efd3`, `3276944`, `9f9a2d9` → Actions | 마지막 커밋 `9f9a2d9`에서 **Windows CI success**(Debug·Release·no-UI 3잡), **Core CI success**(ubuntu·windows × Debug·Release), **macOS Native and Core CI success**. Windows 잡의 12/12·7/7 단계가 모두 success이며 신규 단계(**GUI 선택 저장/복원**, **케이블 검사기 self-check**)가 포함됩니다 |
+| **GitHub CI (푸시된 모든 커밋)** | push `814f29b`, `8cee17d`, `296efd3`, `3276944`, `9f9a2d9`, `96a309c`, `fbde9bb` → Actions | 마지막 커밋 `fbde9bb`에서 **Windows CI success**(Debug·Release·no-UI 3잡), **Core CI success**(ubuntu·windows × Debug·Release), **macOS Native and Core CI success**. Windows 잡의 12/12·7/7 단계가 모두 success이며 신규 단계(**GUI 선택 저장/복원**, **케이블 검사기 self-check**)가 포함됩니다 |
 | CI에서의 첫 시도 실패 → 수정 | push `254e8c2`, `d6d126c` → Actions | Windows 3개 잡이 모두 `check-windows-cli.py` 단계에서 실패했습니다(빌드·ctest는 통과). 원인은 검사가 **엔드포인트가 없는 러너**를 가정하지 않은 것 — `--route-check`가 없는 *render* id를 지목한다고 단정했지만, 엔드포인트가 하나도 없는 머신에서는 capture 쪽 기본 장치가 먼저 해석에 실패합니다. 엔드포인트 유무와 무관하게 같은 답을 내는 capture id 기준으로 바꾸고, 러너에 엔드포인트가 없을 때의 계약도 함께 검증하도록 고쳤습니다 |
 | GUI 선택 저장 결함 (자체 발견·수정) | `check-windows-gui-persistence.py` 4단계 | 한쪽 콤보를 바꾸면 **저장 파일의 두 줄을 모두 다시 썼고**, 선택이 없는 쪽은 빈 값으로 기록되었습니다. 그러면 사용자가 고른 id가 지워지고 다음 실행에서 첫 목록 항목이 선택되어 **사용자가 고른 적 없는 endpoint로 시작**합니다(빈 콤보가 막으려던 바로 그 대체가 한 실행 뒤에 발생). 이제 선택이 없는 쪽은 이전 값을 유지합니다. 수정 전 빌드에서 새 단계가 `the file now holds ''`로 실패하고, 수정 후 통과하는 것을 확인했습니다 |
 
