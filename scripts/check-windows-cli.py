@@ -40,6 +40,15 @@ def main() -> None:
         ["--monitor", "9999"],
         ["--monitor", "abc"],
         ["--monitor"],
+        ["--play-tone", "0"],
+        ["--play-tone", "9999"],
+        ["--play-tone", "abc"],
+        ["--play-tone"],
+        # The capture dump is filled by --monitor only. Asking for it anywhere else
+        # would either write nothing or keep audio the user did not ask to keep.
+        ["--dump-wav"],
+        ["--dump-wav", ""],
+        ["--dump-wav", "capture.wav"],
         # Device selection: an empty or malformed id must be refused outright
         # rather than quietly falling back to the default endpoint. A silent
         # fallback would hide a typo in a saved id and process the wrong route.
@@ -48,6 +57,12 @@ def main() -> None:
         ["--input-device", ""],
         ["--capture-device", ""],
         ["--loopback", "sometimes"],
+        # --route-check judges a route instead of running it, but it is still one
+        # command: combining it with a bare diagnostic is a mistake, not a
+        # request to print two reports.
+        ["--route-check", "--list-devices"],
+        ["--route-check", "--self-test"],
+        ["--route-check", "--device", ""],
     ]
     # Cases where the exit code alone would not prove the right reason. A
     # contradiction between --input-device and --loopback on must be reported as
@@ -113,9 +128,41 @@ def main() -> None:
     if help_result.returncode != 0:
         raise SystemExit(f"--help exit={help_result.returncode}, expected 0")
     for flag in ("--list-devices", "--self-test", "--dump-settings", "--model",
-                 "--exciter-os", "--buffer-ms", "--monitor"):
+                 "--exciter-os", "--buffer-ms", "--monitor", "--route-check"):
         if flag not in help_result.stdout:
             raise SystemExit(f"--help does not document {flag}")
+
+    # --route-check judges a selection without opening a stream. An id that no
+    # endpoint carries must be refused *by name*: falling back to another device
+    # would process a route the user did not choose, which is the mistake the
+    # selection flags exist to prevent. The reason is asserted, not just the exit
+    # code, because a machine with no audio endpoints would also exit 1 — for a
+    # different reason.
+    absent = "{0.0.0.00000000}.{deadbeef-0000-0000-0000-000000000000}"
+    route_check = run(executable, ["--route-check", "--device", absent])
+    route_output = route_check.stdout + route_check.stderr
+    if route_check.returncode != 1:
+        raise SystemExit(
+            f"--route-check with an absent render id: exit={route_check.returncode}, expected 1")
+    if "no endpoint with the requested render id is present" not in route_output:
+        raise SystemExit(
+            "--route-check did not report the absent render id by name:\n" + route_output)
+    if "Result: REFUSED" not in route_output:
+        raise SystemExit("--route-check did not state the refusal:\n" + route_output)
+    if "opens no stream" not in route_output:
+        raise SystemExit("--route-check did not state that it opens no stream")
+
+    # --list-devices reports which device instance and bus each endpoint belongs
+    # to, because the routing rules depend on the bus and a user reading a refusal
+    # has to be able to see what the machine reports. It is also where a machine
+    # with no virtual cable says so.
+    list_result = run(executable, ["--list-devices"])
+    if list_result.returncode != 0:
+        raise SystemExit(f"--list-devices exit={list_result.returncode}, expected 0")
+    if "Virtual cables" not in list_result.stdout:
+        raise SystemExit("--list-devices did not report the virtual-cable pairing")
+    if "processing is running" in list_result.stdout:
+        raise SystemExit("--list-devices started audio processing")
 
     # --dump-settings is device-free: it must succeed and print DSP planning.
     dump_result = run(executable, ["--dump-settings"])
@@ -136,7 +183,8 @@ def main() -> None:
 
     print(f"Windows CLI checks passed: {len(rejected)} rejected cases, "
           f"{len(rejected_with_reason)} rejections verified by reason, "
-          f"help, device-free --dump-settings, and --self-test")
+          f"help, device-free --dump-settings and --self-test, the route refusal "
+          f"reason, and the device-instance columns")
 
 
 if __name__ == "__main__":

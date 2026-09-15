@@ -105,6 +105,15 @@ std::string formatDeviceLine(const DeviceInfo& device) {
     line += device.isDefault ? "* " : "  ";
     line += device.name.empty() ? "(unnamed endpoint)" : device.name;
 
+    // The bus the device arrived on. Printed because the routing rules depend on
+    // it: root-enumerated devices are instantiated by a driver rather than
+    // discovered on hardware, which is what makes a virtual audio cable's two
+    // endpoints one signal path, and a user looking at a refusal needs to see
+    // that this is what the machine reports.
+    if (!device.enumeratorName.empty()) {
+        line += "  bus=" + device.enumeratorName;
+    }
+
     if (device.mixSampleRate == 0) {
         // GetMixFormat failed for this endpoint; the entry is still listed so
         // the id stays reachable.
@@ -139,6 +148,55 @@ void appendDeviceSection(std::string& text, const std::vector<DeviceInfo>& devic
     for (const DeviceInfo& device : devices) {
         text += formatDeviceLine(device);
     }
+}
+
+// The virtual cables on the machine, as a section both --list-devices and
+// --route-check print. Which cable exists is not visible from the two lists: a
+// cable is one device instance whose playback and recording sides appear in
+// different sections under different names, and the routing rules act on the
+// pairing rather than on either name.
+void appendVirtualCableSection(std::string& text,
+                               const std::vector<DeviceInfo>& renderDevices,
+                               const std::vector<DeviceInfo>& captureDevices) {
+    const std::vector<VirtualCable> cables = findVirtualCables(renderDevices, captureDevices);
+    if (cables.empty()) {
+        text += "\nVirtual cables: none detected. A virtual cable is one software device\n"
+                "offering a playback side (what applications play into) and a recording side\n"
+                "(what carries that signal). The documented routing milestone needs one; VB-CABLE\n"
+                "is an external driver, so installing it is a user decision, not something these\n"
+                "tools do.\n";
+        return;
+    }
+    text += "\nVirtual cables (playback side -> recording side):\n";
+    for (const VirtualCable& cable : cables) {
+        text += "  " + (cable.playback.name.empty() ? std::string("(unnamed)")
+                                                    : cable.playback.name);
+        text += "  ->  ";
+        text += cable.recording.name.empty() ? std::string("(unnamed)") : cable.recording.name;
+        text += "\n";
+        text += "    playback  id=" + cable.playback.id + "\n";
+        text += "    recording id=" + cable.recording.id + "\n";
+    }
+    text += "The milestone route captures the recording side (as an input device) and renders\n"
+            "to a physical output, never to the same cable.\n";
+}
+
+// One end of the route being checked, in the terms the decision used: the role,
+// the capture mode, and the endpoint that was resolved.
+std::string formatSelectedEndpoint(const char* role, const char* mode, const DeviceInfo& device) {
+    std::string text = std::string("  ") + role + " (" + mode + "): ";
+    text += device.name.empty() ? "(unnamed endpoint)" : device.name;
+    if (!device.enumeratorName.empty()) {
+        text += "  bus=" + device.enumeratorName;
+    }
+    if (device.mixSampleRate != 0) {
+        char format[64];
+        std::snprintf(format, sizeof(format), "  %u Hz / %u ch / %u-bit",
+                      device.mixSampleRate, device.mixChannels, device.mixBitsPerSample);
+        text += format;
+    }
+    text += "\n    id=" + device.id + "\n";
+    return text;
 }
 
 } // namespace
@@ -263,6 +321,33 @@ CommandLine parseCommandLine(int argc, char** argv) {
             result.command = Command::dumpSettings;
         } else if (argument == "--self-test") {
             result.command = Command::selfTest;
+        } else if (argument == "--route-check") {
+            // Judgement only: nothing is opened, so unlike the bare diagnostic
+            // commands this one is useful with routing options ("is this pair
+            // usable?"), and it is therefore not in diagnosticArguments.
+            result.command = Command::routeCheck;
+        } else if (argument == "--play-tone") {
+            // Sends a known signal to the endpoint named by --device (or the
+            // default output) and exits. It exists so a verification run can put
+            // a controlled tone into a *specific* endpoint instead of whatever
+            // the machine's default output happens to be, which is exactly what
+            // the cable route has to be measured with: the point of that route
+            // is that the OS default output is the cable.
+            result.command = Command::playTone;
+            if (takeValue("--play-tone needs a number")) {
+                float seconds = 0.0f;
+                if (!parseNumber(value, seconds)) {
+                    result.rejectionReasons.emplace_back("--play-tone needs a number");
+                } else if (seconds < static_cast<float>(toneMinSeconds)
+                           || seconds > static_cast<float>(toneMaxSeconds)) {
+                    result.rejectionReasons.emplace_back(
+                        "--play-tone needs a number of seconds between "
+                        + std::to_string(toneMinSeconds) + " and "
+                        + std::to_string(toneMaxSeconds));
+                } else {
+                    result.toneSeconds = static_cast<int>(seconds);
+                }
+            }
         } else if (argument == "--monitor") {
             // Capture-only diagnostic: no render endpoint is opened, so this is
             // usable on a machine whose only output endpoint is the one being
@@ -286,6 +371,19 @@ CommandLine parseCommandLine(int argc, char** argv) {
             // Not a command: --verbose only adds diagnostics, so unlike the
             // diagnostic commands it may be combined with a run configuration.
             result.verbose = true;
+        } else if (argument == "--dump-wav") {
+            // Writes the captured signal itself. Exists for verification: level
+            // and frequency at the far end of a route cannot be measured from a
+            // peak summary, and a script that claims to have checked a pitch has
+            // to have had the samples. Only meaningful with --monitor, which is
+            // the command that captures without rendering.
+            if (takeValue("--dump-wav needs a file path")) {
+                if (value.empty()) {
+                    result.rejectionReasons.emplace_back("--dump-wav needs a file path");
+                } else {
+                    result.monitorDumpPath = value;
+                }
+            }
         } else if (argument == "--device") {
             deviceOption("--device", result.engine.renderDeviceId);
         } else if (argument == "--capture-device") {
@@ -412,6 +510,14 @@ CommandLine parseCommandLine(int argc, char** argv) {
         result.engine.captureDeviceId = captureDeviceId;
     }
 
+    // The dump belongs to the capture-only diagnostic: it is a path that only
+    // --monitor fills. Accepting it on a run would either do nothing (and look
+    // like a silent failure) or start writing audio the user did not ask to keep.
+    if (!result.monitorDumpPath.empty() && result.command != Command::monitor) {
+        result.rejectionReasons.emplace_back(
+            "--dump-wav writes what --monitor captured, so it needs --monitor");
+    }
+
     // The header contract: an invalid command line never selects a runnable
     // command, so Main.cpp prints the reasons, then the usage, and exits 1.
     if (!result.rejectionReasons.empty()) {
@@ -430,6 +536,8 @@ std::string usageText() {
         "  lowend_windows --list-devices\n"
         "  lowend_windows --dump-settings\n"
         "  lowend_windows --self-test\n"
+        "  lowend_windows --route-check [routing options]\n"
+        "  lowend_windows --play-tone <seconds> [--device <id>]\n"
         "  lowend_windows --monitor <seconds> [--capture-device <id>]\n"
         "  lowend_windows --help\n"
         "\n"
@@ -475,11 +583,33 @@ std::string usageText() {
         "  --list-devices          List output and input endpoints, then exit\n"
         "  --dump-settings         Print the resolved settings and DSP plans, then exit\n"
         "  --self-test             Run the offline checks (no audio device), then exit\n"
+        "  --route-check           Judge the selected capture/render pair without opening a\n"
+        "                          stream, then exit. Takes routing options, so it answers\n"
+        "                          \"is this pair usable?\" before anything is played\n"
         "  --monitor 1...600       Capture only for N seconds and report statistics,\n"
         "                          then exit. Opens no render endpoint, so it works\n"
         "                          when the captured endpoint is the only output\n"
+        "  --dump-wav <path>       Write what --monitor captured to a 16-bit PCM WAV\n"
+        "                          file. Needs --monitor. Exists so a verification run\n"
+        "                          can measure the signal at the end of a route (level,\n"
+        "                          channels, frequency) instead of trusting a summary\n"
+        "  --play-tone 1...600     Play a known 440 Hz stereo tone at amplitude 0.40 to\n"
+        "                          the --device endpoint (default output when absent),\n"
+        "                          then exit. The target, its period and the level are\n"
+        "                          printed before anything is written, and no volume is\n"
+        "                          changed. Not processed by the DSP: this is a signal\n"
+        "                          source for measuring a route, and DSP options do not\n"
+        "                          apply to it\n"
         "  --verbose               Print the negotiated route and running statistics\n"
         "  --help, -h              Print this text\n"
+        "\n"
+        "A virtual audio cable (VB-CABLE, for example) is one software device with a\n"
+        "playback side applications play into and a recording side that carries that\n"
+        "signal. Capturing its recording side as a normal input (--input-device) and\n"
+        "rendering to a physical output is the documented route for processing all\n"
+        "system audio. Capturing one side and rendering to the other is refused: the\n"
+        "two ids differ, but the two endpoints are one signal path, so the engine\n"
+        "would process its own output forever.\n"
         "\n"
         "Values outside a documented range are clamped; non-finite values are\n"
         "rejected. Pass the ids printed by --list-devices to change routing.\n";
@@ -492,8 +622,71 @@ std::string formatDeviceList(const std::vector<DeviceInfo>& renderDevices,
     appendDeviceSection(text, renderDevices);
     text += "\nInput devices:\n";
     appendDeviceSection(text, captureDevices);
+
+    // Which virtual cables exist is not visible from the two lists: a cable is
+    // one device instance whose playback and recording sides appear in different
+    // sections under different names. The pairing is what the routing rules act
+    // on, so it is printed rather than left for the user to infer.
+    appendVirtualCableSection(text, renderDevices, captureDevices);
+
     text += "\n* marks the default endpoint. Use the id= value with --device,\n"
             "--capture-device, or --input-device.\n";
+    return text;
+}
+
+std::string formatRouteCheck(const RouteSelection& selection,
+                             const RouteDiagnosis& diagnosis) {
+    const bool captureIsLoopback = selection.captureFlow == DataFlow::render;
+
+    std::string text;
+    text += "Route check: this command opens no stream and changes no setting.\n";
+
+    // Both ends are reported the way the decision saw them. When an id did not
+    // resolve, the id that was asked for is printed instead of a device, because
+    // "which id failed" is the part that tells a user their endpoint was
+    // reinstalled or is unplugged.
+    if (diagnosis.haveCapture) {
+        text += formatSelectedEndpoint("capture", captureIsLoopback ? "system audio loopback"
+                                                                   : "input device",
+                                       diagnosis.capture);
+    } else {
+        text += "  capture (";
+        text += captureIsLoopback ? "system audio loopback" : "input device";
+        text += "): ";
+        text += selection.captureId.empty() ? "(no default endpoint resolved)"
+                                            : selection.captureId;
+        text += "\n";
+    }
+    if (diagnosis.haveRender) {
+        text += formatSelectedEndpoint("render", "output device", diagnosis.render);
+    } else {
+        text += "  render (output device): ";
+        text += selection.renderId.empty() ? "(no default endpoint resolved)"
+                                           : selection.renderId;
+        text += "\n";
+    }
+
+    if (diagnosis.virtualCables.empty()) {
+        text += "\nVirtual cables: none detected on this machine.\n";
+    } else {
+        text += "\nVirtual cables found (playback side -> recording side):\n";
+        for (const std::string& cable : diagnosis.virtualCables) {
+            text += "  " + cable + "\n";
+        }
+    }
+
+    if (diagnosis.ok()) {
+        text += "\nResult: READY\n";
+    } else {
+        text += "\nResult: REFUSED (";
+        text += routeIssueName(diagnosis.issue);
+        text += ")\n";
+        text += "  cause: " + diagnosis.cause + "\n";
+        text += "  next:  " + diagnosis.nextAction + "\n";
+    }
+    for (const std::string& note : diagnosis.notes) {
+        text += "  note:  " + note + "\n";
+    }
     return text;
 }
 
