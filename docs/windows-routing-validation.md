@@ -41,7 +41,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 브랜치 | `feature/windows-virtual-routing` (PR #24 `feature/windows-port` head `400fa25` 기반) |
 | PR #24 실행 시점 재확인 | 2026-09-15: `state=open`, `merged=false`, `draft=false`, head `400fa2574472907294b834a97a0985e6cb0f5568`, base `main`(`52f745421cf17e5f070c690263ec8d79f51ff3ae`), `mergeable_state=clean`. 따라서 후속 PR의 base는 `feature/windows-port`입니다 |
 | 이정표 시작 시점의 HEAD | `400fa2574472907294b834a97a0985e6cb0f5568` |
-| 이 문서가 기록하는 검증 대상 commit | `6d6eefa` (푸시됨, `origin/feature/windows-virtual-routing`). 이 브랜치의 모든 커밋이 CI green이며, 아래 실기기 측정은 `296efd3` 이후 빌드에서 수행했습니다 |
+| 코드 검증 대상 commit | `6d6eefa` — 이 커밋에서 Windows(3잡)·Core(4잡)·macOS CI가 모두 success입니다. 그 뒤 커밋은 문서 변경뿐이며, 브랜치 tip은 `origin/feature/windows-virtual-routing`입니다. 아래 실기기 측정은 `296efd3` 이후 빌드에서 수행했습니다 |
 | 이 저장소의 빌드 산출물 | `build/win-cli/Release/lowend_windows.exe`, `build/win-cli/Debug/lowend_windows.exe`, `build/win-cli/Release/lowend_gui.exe`, `build/win-routing-no-ui/Release/lowend_windows.exe` |
 
 ### 이 워크스테이션의 오디오 엔드포인트 (검증 시점)
