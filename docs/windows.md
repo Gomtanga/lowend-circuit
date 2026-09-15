@@ -57,6 +57,14 @@ build\win-cli\Release\lowend_gui.exe
   나열합니다. 선택 자체가 모드입니다(CLI의 `--capture-device` / `--input-device`에 해당).
 - **Output**은 렌더 엔드포인트입니다. 캡처와 같은 장치를 고르면 엔진의 자기 캡처 방지가
   동작해 시작이 거부되고 이유가 상태줄에 표시됩니다.
+- 캡처와 출력 선택은 **사용자 프로필에 저장·복원**됩니다:
+  `%LOCALAPPDATA%\LowEndCircuit\device-selection.txt` (지워도 되는 텍스트 파일, 저장소에는
+  들어가지 않습니다). 저장된 endpoint가 더 이상 존재하지 않으면 그 콤보는 **비어 있고** Start가
+  "no longer present"로 거부합니다 — 사용자가 고른 적 없는 장치로 조용히 대체하지 않기
+  위해서이므로, 그때는 두 목록에서 다시 선택한 뒤 Start를 누르세요.
+- 가상 케이블이 있으면 목록에서 그 양쪽이 표시됩니다(`[virtual cable: play into it]`,
+  `[virtual cable: recording side]`). LowEnd를 Stop한 동안 Windows 기본 출력이 케이블에 남아
+  있으면 소리가 나지 않습니다: Idle 상태줄이 그 사실과 되돌리는 방법을 알려 줍니다.
 - 슬라이더 옆에 현재 값이 숫자로 표시됩니다. **Speaker width**, **Listener X/Z**는 0.01 단위,
   나머지는 0.1 단위입니다. 이는 표시값이 CLI·Core와 정확히 같은 값이 되도록 하기 위한 것입니다
   (예: Speaker width 기본값 1.65 m).
