@@ -132,37 +132,57 @@ def main() -> None:
         if flag not in help_result.stdout:
             raise SystemExit(f"--help does not document {flag}")
 
-    # --route-check judges a selection without opening a stream. An id that no
-    # endpoint carries must be refused *by name*: falling back to another device
-    # would process a route the user did not choose, which is the mistake the
-    # selection flags exist to prevent. The reason is asserted, not just the exit
-    # code, because a machine with no audio endpoints would also exit 1 — for a
-    # different reason.
+    # --list-devices and --route-check both resolve endpoints through the audio
+    # endpoint enumerator, which a CI runner may not have at all (the workflow
+    # says so explicitly: the "Report missing audio endpoint" step tolerates it).
+    # The contract is asserted in *both* environments, and it differs: with an
+    # enumerator, the commands answer about real endpoints; without one, they must
+    # report the enumeration failure rather than printing a device list or judging
+    # a route they never saw. Accepting either outcome without checking which one
+    # happened would hide a silent fallback, so each branch asserts its own
+    # message.
     absent = "{0.0.0.00000000}.{deadbeef-0000-0000-0000-000000000000}"
-    route_check = run(executable, ["--route-check", "--device", absent])
-    route_output = route_check.stdout + route_check.stderr
-    if route_check.returncode != 1:
-        raise SystemExit(
-            f"--route-check with an absent render id: exit={route_check.returncode}, expected 1")
-    if "no endpoint with the requested render id is present" not in route_output:
-        raise SystemExit(
-            "--route-check did not report the absent render id by name:\n" + route_output)
-    if "Result: REFUSED" not in route_output:
-        raise SystemExit("--route-check did not state the refusal:\n" + route_output)
-    if "opens no stream" not in route_output:
-        raise SystemExit("--route-check did not state that it opens no stream")
-
-    # --list-devices reports which device instance and bus each endpoint belongs
-    # to, because the routing rules depend on the bus and a user reading a refusal
-    # has to be able to see what the machine reports. It is also where a machine
-    # with no virtual cable says so.
     list_result = run(executable, ["--list-devices"])
-    if list_result.returncode != 0:
-        raise SystemExit(f"--list-devices exit={list_result.returncode}, expected 0")
-    if "Virtual cables" not in list_result.stdout:
-        raise SystemExit("--list-devices did not report the virtual-cable pairing")
-    if "processing is running" in list_result.stdout:
+    list_output = list_result.stdout + list_result.stderr
+    if "processing is running" in list_output:
         raise SystemExit("--list-devices started audio processing")
+
+    if list_result.returncode == 0:
+        if "Virtual cables" not in list_result.stdout:
+            raise SystemExit("--list-devices did not report the virtual-cable pairing")
+        # An id that no endpoint carries must be refused *by name*: falling back to
+        # another device would process a route the user did not choose, which is
+        # the mistake the selection flags exist to prevent.
+        route_check = run(executable, ["--route-check", "--device", absent])
+        route_output = route_check.stdout + route_check.stderr
+        if route_check.returncode != 1:
+            raise SystemExit(
+                f"--route-check with an absent render id: exit={route_check.returncode}, "
+                f"expected 1")
+        if "no endpoint with the requested render id is present" not in route_output:
+            raise SystemExit(
+                "--route-check did not report the absent render id by name:\n" + route_output)
+        if "Result: REFUSED" not in route_output:
+            raise SystemExit("--route-check did not state the refusal:\n" + route_output)
+        if "opens no stream" not in route_output:
+            raise SystemExit("--route-check did not state that it opens no stream")
+    else:
+        if "Device enumeration failed" not in list_output:
+            raise SystemExit(
+                f"--list-devices failed without reporting a device-enumeration failure:\n"
+                f"{list_output}")
+        route_check = run(executable, ["--route-check", "--device", absent])
+        route_output = route_check.stdout + route_check.stderr
+        if route_check.returncode != 1:
+            raise SystemExit(
+                f"--route-check without an enumerator: exit={route_check.returncode}, expected 1")
+        if "Device enumeration failed" not in route_output:
+            raise SystemExit(
+                "--route-check did not report the enumeration failure it hit:\n" + route_output)
+        if "Result: READY" in route_output:
+            raise SystemExit(
+                "--route-check claimed a usable route on a machine whose endpoints it could not "
+                "enumerate")
 
     # --dump-settings is device-free: it must succeed and print DSP planning.
     dump_result = run(executable, ["--dump-settings"])
