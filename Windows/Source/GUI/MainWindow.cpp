@@ -154,8 +154,13 @@ bool MainWindow::create(HINSTANCE instance, int showCommand) {
 
     Settings defaults;
     panel_.writeSettings(defaults);
-    panel_.setStatusText(L"Idle. Choose an output endpoint, then Start.");
+    // The status line is composed by updateStatusText(), not set to a bare
+    // "Idle." here: the routing guidance (what this machine offers for the
+    // virtual-cable route, and how to get sound back if Windows' default output
+    // is still the cable) belongs on screen when the window opens, not only
+    // after the user has already touched a control.
     panel_.setRunning(false);
+    updateStatusText();
 
     ShowWindow(window_, showCommand);
     UpdateWindow(window_);
