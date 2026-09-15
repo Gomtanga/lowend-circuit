@@ -19,6 +19,7 @@
 
 #include "AudioEngine/DspStage.h"
 #include "AudioEngine/RecoveryPolicy.h"
+#include "AudioEngine/RouteDiagnosis.h"
 
 #include <windows.h>
 #include <objbase.h>
@@ -90,6 +91,13 @@ struct Engine::Impl {
     // open and close. See endpointsCollide() in RecoveryPolicy.h.
     std::atomic<uint64_t> captureEndpointHash { 0 };
     std::atomic<uint64_t> renderEndpointHash { 0 };
+    // Key of the virtual pass-through device each side belongs to, 0 when the side
+    // is not one side of such a device. Kept next to the endpoint hashes because
+    // it answers the other half of the same question: a virtual cable's two sides
+    // are *different* endpoint ids on one signal path, so comparing ids alone
+    // would call that route safe and let the engine process its own output.
+    std::atomic<uint64_t> capturePassThroughKey { 0 };
+    std::atomic<uint64_t> renderPassThroughKey { 0 };
     std::atomic<uint32_t> resyncCount { 0 };
     std::atomic<uint32_t> processCallbacks { 0 };
 
@@ -230,12 +238,36 @@ bool Engine::start(const Settings& settings, std::string& error) {
     // string the other thread owns.
     impl.captureEndpointHash.store(endpointHash(captureEndpoint), std::memory_order_release);
     impl.renderEndpointHash.store(endpointHash(renderEndpoint), std::memory_order_release);
+    impl.capturePassThroughKey.store(virtualPassThroughKey(impl.capture.openedIdentity()),
+                                     std::memory_order_release);
+    impl.renderPassThroughKey.store(virtualPassThroughKey(impl.render.openedIdentity()),
+                                    std::memory_order_release);
     if (!captureEndpoint.empty() && captureEndpoint == renderEndpoint) {
         error = "capture and render resolved to the same endpoint ("
             + impl.render.openedDeviceName()
             + "); loopback copies the output stream instead of replacing it, so the processed"
               " result would be captured again as input. Pass --device with a different output"
               " endpoint to break the loop.";
+        impl.capture.close();
+        impl.render.close();
+        return false;
+    }
+
+    // The other half of the same rule: two *different* endpoint ids can still be
+    // one signal path when they are the playback and recording sides of one
+    // virtual audio cable, because everything written to the playback side comes
+    // back on the recording side. Refusing here is the only place this can be
+    // caught before audio flows, and the check is repeated after every reopen
+    // because an empty requested id re-resolves the default endpoint each time.
+    if (passThroughKeysCollide(impl.capturePassThroughKey.load(std::memory_order_acquire),
+                               impl.renderPassThroughKey.load(std::memory_order_acquire))) {
+        error = "capture (" + impl.capture.openedDeviceName() + ") and render ("
+            + impl.render.openedDeviceName()
+            + ") are the two sides of one virtual audio device, so the processed output would"
+              " come straight back as input and the engine would process its own signal forever."
+              " Use one side of that cable and a physical device on the other: capture the cable's"
+              " recording side with --input-device and render to the output device with --device,"
+              " or the reverse.";
         impl.capture.close();
         impl.render.close();
         return false;
@@ -359,6 +391,8 @@ void Engine::stop() {
     // an endpoint from a session that has already ended.
     impl.captureEndpointHash.store(0, std::memory_order_release);
     impl.renderEndpointHash.store(0, std::memory_order_release);
+    impl.capturePassThroughKey.store(0, std::memory_order_release);
+    impl.renderPassThroughKey.store(0, std::memory_order_release);
 
     // Publish the ring diagnostics before the ring is destroyed. stats() is the
     // only way a caller learns what happened during the run, and a caller
@@ -502,20 +536,29 @@ void Engine::runCapture() {
 
                 impl.capture.close();  // idempotent; the object may already be closed
                 impl.captureEndpointHash.store(0, std::memory_order_release);
+                impl.capturePassThroughKey.store(0, std::memory_order_release);
                 std::string reopenError;
                 if (impl.capture.open(impl.captureOptions, reopenError)) {
                     impl.captureEndpointHash.store(
                         endpointHash(impl.capture.openedDeviceId()),
                         std::memory_order_release);
+                    impl.capturePassThroughKey.store(
+                        virtualPassThroughKey(impl.capture.openedIdentity()),
+                        std::memory_order_release);
                     // The mirror of the check in runRender(): if only capture
                     // failed, render is still holding its endpoint, and an empty
                     // requested id means this open just re-resolved the default
-                    // one. Landing on the endpoint render is using would close
-                    // the feedback loop, so stop instead of continuing.
-                    if (endpointsCollide(impl.captureEndpointHash.load(std::memory_order_acquire),
-                                         impl.renderEndpointHash.load(std::memory_order_acquire))) {
+                    // one. Landing on the endpoint render is using — or on the
+                    // other side of the cable render is using — would close the
+                    // feedback loop, so stop instead of continuing.
+                    if (routeFormsFeedbackLoop(
+                            impl.captureEndpointHash.load(std::memory_order_acquire),
+                            impl.renderEndpointHash.load(std::memory_order_acquire),
+                            impl.capturePassThroughKey.load(std::memory_order_acquire),
+                            impl.renderPassThroughKey.load(std::memory_order_acquire))) {
                         impl.capture.close();
                         impl.captureEndpointHash.store(0, std::memory_order_release);
+                        impl.capturePassThroughKey.store(0, std::memory_order_release);
                         impl.givingUp.store(true, std::memory_order_release);
                         impl.stopping.store(true, std::memory_order_release);
                         continue;
@@ -555,6 +598,7 @@ void Engine::runCapture() {
                 // This side holds no endpoint now, so it cannot collide with the
                 // other one until it opens again.
                 impl.captureEndpointHash.store(0, std::memory_order_release);
+                impl.capturePassThroughKey.store(0, std::memory_order_release);
             }
             continue;
         }
@@ -665,22 +709,31 @@ void Engine::runRender() {
 
                 impl.render.close();  // idempotent
                 impl.renderEndpointHash.store(0, std::memory_order_release);
+                impl.renderPassThroughKey.store(0, std::memory_order_release);
                 std::string reopenError;
                 if (impl.render.open(impl.renderOptions, reopenError)) {
                     impl.renderEndpointHash.store(
                         endpointHash(impl.render.openedDeviceId()),
                         std::memory_order_release);
+                    impl.renderPassThroughKey.store(
+                        virtualPassThroughKey(impl.render.openedIdentity()),
+                        std::memory_order_release);
                     // An empty requested id means "the default endpoint", which
                     // open() re-resolves every time. A default-device change
                     // while this stream was recovering can therefore land render
-                    // on the endpoint capture is already holding, and the
+                    // on the endpoint capture is already holding — or on the
+                    // other side of the cable capture is holding — and the
                     // start-time check could not have seen that. Left alone it
                     // is the unbounded feedback loop the start-time check exists
                     // to prevent, so the stream stops here instead.
-                    if (endpointsCollide(impl.captureEndpointHash.load(std::memory_order_acquire),
-                                         impl.renderEndpointHash.load(std::memory_order_acquire))) {
+                    if (routeFormsFeedbackLoop(
+                            impl.captureEndpointHash.load(std::memory_order_acquire),
+                            impl.renderEndpointHash.load(std::memory_order_acquire),
+                            impl.capturePassThroughKey.load(std::memory_order_acquire),
+                            impl.renderPassThroughKey.load(std::memory_order_acquire))) {
                         impl.render.close();
                         impl.renderEndpointHash.store(0, std::memory_order_release);
+                        impl.renderPassThroughKey.store(0, std::memory_order_release);
                         impl.givingUp.store(true, std::memory_order_release);
                         impl.stopping.store(true, std::memory_order_release);
                         continue;
@@ -731,6 +784,7 @@ void Engine::runRender() {
                 // This side holds no endpoint now, so it cannot collide with the
                 // other one until it opens again.
                 impl.renderEndpointHash.store(0, std::memory_order_release);
+                impl.renderPassThroughKey.store(0, std::memory_order_release);
             }
             continue;
         }

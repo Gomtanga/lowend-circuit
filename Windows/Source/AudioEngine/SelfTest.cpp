@@ -1,8 +1,9 @@
 // SelfTest.cpp — offline checks for the Windows processing chain.
 //
 // Scope: the DSP stage, the spatial stage, the lock-free ring and control
-// queue, argument parsing, and settings normalization. Every check runs the
-// production code path, not a re-implementation.
+// queue, argument parsing, settings normalization, and the routing rules that
+// decide whether a capture/render pair can run. Every check runs the production
+// code path, not a re-implementation.
 //
 // Explicitly out of scope: opening a WASAPI endpoint, negotiated period and
 // latency, Bluetooth behaviour, device switching, and listening quality. Those
@@ -13,6 +14,7 @@
 #include "AudioEngine/DspStage.h"
 #include "AudioEngine/Devices.h"
 #include "AudioEngine/RecoveryPolicy.h"
+#include "AudioEngine/RouteDiagnosis.h"
 #include "AudioEngine/Settings.h"
 #include "CLI/CommandLine.h"
 #include "Core/Core.h"
@@ -927,6 +929,297 @@ void checkRecoveryPolicy() {
           "reset restores the budget for the next failure");
 }
 
+// Synthetic endpoints for the routing rules.
+//
+// The rules take the endpoints they judge rather than looking them up, so they
+// can be covered here on a machine with no sound card — including the case that
+// matters most and cannot be reproduced on demand: the two endpoints of one
+// virtual audio cable, which have different ids and are still one signal path.
+DeviceInfo syntheticEndpoint(const char* id, const char* name, const char* container, const char* bus,
+                             bool isDefault, const char* formFactor = "Speakers") {
+    DeviceInfo device;
+    device.id = id;
+    device.name = name;
+    device.containerId = container;
+    device.enumeratorName = bus;
+    device.isDefault = isDefault;
+    device.formFactor = formFactor;
+    device.mixChannels = 2;
+    device.mixSampleRate = 48000;
+    device.mixBitsPerSample = 32;
+    device.loopbackCapable = true;
+    return device;
+}
+
+EndpointIdentity identityOfEndpoint(const DeviceInfo& device) {
+    EndpointIdentity identity;
+    identity.id = device.id;
+    identity.containerId = device.containerId;
+    identity.enumeratorName = device.enumeratorName;
+    return identity;
+}
+
+void checkRouteFeedbackRule() {
+    std::printf("routing: pass-through feedback rule\n");
+
+    // A virtual audio cable. Both sides are root-enumerated (a driver instantiates
+    // the device) and both belong to one device instance, which is what makes the
+    // recording side carry whatever is played into the playback side.
+    const std::string cableContainer = "{5b1a8f60-1c4c-4c2f-9a2b-0d0e6a2b7c31}";
+    const DeviceInfo cablePlayback = syntheticEndpoint(
+        "{0.0.0.00000000}.{11111111-1111-1111-1111-111111111111}", "CABLE Input",
+        cableContainer.c_str(), "ROOT", false);
+    const DeviceInfo cableRecording = syntheticEndpoint(
+        "{0.0.1.00000000}.{22222222-2222-2222-2222-222222222222}", "CABLE Output",
+        cableContainer.c_str(), "ROOT", false);
+    // A physical output, on a hardware bus.
+    const DeviceInfo physicalOutput = syntheticEndpoint(
+        "{0.0.0.00000000}.{33333333-3333-3333-3333-333333333333}", "Fosi Audio ZH3",
+        "{9d0c3dd0-2e9b-4f2a-8f4e-6b1f4a2d5c70}", "USB", true);
+    // A USB headset: its microphone and its speakers share one device instance
+    // and one bus, but they carry two independent signals.
+    const std::string headsetContainer = "{0b6a2f14-8e3d-4d6a-9a17-2f3c4d5e6f70}";
+    const DeviceInfo headsetSpeakers = syntheticEndpoint(
+        "{0.0.0.00000000}.{44444444-4444-4444-4444-444444444444}", "Headset", 
+        headsetContainer.c_str(), "USB", false, "Headphones");
+    const DeviceInfo headsetMic = syntheticEndpoint(
+        "{0.0.1.00000000}.{55555555-5555-5555-5555-555555555555}", "Headset Microphone",
+        headsetContainer.c_str(), "USB", false, "Microphone");
+    // A second, unrelated software device: a different instance, so a different
+    // signal path even on the same bus.
+    const DeviceInfo otherVirtual = syntheticEndpoint(
+        "{0.0.0.00000000}.{66666666-6666-6666-6666-666666666666}", "Streaming Speakers",
+        "{7c2f9a44-3d51-4b0e-8c22-1a9f0e5b6d80}", "ROOT", false);
+
+    // The rule itself: two sides of one virtual device are one signal path even
+    // though their endpoint ids differ. This is the case the endpoint-id check
+    // cannot see, and the reason the check is not "different ids, therefore safe".
+    check(passThroughKeysCollide(virtualPassThroughKey(identityOfEndpoint(cablePlayback)),
+                                 virtualPassThroughKey(identityOfEndpoint(cableRecording))),
+          "the playback and recording sides of one virtual cable collide");
+    // One side of the cable against a physical output is the documented route and
+    // must stay allowed.
+    check(!passThroughKeysCollide(virtualPassThroughKey(identityOfEndpoint(cableRecording)),
+                                  virtualPassThroughKey(identityOfEndpoint(physicalOutput))),
+          "a cable's recording side does not collide with a physical output");
+    check(!passThroughKeysCollide(virtualPassThroughKey(identityOfEndpoint(cablePlayback)),
+                                  virtualPassThroughKey(identityOfEndpoint(physicalOutput))),
+          "a cable's playback side does not collide with a physical output");
+    // Hardware that shares one device instance is not a pass-through: refusing
+    // these would break an ordinary headset microphone into its own speakers.
+    check(!passThroughKeysCollide(virtualPassThroughKey(identityOfEndpoint(headsetMic)),
+                                  virtualPassThroughKey(identityOfEndpoint(headsetSpeakers))),
+          "a headset's microphone and speakers are not one signal path");
+    check(!passThroughKeysCollide(virtualPassThroughKey(identityOfEndpoint(cablePlayback)),
+                                  virtualPassThroughKey(identityOfEndpoint(otherVirtual))),
+          "two different virtual devices do not collide");
+    // Nothing identifiable: a closed side, or a container the property store did
+    // not return. Treated as "cannot collide", because refusing a route on an
+    // unreadable property would break working setups, while the endpoint-id check
+    // still catches the same-endpoint case.
+    EndpointIdentity unreadable = identityOfEndpoint(cablePlayback);
+    unreadable.containerId.clear();
+    check(virtualPassThroughKey(unreadable) == 0,
+          "an endpoint whose container is unreadable has no pass-through key");
+    check(!passThroughKeysCollide(virtualPassThroughKey(unreadable), 0),
+          "an unidentifiable side never collides");
+    check(virtualPassThroughKey(EndpointIdentity()) == 0,
+          "an empty identity has no pass-through key");
+
+    // The complete rule the engine applies, at start and after every reopen: the
+    // two conditions are one predicate so the three call sites cannot drift.
+    const uint64_t cableKey = virtualPassThroughKey(identityOfEndpoint(cablePlayback));
+    const uint64_t recordingKey = virtualPassThroughKey(identityOfEndpoint(cableRecording));
+    const uint64_t physicalKey = virtualPassThroughKey(identityOfEndpoint(physicalOutput));
+    check(routeFormsFeedbackLoop(0, 0, cableKey, recordingKey),
+          "the combined rule catches a cable used on both sides");
+    check(routeFormsFeedbackLoop(endpointHash(physicalOutput.id), endpointHash(physicalOutput.id),
+                                 0, 0),
+          "the combined rule catches one endpoint used on both sides");
+    check(!routeFormsFeedbackLoop(endpointHash(physicalOutput.id),
+                                  endpointHash(cableRecording.id), recordingKey, physicalKey),
+          "the documented cable route passes the combined rule");
+    check(!routeFormsFeedbackLoop(0, 0, 0, 0),
+          "two unidentifiable sides do not trip the combined rule");
+}
+
+void checkRouteSelectionDiagnosis() {
+    std::printf("routing: endpoint selection and capture mode\n");
+
+    const std::string cableContainer = "{5b1a8f60-1c4c-4c2f-9a2b-0d0e6a2b7c31}";
+    const DeviceInfo physicalOutput = syntheticEndpoint(
+        "{0.0.0.00000000}.{33333333-3333-3333-3333-333333333333}", "Fosi Audio ZH3",
+        "{9d0c3dd0-2e9b-4f2a-8f4e-6b1f4a2d5c70}", "USB", true);
+    const DeviceInfo cablePlayback = syntheticEndpoint(
+        "{0.0.0.00000000}.{11111111-1111-1111-1111-111111111111}", "CABLE Input",
+        cableContainer.c_str(), "ROOT", false);
+    const DeviceInfo cableRecording = syntheticEndpoint(
+        "{0.0.1.00000000}.{22222222-2222-2222-2222-222222222222}", "CABLE Output",
+        cableContainer.c_str(), "ROOT", false);
+    const DeviceInfo microphone = syntheticEndpoint(
+        "{0.0.1.00000000}.{77777777-7777-7777-7777-777777777777}", "USB Microphone",
+        "{1f3e5a2b-6c4d-4e8f-9a01-2b3c4d5e6f71}", "USB", true, "Microphone");
+
+    const std::vector<DeviceInfo> outputs = { physicalOutput, cablePlayback };
+    const std::vector<DeviceInfo> inputs = { microphone, cableRecording };
+
+    RouteSelection inputToOutput;
+    inputToOutput.captureId = microphone.id;
+    inputToOutput.renderId = physicalOutput.id;
+    inputToOutput.captureFlow = DataFlow::capture;
+    inputToOutput.loopback = false;
+    const RouteDiagnosis ready = diagnoseRoute(inputToOutput, outputs, inputs);
+    check(ready.ok(), "a real input into a physical output is accepted");
+    check(ready.haveCapture && ready.capture.id == microphone.id,
+          "the accepted route reports the capture endpoint it resolved");
+    check(ready.haveRender && ready.render.id == physicalOutput.id,
+          "the accepted route reports the render endpoint it resolved");
+
+    // The milestone route: the cable's recording side as an input, the physical
+    // output for playback.
+    RouteSelection cableToOutput = inputToOutput;
+    cableToOutput.captureId = cableRecording.id;
+    const RouteDiagnosis milestone = diagnoseRoute(cableToOutput, outputs, inputs);
+    check(milestone.ok(), "the cable recording side into a physical output is accepted");
+    bool mentionedMilestone = false;
+    for (const std::string& note : milestone.notes) {
+        if (note.find("installing a virtual audio driver") != std::string::npos) {
+            mentionedMilestone = true;
+        }
+    }
+    check(!mentionedMilestone,
+          "a machine whose cable exists is not told to install one");
+
+    // A cable used on both sides: different endpoint ids, one signal path.
+    RouteSelection cableLoop = cableToOutput;
+    cableLoop.renderId = cablePlayback.id;
+    const RouteDiagnosis loop = diagnoseRoute(cableLoop, outputs, inputs);
+    check(loop.issue == RouteIssue::virtualPassThroughPair,
+          "a virtual cable used on both sides is refused as a pass-through pair");
+    check(loop.cause.find("comes back on its recording side") != std::string::npos,
+          "the cable refusal explains the signal path, not just the ids");
+    check(loop.cause.find(cablePlayback.name) != std::string::npos &&
+              loop.cause.find(cableRecording.name) != std::string::npos,
+          "the cable refusal names both endpoints of the pair");
+
+    // One endpoint on both sides.
+    RouteSelection sameEndpoint = inputToOutput;
+    sameEndpoint.captureFlow = DataFlow::render;
+    sameEndpoint.loopback = true;
+    sameEndpoint.captureId = physicalOutput.id;
+    const RouteDiagnosis same = diagnoseRoute(sameEndpoint, outputs, inputs);
+    check(same.issue == RouteIssue::sameEndpoint, "one endpoint on both sides is refused");
+
+    // Which id failed has to be distinguishable: a device that was reinstalled
+    // gets a new id, and nothing may fall back to another endpoint.
+    RouteSelection missingCapture = inputToOutput;
+    missingCapture.captureId = "{0.0.1.00000000}.{deadbeef-0000-0000-0000-000000000000}";
+    const RouteDiagnosis missingInput = diagnoseRoute(missingCapture, outputs, inputs);
+    check(missingInput.issue == RouteIssue::captureEndpointMissing,
+          "an unknown capture id is reported as a missing endpoint");
+    check(missingInput.cause.find("no endpoint with the requested capture id") != std::string::npos,
+          "the missing capture id is reported by name, not replaced");
+    check(missingInput.nextAction.find("reinstalled") != std::string::npos,
+          "the advice says a reinstalled endpoint gets a new id");
+    RouteSelection missingRender = inputToOutput;
+    missingRender.renderId = "{0.0.0.00000000}.{deadbeef-0000-0000-0000-000000000001}";
+    const RouteDiagnosis missingOutput = diagnoseRoute(missingRender, outputs, inputs);
+    check(missingOutput.issue == RouteIssue::renderEndpointMissing,
+          "an unknown render id is reported as a missing endpoint");
+
+    // An endpoint that exists but belongs to the other flow is a capture-mode
+    // problem, and the advice has to name the mode rather than the id.
+    RouteSelection wrongMode;
+    wrongMode.captureId = microphone.id;
+    wrongMode.captureFlow = DataFlow::render;  // loopback, which only exists for outputs
+    wrongMode.loopback = true;
+    wrongMode.renderId = physicalOutput.id;
+    const RouteDiagnosis mode = diagnoseRoute(wrongMode, outputs, inputs);
+    check(mode.issue == RouteIssue::captureModeMismatch,
+          "an input endpoint selected as a loopback capture is a mode mismatch");
+    check(mode.nextAction.find("--input-device") != std::string::npos,
+          "the mode mismatch advice names the flag that records an input");
+
+    // The opposite direction: an output endpoint selected as a real input.
+    RouteSelection reversedMode;
+    reversedMode.captureId = physicalOutput.id;
+    reversedMode.captureFlow = DataFlow::capture;
+    reversedMode.loopback = false;
+    reversedMode.renderId = cablePlayback.id;
+    const RouteDiagnosis reversed = diagnoseRoute(reversedMode, outputs, inputs);
+    check(reversed.issue == RouteIssue::captureModeMismatch,
+          "an output endpoint selected as an input capture is a mode mismatch");
+
+    // The default selection on a machine with one output is the same endpoint on
+    // both sides; that is the guard's oldest case and must stay refused.
+    RouteSelection defaults;
+    const RouteDiagnosis defaultRoute = diagnoseRoute(defaults, outputs, inputs);
+    check(defaultRoute.issue == RouteIssue::sameEndpoint,
+          "the default loopback route on a single-output machine is refused");
+
+    // Capturing a cable's playback side is a valid route, but not the milestone
+    // route, so it is stated instead of silently accepted.
+    RouteSelection playbackSide = inputToOutput;
+    playbackSide.captureId = cablePlayback.id;
+    playbackSide.captureFlow = DataFlow::render;
+    playbackSide.loopback = true;
+    const RouteDiagnosis playback = diagnoseRoute(playbackSide, outputs, inputs);
+    check(playback.ok(), "capturing a cable's playback side is allowed");
+    bool notedPlaybackSide = false;
+    for (const std::string& note : playback.notes) {
+        if (note.find("playback side") != std::string::npos) {
+            notedPlaybackSide = true;
+        }
+    }
+    check(notedPlaybackSide, "capturing a cable's playback side is called out");
+
+    // With no cable at all, the milestone route is unavailable and that is said
+    // once, with what it would take, instead of being discovered later.
+    const std::vector<DeviceInfo> noCableOutputs = { physicalOutput };
+    const std::vector<DeviceInfo> noCableInputs = { microphone };
+    const RouteDiagnosis withoutCable = diagnoseRoute(inputToOutput, noCableOutputs, noCableInputs);
+    check(withoutCable.ok(), "a route without a virtual cable is still usable");
+    check(withoutCable.virtualCables.empty(),
+          "a machine with no virtual cable reports no pairs");
+    bool toldToInstall = false;
+    for (const std::string& note : withoutCable.notes) {
+        if (note.find("VB-CABLE") != std::string::npos &&
+            note.find("consent") != std::string::npos) {
+            toldToInstall = true;
+        }
+    }
+    check(toldToInstall,
+          "a missing virtual cable is reported with its install cost and consent requirement");
+
+    // A machine whose only input endpoints are remote: the capture clock is not
+    // the local audio clock, and that has to be said rather than assumed away.
+    const DeviceInfo remoteInput = syntheticEndpoint(
+        "{0.0.1.00000000}.{88888888-8888-8888-8888-888888888888}", "Network Input",
+        "{2a4b6c8d-0e1f-4a2b-8c3d-4e5f60718293}", "ROOT", true, "Network");
+    const std::vector<DeviceInfo> remoteInputs = { remoteInput };
+    RouteSelection remoteRoute = inputToOutput;
+    remoteRoute.captureId = remoteInput.id;
+    const RouteDiagnosis remote = diagnoseRoute(remoteRoute, noCableOutputs, remoteInputs);
+    check(remote.ok(), "a remote input endpoint is usable");
+    bool notedRemote = false;
+    for (const std::string& note : remote.notes) {
+        if (note.find("remote/network") != std::string::npos &&
+            note.find("--verbose") != std::string::npos) {
+            notedRemote = true;
+        }
+    }
+    check(notedRemote, "a remote-only capture environment is reported with what to measure");
+
+    // The pairing the device list prints comes from the same rule.
+    const std::vector<VirtualCable> found = findVirtualCables(outputs, inputs);
+    check(found.size() == 1, "one virtual cable is found in a list that holds one");
+    check(!found.empty() && found[0].playback.id == cablePlayback.id &&
+              found[0].recording.id == cableRecording.id,
+          "the found cable pairs the playback side with its recording side");
+    check(findVirtualCables(noCableOutputs, noCableInputs).empty(),
+          "no cable is found when the endpoints are not a pair");
+}
+
 void checkDeviceFailureClassification() {
     std::printf("recovery: real device-failure classification\n");
 
@@ -1310,7 +1603,8 @@ int runSelfTest() {
     g_failures = 0;
     std::printf("LowEnd Windows offline checks\n");
     std::printf("Scope: DSP stage, spatial stage, lock-free buffers, CLI parsing,\n");
-    std::printf("       recovery policy and device-failure classification.\n");
+    std::printf("       recovery policy, device-failure classification, and the routing\n");
+    std::printf("       rules that judge a capture/render pair.\n");
     std::printf("The classification checks call the device layer but always expect it to\n");
     std::printf("fail, so they need no audio endpoint. Not covered: successful device\n");
     std::printf("opening, negotiated latency, Bluetooth, listening quality.\n\n");
@@ -1331,6 +1625,8 @@ int runSelfTest() {
     checkDspStageThreading();
     checkDiscontinuityResetsState();
     checkRecoveryPolicy();
+    checkRouteFeedbackRule();
+    checkRouteSelectionDiagnosis();
     checkRecoveryLoopDecision();
     checkDeviceFailureClassification();
     checkSampleRateMatrix();

@@ -27,6 +27,21 @@ struct DeviceInfo {
     uint32_t mixBitsPerSample = 0;
     std::string formFactor;        // "Speakers", "Headphones", "Bluetooth", ...
     std::string containerId;       // stable id shared by one physical device
+    std::string enumeratorName;    // bus the device arrived on: "USB", "ROOT", ...
+};
+
+// Identity of an endpoint as the device layer resolved it, for the checks that
+// must not compare display names.
+//
+// The endpoint id alone cannot answer "are these two endpoints one signal path?",
+// because a virtual audio cable's playback and recording sides have different
+// ids while being one device instance. containerId is the id Windows assigns to
+// the device behind the endpoint, and enumeratorName says which bus it arrived
+// on — see isVirtualEnumerator() in RouteDiagnosis.h.
+struct EndpointIdentity {
+    std::string id;
+    std::string containerId;
+    std::string enumeratorName;
 };
 
 // Enumeration needs COM initialized on the calling thread. Enumerators return
@@ -99,6 +114,10 @@ public:
     // hardware.
     const std::string& openedDeviceId() const;
     const std::string& openedDeviceName() const;
+    // The same endpoint as the feedback checks need it: id, device container and
+    // bus. Resolved together with the name, from the property store open()
+    // already opens, so it costs no extra device access.
+    const EndpointIdentity& openedIdentity() const;
 
     // Audio thread. Blocks for the next packet. Returns false on a device
     // error or when stop() was requested; `error` is control-thread readable.
@@ -178,6 +197,10 @@ public:
     // for why the default case has to be observable.
     const std::string& openedDeviceId() const;
     const std::string& openedDeviceName() const;
+    // The same endpoint as the feedback checks need it: id, device container and
+    // bus. Resolved together with the name, from the property store open()
+    // already opens, so it costs no extra device access.
+    const EndpointIdentity& openedIdentity() const;
 
     // Audio thread. Writes exactly `frames` stereo frames, converting to the
     // endpoint's channel layout and sample format. Blocks while the endpoint
