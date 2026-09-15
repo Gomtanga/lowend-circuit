@@ -40,6 +40,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 툴체인 | Visual Studio 2022 Community, MSVC toolset 14.44.35207, CMake 3.31.6-msvc6 |
 | 브랜치 | `feature/windows-virtual-routing` (PR #24 `feature/windows-port` head `400fa25` 기반) |
 | 이정표 시작 시점의 HEAD | `400fa2574472907294b834a97a0985e6cb0f5568` |
+| 이 문서가 기록하는 검증 대상 commit | `814f29b` (푸시됨, `origin/feature/windows-virtual-routing`) |
 | 이 저장소의 빌드 산출물 | `build/win-cli/Release/lowend_windows.exe`, `build/win-cli/Debug/lowend_windows.exe`, `build/win-cli/Release/lowend_gui.exe`, `build/win-routing-no-ui/Release/lowend_windows.exe` |
 
 ### 이 워크스테이션의 오디오 엔드포인트 (검증 시점)
@@ -78,6 +79,8 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 케이블 검사기 자체 판별력 (신규) | `python scripts\check-windows-cable-route.py --self-check` | 자기가 만든 신호로 통과/거부를 구별: 440 Hz·0.40·양 채널 신호는 수용, 무음·한쪽 채널만·디튠(404 Hz)·감쇠 없는 Circuit은 거부 |
 | 순환 가드 규칙 (오프라인) | `--self-test`의 `routing:` 검사 2종 | 같은 컨테이너 + ROOT 버스의 재생/녹음 쌍은 충돌, USB 헤드셋의 마이크·스피커는 충돌 아님, 컨테이너를 못 읽으면 충돌 아님(식별 불가는 허용), 케이블 한쪽 + 물리 출력은 허용 |
 | 주입(mutation) 시험 | 아래 참조 | 새 검사가 실제로 결함을 잡는지 확인 |
+| **GitHub CI (이 브랜치의 첫 실행)** | push `814f29b` → Actions | **Windows CI**(`34976189957`, Debug·Release·no-UI 3개 잡) success, **Core CI**(`34976189997`, ubuntu·windows × Debug·Release) success, **macOS Native and Core CI**(`34976189959`) success. Windows 잡의 12/12·7/7 단계가 모두 success이며, 여기에는 신규 단계(**GUI 선택 저장/복원**, **케이블 검사기 self-check**)가 포함됩니다 |
+| CI에서의 이정표 첫 시도 실패 → 수정 | push `254e8c2`, `d6d126c` → Actions | Windows 3개 잡이 모두 `check-windows-cli.py` 단계에서 실패했습니다(빌드·ctest는 통과). 원인은 검사가 **엔드포인트가 없는 러너**를 가정하지 않은 것 — `--route-check`가 없는 *render* id를 지목한다고 단정했지만, 엔드포인트가 하나도 없는 머신에서는 capture 쪽 기본 장치가 먼저 해석에 실패합니다. 엔드포인트 유무와 무관하게 같은 답을 내는 capture id 기준으로 바꾸고, 러너에 엔드포인트가 없을 때의 계약도 함께 검증하도록 고쳤습니다 |
 
 #### 주입 시험 (검사가 정말 잡는가)
 
@@ -211,8 +214,8 @@ Result: REFUSED (render endpoint missing)
   원격 장치는 독립 clock을 가지므로, 원격 입력 기반 경로의 장시간 안정성은 별도 측정이 필요합니다
   (`--route-check`가 이 사실을 note로 알려 줍니다).
 * **Bluetooth·HDMI·독점 모드·DRM**: 이번 이정표의 범위가 아니며 검증하지 않았습니다.
-* **CI**: 이 브랜치의 워크플로 변경은 아직 GitHub에서 실행되지 않았습니다. 이 문서의 모든 결과는
-  로컬 재현 결과이며, 미실행 CI를 로컬 결과로 대체했다고 주장하지 않습니다.
+* **CI**: 이 브랜치는 푸시되었고 세 워크플로가 `814f29b`에서 모두 success입니다(3절). 다만 **CI 잡 요약의 VERIFIED/SKIPPED 구분은 저장소 자격 증명 없이 읽을 수 없습니다** — 확인할 수 있는 것은 단계가 실패하지 않았다는 사실이며, GUI 단계가 러너에서 "SKIPPED"로 자기 보고했을 가능성은 배제하지 않습니다. 러너에 오디오 장치가 없다는 것과 데스크톱 제약은 위 SKIPPED 표의 항목을 대체하지 않습니다.
+* **`--list-devices`/`--route-check`와 엔드포인트가 없는 머신**: 러너처럼 장치가 하나도 없는 환경에서 두 명령은 열거 실패 또는 "기본 장치를 찾을 수 없음"을 보고합니다. 그 계약도 CI에서 검증되지만, "장치가 있는 머신에서의 경로 판정"과는 다른 경로입니다.
 * **32비트 Windows**: 지원하지 않습니다(기존 결정 유지).
 
 ## 8. 재현 명령 요약
@@ -234,7 +237,12 @@ python scripts\check-windows-cable-route.py build\win-cli\Release\lowend_windows
 
 ## 9. 남은 작업
 
-1. VB-CABLE 설치 동의 → 재부팅 → 5절의 3~9번 실행(경로 검증, 30분 안정성, 재시작 10회, 3상태 비교).
-2. 사람의 청취 평가(별도, 이 문서의 주장 범위 밖).
-3. 후속 PR: 이 브랜치의 변경을 `feature/windows-port` 기반 Draft PR로 분리. PR #24가 병합되면
-   base를 `main`으로 바꾸고 병합합니다.
+1. **Draft PR 생성(사용자 조작 필요)**: 이 브랜치는 푸시되었지만 PR은 만들지 않았습니다 —
+   저장소 자격 증명이 필요하고 이 환경에는 인증된 GitHub 클라이언트가 없습니다.
+   base `feature/windows-port`, head `feature/windows-virtual-routing`, Draft로 열고,
+   PR 본문/제목 초안은 `%TEMP%\lowend-routing-pr-body.md`에 준비해 두었습니다.
+   PR #24가 병합되면 base를 `main`으로 바꿉니다.
+2. **VB-CABLE 설치 동의 → 재부팅 → 5절의 3~9번 실행**(경로 검증, 30분 안정성, 재시작 10회,
+   3상태 OFF/바이패스/Circuit 비교). 이 단계는 외부 드라이버 설치·재부팅·기본 출력 변경·테스트 톤
+   재생을 포함하므로 **사용자 동의 없이는 진행하지 않습니다.**
+3. 사람의 청취 평가(별도, 이 문서의 주장 범위 밖).
