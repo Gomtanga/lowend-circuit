@@ -111,6 +111,8 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | **GitHub CI (푸시된 모든 커밋)** | push `814f29b`, `8cee17d`, `296efd3`, `3276944`, `9f9a2d9`, `96a309c`, `fbde9bb` → Actions | 마지막 커밋 `fbde9bb`에서 **Windows CI success**(Debug·Release·no-UI 3잡), **Core CI success**(ubuntu·windows × Debug·Release), **macOS Native and Core CI success**. Windows 잡의 12/12·7/7 단계가 모두 success이며 신규 단계(**GUI 선택 저장/복원**, **케이블 검사기 self-check**)가 포함됩니다 |
 | CI에서의 첫 시도 실패 → 수정 | push `254e8c2`, `d6d126c` → Actions | Windows 3개 잡이 모두 `check-windows-cli.py` 단계에서 실패했습니다(빌드·ctest는 통과). 원인은 검사가 **엔드포인트가 없는 러너**를 가정하지 않은 것 — `--route-check`가 없는 *render* id를 지목한다고 단정했지만, 엔드포인트가 하나도 없는 머신에서는 capture 쪽 기본 장치가 먼저 해석에 실패합니다. 엔드포인트 유무와 무관하게 같은 답을 내는 capture id 기준으로 바꾸고, 러너에 엔드포인트가 없을 때의 계약도 함께 검증하도록 고쳤습니다 |
 | GUI 선택 저장 결함 (자체 발견·수정) | `check-windows-gui-persistence.py` 4단계 | 한쪽 콤보를 바꾸면 **저장 파일의 두 줄을 모두 다시 썼고**, 선택이 없는 쪽은 빈 값으로 기록되었습니다. 그러면 사용자가 고른 id가 지워지고 다음 실행에서 첫 목록 항목이 선택되어 **사용자가 고른 적 없는 endpoint로 시작**합니다(빈 콤보가 막으려던 바로 그 대체가 한 실행 뒤에 발생). 이제 선택이 없는 쪽은 이전 값을 유지합니다. 수정 전 빌드에서 새 단계가 `the file now holds ''`로 실패하고, 수정 후 통과하는 것을 확인했습니다 |
+| GUI 시작 안내 결함 (자체 발견·수정) | 실행 중인 창의 상태 컨트롤을 직접 읽음 | 창을 열면 상태줄이 `Idle. Choose an output endpoint, then Start.`만 보였습니다. 케이블 안내와 "LowEnd는 Windows 기본 출력을 바꾸지 않는다 + 되돌리는 경로"는 `updateStatusText()`가 만들지만, 시작 시에는 그 함수를 부르지 않고 짧은 리터럴을 설정하고 있었습니다. 이제 `create()`가 장치 목록을 채운 뒤 `updateStatusText()`를 호출하고, GUI end-to-end 검사가 시작 시점에 그 안내(`virtual cable`, `Settings > System > Sound > Output`)가 화면에 있는지 확인합니다. **옛 시작 줄을 주입하면 검사가 실패**하는 것을 확인했습니다 |
+| GUI end-to-end (재확인) | `python scripts\check-windows-gui.py build\win-cli\Release\lowend_gui.exe` | 같은 endpoint 시작 거부 → 입력 장치로 시작 → 통계 진행(20,928 → 165,504) → 실행 중 모델 변경이 오디오 스레드에 반영 → Stop → 재시작 시 통계 초기화(→ 21,792) → 두 번째 Stop → 정상 종료. 상태 텍스트가 박스에 맞음(192/276 px) |
 
 #### 주입 시험 (검사가 정말 잡는가)
 
@@ -118,6 +120,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 |---|---|---|
 | `isVirtualEnumerator`가 항상 false (= 케이블 쌍을 식별하지 못함) | `--self-test`에서 **9건 실패**(케이블 쌍 충돌, 결합 규칙, 진단 3종, 목록 표시 등) | 재빌드 후 전부 통과 |
 | 저장된 endpoint가 사라졌을 때 첫 항목으로 조용히 대체(원래 수정했던 결함의 재주입) | `check-windows-gui-persistence.py`가 **2건 MISMATCH** — "사라진 선택이 다른 endpoint로 대체됨", "Start가 잘못된 이유(HRESULT 0x8889000F)로 실패" | 재빌드 후 통과 |
+| 시작 상태줄을 다시 짧은 리터럴로 되돌림 | `check-windows-gui.py`가 **실패** — "The startup status does not tell the user that LowEnd leaves Windows' default output alone …" | 재빌드 후 통과 |
 
 ### FAILED
 
