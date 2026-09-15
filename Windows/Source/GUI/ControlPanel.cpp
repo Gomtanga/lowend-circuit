@@ -424,16 +424,30 @@ void ControlPanel::saveDeviceSelection() const {
         return;
     }
     const EngineOptions options = readEngineOptions();
-    if (options.captureDeviceId.empty() && options.renderDeviceId.empty()) {
-        return;  // nothing selected; keeping the previous file is more useful
+
+    // A side with no selection is a side whose *saved* endpoint has vanished (the
+    // combo is deliberately left empty in that case). Writing an empty value there
+    // would erase the id the user chose and turn the next launch into a silent
+    // fallback to the first list entry, which is exactly the substitution the
+    // empty combo exists to prevent. The previous value is kept instead, so the
+    // endpoint stays "saved but missing" until the user selects one.
+    const std::string previousCapture = readSelectionValue(path, "capture");
+    const std::string previousRender = readSelectionValue(path, "render");
+    const std::string capture =
+        options.captureDeviceId.empty() ? previousCapture : options.captureDeviceId;
+    const std::string render =
+        options.renderDeviceId.empty() ? previousRender : options.renderDeviceId;
+    if (capture.empty() && render.empty()) {
+        return;  // nothing selected yet; keeping the previous file is more useful
     }
+
     std::ofstream file(path, std::ios::trunc);
     if (!file) {
         return;  // a read-only profile must not break the app
     }
     file << "# Endpoints chosen in the LowEnd Circuit GUI. Written by the app, safe to delete.\n";
-    file << "capture=" << options.captureDeviceId << "\n";
-    file << "render=" << options.renderDeviceId << "\n";
+    file << "capture=" << capture << "\n";
+    file << "render=" << render << "\n";
 }
 
 Settings ControlPanel::readSettings() const {

@@ -299,6 +299,33 @@ def main() -> int:
                     f"user selected ({expected})")
         finally:
             gui.close()
+
+        # 4. Changing one side must not erase a saved-but-missing id on the other.
+        #    Writing an empty value there would turn the next launch into a silent
+        #    fallback to the first list entry, which is the substitution the empty
+        #    combo exists to prevent.
+        if len(outputs) >= 2:
+            write_selection(path, STALE_ID, outputs[0][0])
+            try:
+                gui = Gui(executable)
+            except TimeoutError:
+                print("SKIPPED: no desktop for the fourth phase; the preservation of a "
+                      "missing id was not observed. This is not a pass.")
+                return 0
+            try:
+                # Select an entry that is not already selected, so a change happens.
+                gui.select(ID_RENDER, 1)
+                written = path.read_text(encoding="utf-8") if path.exists() else ""
+                match = re.search(r"^capture=(.*)$", written, re.M)
+                if not match:
+                    problems.append("changing the output erased the capture line entirely")
+                elif match.group(1).strip() != STALE_ID:
+                    problems.append(
+                        "changing the output endpoint erased the other side's saved-but-missing "
+                        f"id (the file now holds {match.group(1).strip()!r}), so the next launch "
+                        "would fall back to the first list entry instead of asking again")
+            finally:
+                gui.close()
     finally:
         if saved_backup is None:
             if path.exists():
@@ -314,8 +341,10 @@ def main() -> int:
         return 1
 
     print("GUI device selection verified: a saved endpoint is restored, a vanished one leaves "
-          "the combo empty and makes Start refuse with that reason, and a change is written to "
-          "the user's own settings file (which this check restored afterwards).")
+          "the combo empty and makes Start refuse with that reason, a change is written to the "
+          "user's own settings file, and changing one side does not erase a saved-but-missing "
+          "id on the other (which would turn the next launch into a silent fallback). "
+          "The check restored the user's own file afterwards.")
     return 0
 
 
