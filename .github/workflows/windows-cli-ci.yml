@@ -72,6 +72,28 @@ jobs:
           $status = if ($out -match 'SKIPPED') { 'SKIPPED' } else { 'VERIFIED' }
           "device selection across refresh: $status" | Add-Content $env:GITHUB_STEP_SUMMARY
 
+      - name: Verify the GUI stores, restores and refuses device selections
+        # Device-free apart from needing a window station: a saved endpoint must be
+        # restored, a vanished one must leave its combo empty and make Start refuse
+        # that reason rather than falling back to another device, and a change must
+        # be written to the user's own settings file. On a headless runner the
+        # script reports SKIPPED and the summary says so.
+        shell: pwsh
+        run: |
+          python scripts/check-windows-gui-persistence.py build/win-cli/${{ matrix.build-type }}/lowend_gui.exe 2>&1 |
+            Tee-Object -Variable out
+          $status = if ($out -match 'SKIPPED') { 'SKIPPED' } else { 'VERIFIED' }
+          "device-selection persistence: $status" | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - name: Verify the cable-route checker itself
+        # The virtual-cable route needs external hardware that no runner has, so the
+        # route itself cannot be checked here. What runs here is the checker's own
+        # discrimination: it generates signals, and must accept the one it
+        # describes while rejecting silence, a single-channel source, a detuned
+        # stream and an unattenuated Circuit run. Without this, a checker that never
+        # fails would look exactly like a route that always passes.
+        run: python scripts/check-windows-cable-route.py --self-check
+
       - name: Report missing audio endpoint
         # Documents explicitly that the absence of an endpoint is expected on
         # this runner and is not a passing signal about device behaviour.
