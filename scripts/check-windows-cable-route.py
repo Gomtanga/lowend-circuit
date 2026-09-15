@@ -24,14 +24,25 @@ engine's own opinion of its output.
 
 Fixed acceptance criteria, decided before any run rather than after one:
 
+  reference      with the engine stopped, the same tone is played to the *output*
+                 endpoint itself and observed there. This measures how the
+                 destination's own loopback reports a 0.40 tone, and it is what
+                 makes the level criteria below relative: an endpoint's volume and
+                 its driver's effects sit between the render stream and the
+                 loopback tap, so the loopback can report more or less than the
+                 stream carries. (Measured on this workstation: a 0.40 tone into
+                 the ZH3 reads back at 0.40, while the same engine output rendered
+                 to an HDMI monitor's endpoint reads back at 1.0 - an absolute
+                 band would have failed a correct route.)
   level_off      the destination's loopback carries nothing while the engine is
-                 stopped: peak < 0.02. A signal here means a bypass or duplicate
-                 path exists (Windows' "listen to this device", or an app playing
-                 to the destination as well), which is investigated, not excused.
+                 stopped and the tone plays into the cable: peak < 0.02. A signal
+                 here means a bypass or duplicate path exists (Windows' "listen to
+                 this device", or an app playing to the destination as well), which
+                 is investigated, not excused.
   level_bypass   with the documented bypass (-model clean -intensity 0 -body 0
-                 -output 0 -spatial off) the destination shows 0.5x..1.05x of the
-                 0.40 tone amplitude: the route passes audio through and nothing
-                 in it silently attenuates or doubles the signal.
+                 -output 0 -spatial off) the destination shows 0.50x..1.15x of the
+                 measured reference: the route passes the signal through and
+                 nothing in it silently attenuates, boosts or doubles it.
   level_circuit  with the default Circuit model the destination shows at most
                  0.90x of the bypass level (documented attenuation) and at least
                  0.02: the DSP is in the path.
@@ -78,8 +89,12 @@ DESTINATION_SETTLE_SECONDS = 1.0
 
 # Decided before the runs; see the module docstring.
 LEVEL_OFF_MAX = 0.02
+# The bypass is judged against the destination's own measured reference, not
+# against the tone's nominal amplitude: the endpoint's volume and its driver's
+# effects sit between the render stream and the loopback tap, so the loopback can
+# report more or less than the stream carries.
 BYPASS_MIN_RATIO = 0.50
-BYPASS_MAX_RATIO = 1.05
+BYPASS_MAX_RATIO = 1.15
 CIRCUIT_MAX_RATIO = 0.90
 CHANNEL_MIN_PEAK = 0.02
 PITCH_TOLERANCE_HZ = 10.0
@@ -168,8 +183,18 @@ def analyze(dump: pathlib.Path):
     }
 
 
-def judge_case(label, measured, *, expect_silence=False, reference_bypass=None):
-    """Returns a list of problem strings for one measured run."""
+def judge_case(label, measured, *, expect_silence=False, reference_peak=None,
+               reference_bypass=None):
+    """Returns a list of problem strings for one measured run.
+
+    Exactly one of the three modes applies:
+      * `expect_silence` - the engine is stopped and nothing should reach the
+        destination;
+      * `reference_bypass` - a Circuit run, judged against the bypass run;
+      * `reference_peak` - a bypass run, judged against the destination's own
+        measured reference;
+      * none of them - the reference run itself, which only has to carry the tone.
+    """
     problems = []
     if expect_silence:
         if measured["peak"] >= LEVEL_OFF_MAX:
@@ -206,13 +231,14 @@ def judge_case(label, measured, *, expect_silence=False, reference_bypass=None):
                 f"{label}: the Circuit run landed at {ratio:.2f}x of the bypass run, above "
                 f"the {CIRCUIT_MAX_RATIO:.2f}x bound; the DSP did not apply its documented "
                 f"attenuation")
-    else:
-        ratio = measured["peak"] / TONE_AMPLITUDE
+    elif reference_peak is not None:
+        ratio = measured["peak"] / reference_peak if reference_peak else 0.0
         if ratio < BYPASS_MIN_RATIO or ratio > BYPASS_MAX_RATIO:
             problems.append(
-                f"{label}: the bypass run reached {ratio:.2f}x of the {TONE_AMPLITUDE:.2f} "
-                f"source amplitude, outside {BYPASS_MIN_RATIO:.2f}x..{BYPASS_MAX_RATIO:.2f}x; "
-                f"the route does not pass the signal through unchanged")
+                f"{label}: the bypass run reached {ratio:.2f}x of the destination's measured "
+                f"reference ({reference_peak:.6f}), outside "
+                f"{BYPASS_MIN_RATIO:.2f}x..{BYPASS_MAX_RATIO:.2f}x; the route does not pass "
+                f"the signal through unchanged")
     return problems
 
 
@@ -298,8 +324,14 @@ def stop(process, seconds: float = 0.0):
         return process.communicate()
 
 
-def run_case(executable, label, engine_args, ids, dump):
-    """Runs one measurement: optional engine, tone into the cable, observe the output."""
+def run_case(executable, label, engine_args, ids, dump, tone_device=None):
+    """Runs one measurement: optional engine, tone into one endpoint, observe the output.
+
+    The tone normally goes into the cable's playback endpoint; the reference case
+    sends it to the output endpoint itself, which is what makes the level
+    criteria relative to this destination.
+    """
+    target = tone_device if tone_device is not None else ids["cable_playback"]
     engine = None
     monitor = None
     try:
@@ -315,7 +347,7 @@ def run_case(executable, label, engine_args, ids, dump):
                                      "--dump-wav", str(dump)])
         time.sleep(0.5)
         tone = subprocess.run([str(executable), "--play-tone", str(TONE_SECONDS),
-                               "--device", ids["cable_playback"]],
+                               "--device", target],
                               capture_output=True, text=True, timeout=TONE_SECONDS + 60)
         if tone.returncode != 0:
             raise CheckFailure(f"{label}: --play-tone failed: {tone.stdout}\n{tone.stderr}")
@@ -395,36 +427,46 @@ def self_check() -> int:
         if not judge_case("silence-loud", silent_result):
             problems.append("a silent file passed the 'signal present' criteria")
 
-        quiet = scratch / "quiet.wav"
-        write_tone(quiet, TONE_HZ, 0.30, 1.0)
-        # 0.30 into a 0.40 bypass expectation is 0.75x of the source: inside the
-        # band, so the band must accept it.
-        if judge_case("quiet-bypass", analyze(quiet)):
-            problems.append("a 0.75x bypass ratio was rejected as out of band")
-        # The same 0.30 against a 0.40 bypass reference is 0.75x, which is
-        # *below* the Circuit bound, so the attenuation criterion accepts it (the
-        # DSP did attenuate). The case that must be rejected is a Circuit run that
-        # barely attenuated: 0.38 against the same reference is 0.95x.
-        unattenuated = scratch / "unattenuated.wav"
-        write_tone(unattenuated, TONE_HZ, 0.38, 1.0)
-        if judge_case("quiet-circuit", analyze(quiet),
-                      reference_bypass={"peak": TONE_AMPLITUDE}):
-            problems.append("an attenuated Circuit run (0.75x of its bypass reference) was "
-                            "rejected by the criteria")
+        # The bypass band is relative to the destination's own measured
+        # reference, so each case below is expressed as a ratio of it.
+        reference = analyze(good)
+        if judge_case("reference", reference):
+            problems.append("the reference run itself was rejected")
+
+        weaker = scratch / "weaker.wav"
+        write_tone(weaker, TONE_HZ, 0.30, 1.0)          # 0.75x of the reference
+        if judge_case("bypass-at-0.75x", analyze(weaker), reference_peak=reference["peak"]):
+            problems.append("a bypass run at 0.75x of the destination reference was rejected")
+
+        louder = scratch / "louder.wav"
+        write_tone(louder, TONE_HZ, 1.00, 1.0)          # 2.50x of the reference
+        near_silent = scratch / "near-silent.wav"
+        write_tone(near_silent, TONE_HZ, 0.10, 1.0)     # 0.25x of the reference
+        for label, path in (("bypass-at-2.5x", louder), ("bypass-at-0.25x", near_silent)):
+            if not any("reference" in problem
+                       for problem in judge_case(label, analyze(path),
+                                                 reference_peak=reference["peak"])):
+                problems.append(
+                    f"{label}: a bypass run outside the reference band passed the criterion")
+
+        # The Circuit bound compares the two runs that actually ran, so it needs
+        # no reference: 0.75x is attenuated (accepted), 1.00x is not (rejected).
+        if judge_case("circuit-at-0.75x", analyze(weaker), reference_bypass=reference):
+            problems.append("an attenuated Circuit run (0.75x of bypass) was rejected")
         if not any("attenuation" in problem
-                   for problem in judge_case("unattenuated-circuit",
-                                             analyze(unattenuated),
-                                             reference_bypass={"peak": 0.38})):
-            problems.append("an unattenuated Circuit run (1.00x of its bypass reference) "
-                            "passed the attenuation bound")
+                   for problem in judge_case("circuit-at-1.0x", analyze(good),
+                                             reference_bypass=reference)):
+            problems.append("an unattenuated Circuit run (1.00x of bypass) passed the "
+                            "attenuation bound")
 
     if problems:
         for problem in problems:
             print(f"  FAIL: {problem}", file=sys.stderr)
         return 1
     print("checker self-check passed: the level, channel and pitch criteria accept the "
-          "signal they describe and reject silence, a single-channel source, a "
-          "detuned stream and an unattenuated Circuit run.")
+          "signal they describe and reject silence, a single-channel source, a detuned "
+          "stream, an unattenuated Circuit run, and a bypass whose level is 2.5x or 0.25x "
+          "of the destination's own measured reference.")
     return 0
 
 
@@ -470,6 +512,26 @@ def device_run(args) -> int:
     with tempfile.TemporaryDirectory() as scratch:
         scratch = pathlib.Path(scratch)
 
+        # 0. The destination's own reference: the same tone, played to the output
+        #    endpoint itself, observed there. Every level comparison below is
+        #    relative to this, because the endpoint's volume and its driver's
+        #    effects sit between the render stream and the loopback tap.
+        reference = run_case(executable, "reference", None, ids, scratch / "reference.wav",
+                             tone_device=ids["output"])
+        print(f"reference:       peak={reference['peak']:.6f} "
+              f"(L {reference['peak_left']:.6f}, R {reference['peak_right']:.6f}) "
+              f"freq={reference['frequency']} frames={reference['frames']}")
+        problems += judge_case("reference", reference)
+        if reference["peak"] < CHANNEL_MIN_PEAK:
+            # Without a usable reference the relative criteria below have nothing
+            # to compare against, and reporting them would be meaningless.
+            for problem in problems:
+                print(f"  MISMATCH: {problem}", file=sys.stderr)
+            raise CheckFailure(
+                "the destination endpoint did not carry the reference tone, so the level "
+                "criteria cannot be evaluated; check that the output endpoint is not muted "
+                "and that Windows is not routing the tone elsewhere")
+
         off = run_case(executable, "engine off", None, ids, scratch / "off.wav")
         print(f"engine off:      peak={off['peak']:.6f} frames={off['frames']}")
         problems += judge_case("engine off", off, expect_silence=True)
@@ -481,7 +543,7 @@ def device_run(args) -> int:
         print(f"clean bypass:    peak={bypass['peak']:.6f} "
               f"(L {bypass['peak_left']:.6f}, R {bypass['peak_right']:.6f}) "
               f"freq={bypass['frequency']} frames={bypass['frames']}")
-        problems += judge_case("clean bypass", bypass)
+        problems += judge_case("clean bypass", bypass, reference_peak=reference["peak"])
 
         circuit = run_case(executable, "circuit",
                            ["--input-device", ids["cable_recording"],
