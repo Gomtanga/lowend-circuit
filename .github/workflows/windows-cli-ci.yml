@@ -30,7 +30,21 @@ jobs:
         # exercises only the device-free surface: argument validation, the
         # offline self-test, and the settings dump. Device opening, negotiated
         # latency, Bluetooth and shared-mode behaviour are not covered here.
-        run: python scripts/check-windows-cli.py build/win-cli/${{ matrix.build-type }}/lowend_windows.exe
+        #
+        # The script's output is surfaced as an error annotation when it fails.
+        # Without that, a failure here reports only "exit code 1" in the checks
+        # API, and the message that says which assertion failed is inside a log
+        # that needs repository credentials to read.
+        shell: pwsh
+        run: |
+          python scripts/check-windows-cli.py build/win-cli/${{ matrix.build-type }}/lowend_windows.exe 2>&1 |
+            Tee-Object -Variable out
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            $text = ($out | Select-Object -Last 25) -join "`n"
+            Write-Output "::error title=CLI checks failed::$text"
+            exit $code
+          }
 
       - name: Verify the GUI control inventory
         # Runs without audio hardware: the window is created and its controls

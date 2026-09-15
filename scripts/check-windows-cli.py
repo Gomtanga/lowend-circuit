@@ -141,31 +141,55 @@ def main() -> None:
     # a route they never saw. Accepting either outcome without checking which one
     # happened would hide a silent fallback, so each branch asserts its own
     # message.
-    absent = "{0.0.0.00000000}.{deadbeef-0000-0000-0000-000000000000}"
+    absent_capture = "{0.0.1.00000000}.{deadbeef-0000-0000-0000-000000000000}"
+    absent_render = "{0.0.0.00000000}.{deadbeef-0000-0000-0000-000000000001}"
     list_result = run(executable, ["--list-devices"])
     list_output = list_result.stdout + list_result.stderr
     if "processing is running" in list_output:
         raise SystemExit("--list-devices started audio processing")
 
     if list_result.returncode == 0:
+        # `--list-devices` prints "(none)" for a section with no endpoints, which
+        # is what a hosted runner looks like: the audio stack is there, the
+        # devices are not. That distinction matters below, because the first thing
+        # a route check cannot resolve differs between the two machines.
+        no_outputs = "Output devices (loopback-capable):\n  (none)" in list_result.stdout
         if "Virtual cables" not in list_result.stdout:
             raise SystemExit("--list-devices did not report the virtual-cable pairing")
+
         # An id that no endpoint carries must be refused *by name*: falling back to
         # another device would process a route the user did not choose, which is
-        # the mistake the selection flags exist to prevent.
-        route_check = run(executable, ["--route-check", "--device", absent])
+        # the mistake the selection flags exist to prevent. The capture side is
+        # asserted here because it gives the same answer on every machine: with a
+        # capture id that exists nowhere, the refusal is about that id whether or
+        # not any endpoint is present. An absent *render* id cannot be asserted the
+        # same way on a machine with no endpoints at all, because the capture
+        # side's default endpoint is then what fails to resolve first.
+        route_check = run(executable, ["--route-check", "--input-device", absent_capture])
         route_output = route_check.stdout + route_check.stderr
         if route_check.returncode != 1:
             raise SystemExit(
-                f"--route-check with an absent render id: exit={route_check.returncode}, "
+                f"--route-check with an absent capture id: exit={route_check.returncode}, "
                 f"expected 1")
-        if "no endpoint with the requested render id is present" not in route_output:
+        if "no endpoint with the requested capture id is present" not in route_output:
             raise SystemExit(
-                "--route-check did not report the absent render id by name:\n" + route_output)
+                "--route-check did not report the absent capture id by name:\n" + route_output)
         if "Result: REFUSED" not in route_output:
             raise SystemExit("--route-check did not state the refusal:\n" + route_output)
         if "opens no stream" not in route_output:
             raise SystemExit("--route-check did not state that it opens no stream")
+
+        if not no_outputs:
+            route_render = run(executable, ["--route-check", "--device", absent_render])
+            render_output = route_render.stdout + route_render.stderr
+            if route_render.returncode != 1:
+                raise SystemExit(
+                    f"--route-check with an absent render id: exit={route_render.returncode}, "
+                    f"expected 1")
+            if "no endpoint with the requested render id is present" not in render_output:
+                raise SystemExit(
+                    "--route-check did not report the absent render id by name:\n"
+                    + render_output)
     else:
         if "Device enumeration failed" not in list_output:
             raise SystemExit(
