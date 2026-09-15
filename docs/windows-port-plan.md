@@ -170,6 +170,32 @@ Microsoft 문서에 따르면 **EFX APO**는 "모든 mode mixer 이후"에 위�
 |---|---|
 | 검증 | 실제 GUI 실행에서 시작/중지, 모델 전환, 장치 전환, 오류 표시를 확인 |
 
+### Phase 4.5 — 외부 가상 케이블 라우팅 이정표 (프리뷰)
+
+범위: **외부 가상 오디오 케이블(VB-CABLE 등)의 설치를 전제로** 하는 시스템 전체 오디오 라우팅
+프리뷰. 사용자가 Windows 기본 출력을 케이블로 돌리면, 재생되는 모든 오디오가
+`CABLE Input → CABLE Output → LowEnd 일반 capture → Source/Core → 사용자가 고른 물리 출력`으로
+흐릅니다.
+
+이 이정표가 **아닌** 것:
+
+- LowEnd 자체 가상 드라이버/SYSVAD 파생 드라이버가 아님 (외부 드라이버에 의존)
+- APO가 아니며 Phase 2.5의 "투명한 in-graph 처리는 EFX APO" 결정을 **대체하지 않음**
+- Windows 기본 장치를 자동으로 바꾸거나 복구하지 않음 (사용자가 수동으로 설정·복구)
+- 무설정 배포가 아님 (드라이버 설치·재부팅이 필요)
+- 모든 앱/DRM/독점 모드 호환성을 보장하지 않음
+
+추가된 것: 장치 신원(컨테이너 + 버스) 기반의 **가상 케이블 양쪽 사용 금지 가드**(시작·재개방
+시점), 스트림을 열지 않는 경로 판정 `--route-check`, 지정 endpoint로 테스트 신호를 보내는
+`--play-tone`, 캡처 신호를 기록하는 `--monitor --dump-wav`, `--list-devices`의 버스/케이블 정보,
+GUI의 케이블 표시·장치 선택 저장/복원·사라진 장치에 대한 명시적 거부·정지 후 복구 안내.
+
+| 항목 | 내용 |
+|---|---|
+| 검증 | 오프라인(장치 없이) 검사 전부 + 실기기 경로 검사 스크립트 준비. 케이블이 없는 환경에서는 실기기 검사가 SKIPPED로 보고되고 통과로 세지 않음 |
+| 기록 | [`docs/windows-routing-validation.md`](windows-routing-validation.md) — VERIFIED/FAILED/SKIPPED 분리, 검증 환경·명령·결과 |
+| 한계 | loopback 성질(원본 중복 재생, pre-volume)은 그대로다. LowEnd를 정지하면 기본 출력이 케이블에 남아 소리가 나지 않을 수 있고, 복구는 수동이다 |
+
 ## 3. 진행 상태
 
 | Phase | 항목 | 상태 | 근거 |
@@ -194,6 +220,12 @@ Microsoft 문서에 따르면 **EFX APO**는 "모든 mode mixer 이후"에 위�
 | 3 | 투명한 system-wide 아키텍처 결정 | 사용자 결정 필요 | EFX APO는 서명된 드라이버 패키지가 필요. Phase 2.5 참조 |
 | 4 | GUI (엔진 위 front end) | 완료 | Win32 창 + 컨트롤, `lowend_engine`만 사용, 실제 조작 검증(시작/통계/정지/종료) |
 | 4 | GUI 시각 배치 | 부분 확인 | 컨트롤 열거로 좌표·값 확인. `PrintWindow`가 일부 정적을 그리지 않아 픽셀 확인은 제한적 |
+| 4.5 | 케이블 경로 진단 (`--route-check`, `--list-devices` 버스/케이블) | 완료 | 순환·모드 모순·사라진 endpoint·케이블 미설치를 구분해 원인·다음 조치 출력(실제 4가지 경우 확인) |
+| 4.5 | 가상 케이블 양쪽 사용 금지 가드 | 완료 | 컨테이너 + 소프트웨어 버스 기반 판정, 시작·재개방 양쪽 검사. `--self-test`와 주입 시험 9건으로 확인 |
+| 4.5 | GUI 안내·선택 저장/복원·거부 | 완료 | 케이블 표시, `%LOCALAPPDATA%\LowEndCircuit\device-selection.txt`, 사라진 장치 시 Start 거부(실제 창에서 확인) |
+| 4.5 | 실기기 케이블 경로 검증 | **검증 불가(대기)** | 이 워크스테이션에 가상 케이블 없음. 검사 스크립트와 자체 판별력 검사는 준비 완료 |
+| 4.5 | 30분 안정성·재시작 10회·3상태 비교 | **검증 불가(대기)** | 케이블 + ZH3 필요 |
+| 4.5 | 투명한 system-wide 아키텍처 결정 | 사용자 결정 필요 | Phase 2.5 참조 — 이 이정표는 그 결정을 바꾸지 않음 |
 
 ### Phase 2에서 드러난 설계 변경
 
@@ -229,6 +261,7 @@ Microsoft 문서에 따르면 **EFX APO**는 "모든 mode mixer 이후"에 위�
 ## 6. 참조
 
 - [`docs/windows.md`](windows.md) — Windows 빌드·사용·검증 범위
+- [`docs/windows-routing-validation.md`](windows-routing-validation.md) — 가상 케이블 라우팅 이정표의 검증 기록(환경·명령·VERIFIED/FAILED/SKIPPED)
 - [`Windows/WASAPI-CONTRACT.md`](../Windows/WASAPI-CONTRACT.md) — 장치 계층 계약
 - [`Source/Core/README.md`](../Source/Core/README.md) — Core 빌드/테스트와 DSP 계약
 - [`docs/cross-platform-core-architecture.md`](cross-platform-core-architecture.md) — Core와 macOS 경로의 관계
