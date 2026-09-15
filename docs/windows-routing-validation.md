@@ -96,7 +96,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 캡처 덤프 | `--monitor 2 --input-device <mic> --dump-wav <file>` | 96,480 프레임 기록(2.01 s). Python `wave`로 읽어 2 ch / 48000 Hz / 16-bit / 96,480 프레임 확인. 이 입력 장치는 무음(peak 0.000000)을 보고했고, 덤프도 전부 0 |
 | GUI 컨트롤 목록 | `python scripts\check-windows-gui-controls.py build\win-cli\Release\lowend_gui.exe` | 33개 컨트롤(콤보 4·트랙바 7·버튼 3·정적 19), 겹침 0, 클라이언트 영역 내 |
 | GUI 슬라이더 경로 | `python scripts\check-windows-gui-sliders.py …` | 실제 마우스 드래그 21회, 모든 표시값이 썸을 따름 |
-| GUI 새로 고침 후 선택 유지 | `python scripts\check-windows-gui-refresh.py …` | 캡처 선택 유지 확인(`Input: 마이크(WO Mic Device)`, index 3). 라이브 경로 절반은 아래 SKIPPED |
+| GUI 새로 고침 후 선택 유지 | `python scripts\check-windows-gui-refresh.py …` | 캡처 선택 유지 확인(`Input: 마이크(WO Mic Device)`, index 3) + **라이브 경로 절반도 통과**: 실행 중 새로 고침 전후로 협상된 캡처 경로가 동일(`4회 연속 재현`). 이전 실행에서 이 절반이 SKIPPED로 보고된 것은 **하드웨어 한계가 아니라 그 시점의 저장된 선택이 자기 캡처 조합(기본 출력 loopback + 같은 출력 렌더)이었기 때문**입니다 — 그 조합은 가드가 정당하게 거부합니다. 선택을 입력 장치로 두면 같은 머신에서 라이브 절반이 통과합니다 |
 | GUI 선택 저장·복원·거부 (신규) | `python scripts\check-windows-gui-persistence.py build\win-cli\Release\lowend_gui.exe` | (1) 저장된 endpoint가 있으면 그대로 선택됨 (2) 사라진 저장 id는 콤보를 비우고 Start가 "no longer present"로 거부 (3) 선택 변경이 사용자 설정 파일에 기록됨. 검사는 사용자의 실제 선택 파일을 백업·복원함 |
 | 케이블 검사기 자체 판별력 (신규) | `python scripts\check-windows-cable-route.py --self-check` | 자기가 만든 신호로 통과/거부를 구별: 440 Hz·0.40·양 채널 신호는 수용, 무음·한쪽 채널만·디튠(404 Hz)·감쇠 없는 Circuit은 거부 |
 | 순환 가드 규칙 (오프라인) | `--self-test`의 `routing:` 검사 2종 | 같은 컨테이너 + ROOT 버스의 재생/녹음 쌍은 충돌, USB 헤드셋의 마이크·스피커는 충돌 아님, 컨테이너를 못 읽으면 충돌 아님(식별 불가는 허용), 케이블 한쪽 + 물리 출력은 허용 |
@@ -135,9 +135,15 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | **케이블 경로에서의 30분 안정성** | 30분 실행 자체는 위에서 실제 장치로 완료했지만, 그것은 **WO Mic 입력 → ZH3** 라우트이며 케이블 경로가 아님. 케이블의 두 endpoint가 서로 다른 clock을 갖는 구성은 측정하지 않았음 | 케이블 + ZH3 |
 | **케이블 경로에서의 정지/재시작 10회** | 10회 반복은 완료했지만 같은 이유로 **입력 라우트**에서 측정. 케이블 endpoint 재개방은 미검증 | 케이블 + ZH3 |
 | 엔진 OFF / 바이패스 / Circuit 3상태 비교(케이블 경로) | 방법 자체는 실제 장치에서 검증했지만(위 항목), **케이블 소스**에 대한 비교는 케이블이 없어 미실행 | 케이블 + ZH3 |
-| GUI 새로 고침의 라이브 경로 절반 | 이 머신에서 사용 가능한 캡처/렌더 쌍이 없음(기본 loopback 조합은 자기 캡처 가드가 거부) | 케이블 또는 서로 다른 출력 |
 | 물리 USB 탈착·Bluetooth 실행 검증 | 관리자 권한/장치 없음 | 별도 환경 |
 | 사람의 청취 평가 | 이 문서가 주장하지 않는 영역 | 사람 |
+
+**정정 기록**: `check-windows-gui-refresh.py`의 라이브 경로 절반은 처음에 SKIPPED로 보고되었으나,
+그 원인은 하드웨어가 아니라 **그 시점의 저장된 선택이 자기 캡처 조합**(기본 출력 loopback + 같은
+출력 렌더)이었습니다. 그 조합은 가드가 정당하게 거부하므로 엔진이 시작되지 않았고, 검사는
+"사용 가능한 쌍이 없다"고 잘못 결론지었습니다. 선택을 입력 장치로 둔 상태에서 4회 연속 통과했고,
+VERIFIED 표로 옮겼습니다. SKIPPED를 하드웨어 부재로 단정하지 않는다는 규칙이 이 경우에도
+적용됩니다 — 원인을 확인하기 전에는 "환경 때문에 못 봤다"고 쓰지 않습니다.
 
 `--dump-wav`가 기록한 WO Mic 캡처가 무음이었던 것은 결함이 아닙니다: 그 장치는 실제로
 무음(peak 0.000000)을 전달했고, 덤프는 그 사실을 그대로 기록했습니다.
