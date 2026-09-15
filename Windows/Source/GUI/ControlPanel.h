@@ -59,6 +59,25 @@ public:
     Settings readSettings() const;
     EngineOptions readEngineOptions() const;
 
+    // Whether both device combos hold a selection.
+    //
+    // Normally true: refreshDevices() selects the first entry when nothing was
+    // saved. It becomes false when the *saved* endpoint is gone, because then the
+    // honest answer is "choose again" — selecting the first entry would start the
+    // engine on the default endpoint, which is the fallback a saved id must never
+    // silently become.
+    bool hasDeviceSelection() const;
+
+    // Writes the current capture/render selection to the user's own settings
+    // directory. Called when the user changes one, not on refresh: a refresh that
+    // drops a vanished device must not overwrite the id the user chose with the
+    // placeholder that replaced it.
+    void saveDeviceSelection() const;
+
+    // What this machine offers for the virtual-cable route, filled by
+    // refreshDevices() from the same pairing rule the CLI uses. Shown while idle.
+    const std::wstring& virtualCableNote() const { return virtualCableNote_; }
+
     // Pushes settings into the controls (used at startup).
     void writeSettings(const Settings& settings);
 
@@ -123,6 +142,10 @@ private:
     // string. Empty for a combo that has not been populated yet.
     std::vector<std::string> captureIds_;
     std::vector<std::string> renderIds_;
+
+    // Filled by refreshDevices() from the engine's virtual-cable pairing rule, so
+    // the window can state what this machine offers without deriving it again.
+    std::wstring virtualCableNote_;
 };
 
 } // namespace lowend::win::gui

@@ -6,12 +6,16 @@
 
 #include "GUI/ControlPanel.h"
 
+#include "AudioEngine/RouteDiagnosis.h"
+
 #include <commctrl.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 
 namespace lowend::win::gui {
 namespace {
@@ -94,6 +98,45 @@ int toSlider(double value, const SliderSpec& spec) {
     const int raw = static_cast<int>(scaled + (scaled < 0.0 ? -0.5 : 0.5));
     const int position = raw - spec.minimum;
     return position < 0 ? 0 : position;
+}
+
+// Where the GUI remembers the endpoints the user chose.
+//
+// The user's own profile, never the repository or the program directory: the file
+// names two endpoints of this machine, so it is user state, not project state,
+// and it must not be shipped or committed. Nothing else is stored — no settings,
+// no paths, no keys.
+std::wstring deviceSelectionPath() {
+    PWSTR localAppData = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData))
+        || localAppData == nullptr) {
+        return std::wstring();
+    }
+    std::wstring path = localAppData;
+    CoTaskMemFree(localAppData);
+    path += L"\\LowEndCircuit";
+    CreateDirectoryW(path.c_str(), nullptr);  // already existing is not an error
+    path += L"\\device-selection.txt";
+    return path;
+}
+
+// Reads `key=value` lines. Anything else is ignored, so a hand-edited file with a
+// comment or a stale key cannot break startup.
+std::string readSelectionValue(const std::wstring& path, const char* key) {
+    if (path.empty()) return {};
+    std::ifstream file(path);
+    if (!file) return {};
+    const std::string prefix = std::string(key) + "=";
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.compare(0, prefix.size(), prefix) != 0) continue;
+        std::string value = line.substr(prefix.size());
+        while (!value.empty() && (value.back() == '\r' || value.back() == '\n' || value.back() == ' ')) {
+            value.pop_back();
+        }
+        return value;
+    }
+    return {};
 }
 
 } // namespace
@@ -274,51 +317,123 @@ void ControlPanel::refreshDevices() {
 
     SendMessageW(controlSlot(idRenderDevice), CB_RESETCONTENT, 0, 0);
     renderIds_.clear();
+    // The virtual-cable pairing is computed before the labels are built, because
+    // it is what makes the milestone route visible in the lists: a cable's two
+    // endpoints appear under different names in different lists, and choosing
+    // "Input: CABLE Output" as the capture source is the whole configuration.
+    // The pairing comes from the engine's own rule, so the GUI cannot disagree
+    // with the CLI about which endpoints form one cable.
+    const std::vector<DeviceInfo> inputs = listDevices(DataFlow::capture, error);
+    const std::vector<VirtualCable> cables = findVirtualCables(outputs, inputs);
+    const auto isCableSide = [&](const std::string& id, bool playback) {
+        for (const VirtualCable& cable : cables) {
+            if ((playback ? cable.playback.id : cable.recording.id) == id) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     for (const DeviceInfo& device : outputs) {
         const std::wstring label = widen(device.name.empty() ? device.id : device.name)
             + (device.isDefault ? L"  (default)" : L"")
-            + (isBluetooth(device) ? L"  [Bluetooth]" : L"");
+            + (isBluetooth(device) ? L"  [Bluetooth]" : L"")
+            + (isCableSide(device.id, true) ? L"  [virtual cable: play into it]" : L"");
         SendMessageW(controlSlot(idRenderDevice), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
         renderIds_.push_back(device.id);
     }
 
     // The capture list mirrors the CLI's two modes: every output endpoint is a
     // loopback candidate, and every input endpoint is a direct capture.
-    const std::vector<DeviceInfo> inputs = listDevices(DataFlow::capture, error);
     SendMessageW(controlSlot(idCaptureDevice), CB_RESETCONTENT, 0, 0);
     captureIds_.clear();
     for (const DeviceInfo& device : outputs) {
         const std::wstring label = std::wstring(L"System audio: ") + widen(device.name)
-            + (device.isDefault ? L"  (default)" : L"");
+            + (device.isDefault ? L"  (default)" : L"")
+            + (isCableSide(device.id, true) ? L"  [virtual cable: play into it]" : L"");
         SendMessageW(controlSlot(idCaptureDevice), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
         captureIds_.push_back(device.id);
     }
     for (const DeviceInfo& device : inputs) {
-        const std::wstring label = std::wstring(L"Input: ") + widen(device.name);
+        const std::wstring label = std::wstring(L"Input: ") + widen(device.name)
+            + (isCableSide(device.id, false) ? L"  [virtual cable: recording side]" : L"");
         SendMessageW(controlSlot(idCaptureDevice), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
         captureIds_.push_back(device.id);
     }
 
-    // Restore each selection when its endpoint is still listed. A device that
-    // disappeared falls back to the first entry below, which is the only thing
-    // left to select.
+    // What this machine offers, in one sentence, for the idle status line.
+    if (cables.empty()) {
+        virtualCableNote_ = L"No virtual cable endpoint detected, so Windows audio cannot be "
+                            L"routed through LowEnd yet. The documented route needs one (for "
+                            L"example VB-CABLE: play into 'CABLE Input', capture 'CABLE Output'); "
+                            L"installing a virtual audio driver is an external change LowEnd does "
+                            L"not make. A real input device works without one.";
+    } else {
+        const VirtualCable& cable = cables.front();
+        virtualCableNote_ = L"Virtual cable detected: choose Capture \"Input: "
+            + widen(cable.recording.name) + L"\" and Output \""
+            + widen(cable.playback.name.empty() ? std::string("your device") : cable.playback.name)
+            + L"\"-style physical device, then set Windows' default output to the cable's "
+              L"playback side. LowEnd renders to the endpoint chosen above, never to the cable.";
+    }
+
+    // Restore each selection when its endpoint is still listed.
+    //
+    // A saved id that is gone is *not* replaced with the first entry: that would
+    // start the engine on the default endpoint, a device the user never chose, and
+    // the mistake would look like a working route. The combo is left empty
+    // instead, and the window refuses to start until something is selected. Only
+    // a first run, which has no saved id at all, selects the first entry.
     const auto restore = [](HWND combo, const std::wstring& wanted,
                             const std::vector<std::string>& ids) {
         if (!wanted.empty()) {
             for (size_t i = 0; i < ids.size(); ++i) {
                 if (widen(ids[i]) == wanted) {
                     SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(i), 0);
-                    return;
+                    return true;
                 }
             }
+            SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+            return false;
         }
         if (SendMessageW(combo, CB_GETCURSEL, 0, 0) == CB_ERR && !ids.empty()) {
             SendMessageW(combo, CB_SETCURSEL, 0, 0);
         }
+        return true;
     };
 
-    restore(controlSlot(idRenderDevice), previousRender, renderIds_);
-    restore(controlSlot(idCaptureDevice), previousCapture, captureIds_);
+    const std::wstring savedPath = deviceSelectionPath();
+    // What the user chose in this session wins over what was saved; on the first
+    // refresh there is no in-session choice yet, so the saved id is used.
+    const std::wstring wantedRender = previousRender.empty()
+        ? widen(readSelectionValue(savedPath, "render")) : previousRender;
+    const std::wstring wantedCapture = previousCapture.empty()
+        ? widen(readSelectionValue(savedPath, "capture")) : previousCapture;
+    restore(controlSlot(idRenderDevice), wantedRender, renderIds_);
+    restore(controlSlot(idCaptureDevice), wantedCapture, captureIds_);
+}
+
+bool ControlPanel::hasDeviceSelection() const {
+    return SendMessageW(controlHandle(idCaptureDevice), CB_GETCURSEL, 0, 0) >= 0
+        && SendMessageW(controlHandle(idRenderDevice), CB_GETCURSEL, 0, 0) >= 0;
+}
+
+void ControlPanel::saveDeviceSelection() const {
+    const std::wstring path = deviceSelectionPath();
+    if (path.empty()) {
+        return;
+    }
+    const EngineOptions options = readEngineOptions();
+    if (options.captureDeviceId.empty() && options.renderDeviceId.empty()) {
+        return;  // nothing selected; keeping the previous file is more useful
+    }
+    std::ofstream file(path, std::ios::trunc);
+    if (!file) {
+        return;  // a read-only profile must not break the app
+    }
+    file << "# Endpoints chosen in the LowEnd Circuit GUI. Written by the app, safe to delete.\n";
+    file << "capture=" << options.captureDeviceId << "\n";
+    file << "render=" << options.renderDeviceId << "\n";
 }
 
 Settings ControlPanel::readSettings() const {
