@@ -300,11 +300,9 @@ rem 반복 시작/정지는 같은 명령을 8초 간격으로 10회 실행하�
 
 ## 9. 남은 작업
 
-1. **Draft PR 생성(사용자 조작 필요)**: 이 브랜치는 푸시되었지만 PR은 만들지 않았습니다 —
-   저장소 자격 증명이 필요하고 이 환경에는 인증된 GitHub 클라이언트가 없습니다.
-   base `feature/windows-port`, head `feature/windows-virtual-routing`, Draft로 열고,
-   PR 본문/제목 초안은 `%TEMP%\lowend-routing-pr-body.md`에 준비해 두었습니다.
-   PR #24가 병합되면 base를 `main`으로 바꿉니다.
+1. **후속 Draft PR: #25** — <https://github.com/Gomtanga/lowend-circuit/pull/25>
+   (base `feature/windows-port` `400fa25`, head `feature/windows-virtual-routing` `6a2879e`, 21 커밋,
+   draft). PR #24가 병합되면 base를 `main`으로 바꿉니다. **병합은 하지 않았습니다.**
 2. **VB-CABLE 설치 동의 → 재부팅 → 5절의 3~9번 실행**(경로 검증, 30분 안정성, 재시작 10회,
    3상태 OFF/바이패스/Circuit 비교). 이 단계는 외부 드라이버 설치·재부팅·기본 출력 변경·테스트 톤
    재생을 포함하므로 **사용자 동의 없이는 진행하지 않습니다.**
