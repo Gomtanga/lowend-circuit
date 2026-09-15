@@ -1218,6 +1218,35 @@ void checkRouteSelectionDiagnosis() {
           "the found cable pairs the playback side with its recording side");
     check(findVirtualCables(noCableOutputs, noCableInputs).empty(),
           "no cable is found when the endpoints are not a pair");
+
+    // The one case the guard cannot decide: both sides on a software bus, but
+    // Windows reports them as different devices. It must be reported as
+    // unidentifiable rather than treated as safe or refused as a loop.
+    const DeviceInfo otherVirtual = syntheticEndpoint(
+        "{0.0.0.00000000}.{99999999-9999-9999-9999-999999999999}", "Other Virtual Output",
+        "{3c4d5e6f-7081-4a2b-9c8d-7e6f5a4b3c21}", "ROOT", false);
+    const std::vector<DeviceInfo> otherVirtualOutputs = { otherVirtual };
+    RouteSelection crossRoute;
+    crossRoute.captureId = cableRecording.id;
+    crossRoute.renderId = otherVirtual.id;
+    crossRoute.captureFlow = DataFlow::capture;
+    crossRoute.loopback = false;
+    const RouteDiagnosis unidentified = diagnoseRoute(crossRoute, otherVirtualOutputs, inputs);
+    check(unidentified.ok(), "a software-bus pair from different devices is not refused");
+    check(isUnidentifiedSoftwarePair(cableRecording, otherVirtual),
+          "two software-bus endpoints from different device instances are unidentified");
+    bool warned = false;
+    for (const std::string& note : unidentified.notes) {
+        if (note.find("cannot be identified as the two sides of one virtual cable") !=
+            std::string::npos) {
+            warned = true;
+        }
+    }
+    check(warned, "an unidentifiable software-bus pair is reported instead of assumed safe");
+    check(!isUnidentifiedSoftwarePair(cableRecording, physicalOutput),
+          "a software endpoint against a hardware endpoint is not reported as an unidentified pair");
+    check(!isUnidentifiedSoftwarePair(cablePlayback, cableRecording),
+          "the two sides of one cable are identified, not reported as unidentified");
 }
 
 void checkDeviceFailureClassification() {

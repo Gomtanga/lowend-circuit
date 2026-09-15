@@ -39,6 +39,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | OS | Windows 11 (10.0.26200.9457), x64 |
 | 툴체인 | Visual Studio 2022 Community, MSVC toolset 14.44.35207, CMake 3.31.6-msvc6 |
 | 브랜치 | `feature/windows-virtual-routing` (PR #24 `feature/windows-port` head `400fa25` 기반) |
+| PR #24 실행 시점 재확인 | 2026-09-15: `state=open`, `merged=false`, `draft=false`, head `400fa2574472907294b834a97a0985e6cb0f5568`, base `main`(`52f745421cf17e5f070c690263ec8d79f51ff3ae`), `mergeable_state=clean`. 따라서 후속 PR의 base는 `feature/windows-port`입니다 |
 | 이정표 시작 시점의 HEAD | `400fa2574472907294b834a97a0985e6cb0f5568` |
 | 이 문서가 기록하는 검증 대상 commit | `814f29b` (푸시됨, `origin/feature/windows-virtual-routing`) |
 | 이 저장소의 빌드 산출물 | `build/win-cli/Release/lowend_windows.exe`, `build/win-cli/Debug/lowend_windows.exe`, `build/win-cli/Release/lowend_gui.exe`, `build/win-routing-no-ui/Release/lowend_windows.exe` |
@@ -51,6 +52,27 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 출력 | Odyssey G5 (NVIDIA High Definition Audio) | HDAUDIO | 48000 Hz / 2 ch / 32-bit |
 | 출력 | Realtek Digital Output | HDAUDIO | 192000 Hz / 2 ch / 32-bit |
 | 입력 (기본) | WO Mic Device | ROOT | 48000 Hz / **1 ch** |
+
+### 지원 포맷 열거 (실측 기준 구성)
+
+기준 실측은 **48 kHz stereo**에서 합니다. 이 머신에서 `--list-devices`가 보고하는 mix format은
+다음이 전부입니다:
+
+| 엔드포인트 | 흐름 | mix rate | 채널 |
+|---|---|---|---|
+| Fosi Audio ZH3 (기본 출력, 이정표의 목적지) | render | 48,000 Hz | 2 |
+| Odyssey G5 | render | 48,000 Hz | 2 |
+| Realtek Digital Output | render | 192,000 Hz | 2 |
+| WO Mic Device | capture | 48,000 Hz | **1 (모노)** |
+
+* **44.1 kHz 및 96 kHz 구성은 이 머신에 존재하지 않습니다**(해당 mix rate를 가진 엔드포인트 없음).
+  따라서 그 구성은 **검사하지 않았고, 검사했다고 주장하지 않습니다.** 케이블·DAC을 추가해 그러한
+  장치가 생기면 같은 검사를 그 구성에서 실행해야 합니다.
+* 케이블 경로의 기준 구성은 capture 48 kHz(케이블 녹음 쪽) → render ZH3 48 kHz입니다. 렌더
+  스트림은 **캡처 장치의 rate로 열리고**, 엔드포인트 mix rate가 다르면 Windows 오디오 엔진의
+  문서화된 컨버터가 한 번 변환합니다(PR #24에서 48↔192 kHz 양방향으로 확인됨).
+* 이 머신의 유일한 입력 장치는 48 kHz **모노**입니다. 모노 입력의 채널 확장은 기존 경로가
+  처리하며, 이 문서의 톤 검증은 **스테레오 소스**(케이블 경로) 기준입니다.
 
 **가상 케이블 없음.** 이 머신에서 `--list-devices`는 `Virtual cables: none detected`를 보고합니다
 (3절의 마지막 항목). 그래서 케이블을 지나는 **핵심 경로는 실행 검증되지 않았고**, 이 문서는
@@ -80,6 +102,9 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 순환 가드 규칙 (오프라인) | `--self-test`의 `routing:` 검사 2종 | 같은 컨테이너 + ROOT 버스의 재생/녹음 쌍은 충돌, USB 헤드셋의 마이크·스피커는 충돌 아님, 컨테이너를 못 읽으면 충돌 아님(식별 불가는 허용), 케이블 한쪽 + 물리 출력은 허용 |
 | **테스트 톤 실기기 검증 (사용자 동의 후)** | `--monitor 5 --capture-device <ZH3>`(백그라운드, `--dump-wav` 동시 기록) + `--play-tone 3 --device <ZH3>` | `--play-tone`: 144,000 프레임(3.00 s) 기록, peak 0.400000, 양 채널. 동시에 관찰한 **ZH3 자신의 loopback**: 342 패킷/164,160 프레임, **input peak 0.399963 (L 0.399963, R 0.399963)**. 덤프를 검사기의 분석 코드로 읽어 **우세 주파수 440.0 Hz**, 2 ch, 48,000 Hz, 레벨·채널·피치 기준 전부 통과. 즉 지정한 endpoint로 보낸 신호가 그 endpoint의 loopback에서 그대로 관측됨 |
 | 주입(mutation) 시험 | 아래 참조 | 새 검사가 실제로 결함을 잡는지 확인 |
+| **30분 연속 재생 (실제 장치, 케이블 경로 아님)** | capture = WO Mic(무음 전달), render = ZH3, `--model circuit --verbose`, 1800.3초 벽시계 | 865 샘플(2.1초 간격). **dropped 0 (전 구간), 캡처/렌더 오류 0, exit 0.** 처리 프레임 86,406,336 = 1800.13초분, 벽시계 대비 **−0.068초** 드리프트(누적 없음). 프레임 단조 증가. **underrun은 프라이밍 구간에 4,992로 확정된 뒤 안정 구간에서 5,568~5,952(델타 384 샘플 = 4 ms)로 사실상 고정**, 62.0 ms(렌더 버퍼 약 3개). `Resyncs 1`(시작 시 1회) |
+| 30분 실행의 버퍼 추세 (쏠림 여부) | 같은 로그의 `buffered` 열, 3분 창 9개 | 창별 평균 2,545 → 2,889 → 3,004 → 3,206 → 3,411 → 3,725 → 3,808 → 4,032 → 4,119 샘플. 선형 기울기 **+1.07 샘플/초** → 30분 동안 약 1,929 샘플(≈1.8 렌더 주기) 증가. 링 용량은 131,072 샘플(65,536 프레임)이므로 **용량의 약 1.5%**이며, 고갈(buffer 0)이나 포화 방향이 아니라 완만한 상승입니다. 후반에도 min이 0에 닿지 않고 max가 5,760에서 멈춥니다(주기 1,056프레임의 약 5.5개). **두 장치의 clock 차이가 원인이면 선형으로 계속 늘어야 하므로**, 이 추세는 정상 범위로 기록하되 **"완전히 평형"이라고 주장하지 않습니다** |
+| **정지/재시작 10회 (실제 장치, 케이블 경로 아님)** | 같은 라우트에서 시작→8초 실행→Ctrl-Break 정지, 10회 반복 | **10/10 경로 개방, exit code 전부 0, 캡처/렌더 오류 0, dropped 0.** 사이클별 처리 프레임 381,408~387,744(≈8.0초), underrun 2,112~5,952(프라이밍), Resyncs 1~2. 즉 반복 시작/정지에서 장치가 매번 정상 개방되고 통계가 매 실행 새로 집계됨 |
 | **3상태(OFF/바이패스/Circuit) 방법을 실제 라우트에서 실행** (케이블 경로 아님) | 캡처 = ZH3 loopback(48 kHz) → 렌더 = Odyssey G5, 톤은 ZH3로. `--monitor 6 --capture-device <Odyssey>` + `--dump-wav`, 엔진 유/무, `--play-tone 3` | **OFF**: tone이 케이블 대신 ZH3로 갔고(이 실행은 케이블 대신 loopback 경로), Odyssey loopback은 **프레임 0** — 엔진이 없으면 목적지에 아무것도 도달하지 않음. **바이패스**(clean/0/0/0/spatial off): 228,000 프레임, peak **0.999054** (L 0.962952, R 0.999054), **440.0 Hz**. **Circuit**(기본): 223,680 프레임, peak **0.554871**, 440.0 Hz, 바이패스의 **0.555×**. 즉 이 방법(신호원→엔진→목적지 loopback 관측)이 실제 장치에서 동작하고, 두 채널·피치·DSP 감쇠가 관측됨 |
 | 3상태 실행에서 드러난 판정 기준 결함 → 수정 | 위 실행의 레벨 | 바이패스 peak 0.999는 소스 진폭 0.40의 **2.5배**였습니다. 같은 엔진 출력이 어떤 endpoint의 loopback에서는 0.40으로, 다른 endpoint에서는 1.0으로 읽힙니다(엔드포인트 볼륨·드라이버 효과가 render 스트림과 loopback 탭 사이에 있음). 즉 "바이패스는 소스의 0.5~1.05배"라는 절대 기준은 **정상 경로를 실패로 판정**합니다. 검사기는 이제 엔진을 끈 상태에서 같은 톤을 **목적지 endpoint에 직접** 보내 그 loopback으로 기준값을 먼저 측정하고, 바이패스를 그 기준의 0.50~1.15배로 판정합니다. 기준을 얻지 못하면 상대 판정을 하지 않고 중단합니다 |
 | 위 수정의 자체 검증 | `--self-check` | 기준 대비 0.75배 바이패스는 수용, **2.5배**(증폭·중복 경로)와 **0.25배**(무음 감쇠)는 거부, 감쇠 없는 Circuit은 거부 |
@@ -103,9 +128,9 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 항목 | 이유 | 필요한 것 |
 |---|---|---|
 | **케이블 경로 실행 검증** (`check-windows-cable-route.py`) | 이 머신에 가상 케이블이 없음. 스크립트는 `SKIPPED: the two endpoints given as the cable are not paired as one virtual device…`로 보고하고 통과로 세지 않음 | VB-CABLE 설치(외부 드라이버, **사용자 동의 필요**) |
-| 30분 연속 재생 안정성 | 같은 이유 | 케이블 + ZH3 |
-| 정지/재시작 10회 | 같은 이유 | 케이블 + ZH3 |
-| 엔진 OFF / 바이패스 / Circuit 3상태 비교 | 같은 이유(테스트 톤 자체는 위에서 검증됨) | 케이블 + ZH3 |
+| **케이블 경로에서의 30분 안정성** | 30분 실행 자체는 위에서 실제 장치로 완료했지만, 그것은 **WO Mic 입력 → ZH3** 라우트이며 케이블 경로가 아님. 케이블의 두 endpoint가 서로 다른 clock을 갖는 구성은 측정하지 않았음 | 케이블 + ZH3 |
+| **케이블 경로에서의 정지/재시작 10회** | 10회 반복은 완료했지만 같은 이유로 **입력 라우트**에서 측정. 케이블 endpoint 재개방은 미검증 | 케이블 + ZH3 |
+| 엔진 OFF / 바이패스 / Circuit 3상태 비교(케이블 경로) | 방법 자체는 실제 장치에서 검증했지만(위 항목), **케이블 소스**에 대한 비교는 케이블이 없어 미실행 | 케이블 + ZH3 |
 | GUI 새로 고침의 라이브 경로 절반 | 이 머신에서 사용 가능한 캡처/렌더 쌍이 없음(기본 loopback 조합은 자기 캡처 가드가 거부) | 케이블 또는 서로 다른 출력 |
 | 물리 USB 탈착·Bluetooth 실행 검증 | 관리자 권한/장치 없음 | 별도 환경 |
 | 사람의 청취 평가 | 이 문서가 주장하지 않는 영역 | 사람 |
@@ -256,6 +281,11 @@ python scripts\check-windows-gui-refresh.py build\win-cli\Release\lowend_gui.exe
 python scripts\check-windows-gui-persistence.py build\win-cli\Release\lowend_gui.exe
 python scripts\check-windows-cable-route.py --self-check
 python scripts\check-windows-cable-route.py build\win-cli\Release\lowend_windows.exe --cable-playback "<CABLE Input id>" --cable-recording "<CABLE Output id>" --output "<ZH3 id>"
+
+rem 30분 안정성과 정지/재시작 10회는 로컬 하네스로 실행합니다(저장소 스크립트 아님).
+rem 무음이 전달되는 입력 장치를 쓰면 소리가 나지 않습니다.
+python scripts\run-windows-cli.py build\win-cli\Release\lowend_windows.exe 1800 --input-device "<입력 id>" --device "<출력 id>" --model circuit --verbose
+rem 반복 시작/정지는 같은 명령을 8초 간격으로 10회 실행하고 매 실행의 종료 통계를 기록합니다.
 ```
 
 ## 9. 남은 작업

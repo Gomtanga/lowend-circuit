@@ -127,6 +127,12 @@ const char* routeIssueName(RouteIssue issue) {
     return "unknown";
 }
 
+bool isUnidentifiedSoftwarePair(const DeviceInfo& capture, const DeviceInfo& render) {
+    return isVirtualEnumerator(capture.enumeratorName) &&
+           isVirtualEnumerator(render.enumeratorName) &&
+           !isSameDeviceInstance(capture, render);
+}
+
 std::vector<VirtualCable> findVirtualCables(const std::vector<DeviceInfo>& renderEndpoints,
                                             const std::vector<DeviceInfo>& captureEndpoints) {
     std::vector<VirtualCable> cables;
@@ -275,6 +281,21 @@ RouteDiagnosis diagnoseRoute(const RouteSelection& selection,
                 " CABLE Output -> LowEnd -> output device needs one, such as VB-CABLE; installing a"
                 " virtual audio driver is an external change that needs the user's consent. A real"
                 " input endpoint (--input-device) works without one.");
+        }
+
+        // The identification the guard rests on is container equality, and it is
+        // the one property Windows might report differently for a cable whose two
+        // sides are separate devices. Saying so is the difference between "no loop
+        // was found" and "no loop could be ruled out", which is what a user needs
+        // to know before trusting the route.
+        if (isUnidentifiedSoftwarePair(*capture, *render)) {
+            diagnosis.notes.push_back(
+                "capture (" + describeDevice(*capture) + ") and render (" + describeDevice(*render)
+                + ") are both software-bus devices, but Windows reports them as different device"
+                  " instances, so they cannot be identified as the two sides of one virtual cable."
+                  " If they are two sides of one cable, this route is a feedback loop - everything"
+                  " rendered comes straight back as input - and the guard cannot prove it, so it is"
+                  " not refused. Do not capture one side of a cable while rendering to the other.");
         }
     }
 

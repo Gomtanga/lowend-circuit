@@ -66,6 +66,17 @@ constexpr bool passThroughKeysCollide(uint64_t captureKey, uint64_t renderKey) {
     return captureKey != 0 && captureKey == renderKey;
 }
 
+// Two endpoints that both sit on a software bus but that Windows reports as
+// different device instances.
+//
+// This is the shape a virtual cable would have if the driver exposed its two
+// sides as separate devices, and it is the one case the feedback guard cannot
+// decide: the pair might be one signal path (so capturing one side while
+// rendering to the other is a loop) or two unrelated software devices. The guard
+// does not refuse an unproven loop, so the honest thing is to say that it could
+// not identify the pair instead of letting "different ids" read as "safe".
+bool isUnidentifiedSoftwarePair(const DeviceInfo& capture, const DeviceInfo& render);
+
 // The complete feedback rule, as the engine applies it: capture and render must
 // be neither the same endpoint nor the two sides of one virtual pass-through
 // device.

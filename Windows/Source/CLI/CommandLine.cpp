@@ -181,6 +181,35 @@ void appendVirtualCableSection(std::string& text,
             "to a physical output, never to the same cable.\n";
 }
 
+// Software-bus endpoints that are not paired as one device.
+//
+// A cable whose driver exposed its two sides as separate devices would look like
+// this, and it is the case the pairing above cannot see: the note says so rather
+// than letting "not paired" read as "two unrelated devices".
+void appendUnpairedSoftwareNote(std::string& text,
+                                const std::vector<DeviceInfo>& renderDevices,
+                                const std::vector<DeviceInfo>& captureDevices) {
+    for (const DeviceInfo& render : renderDevices) {
+        if (!isVirtualEnumerator(render.enumeratorName)) {
+            continue;
+        }
+        for (const DeviceInfo& capture : captureDevices) {
+            if (!isUnidentifiedSoftwarePair(capture, render)) {
+                continue;
+            }
+            text += "\nSoftware-bus endpoints NOT paired as one device:\n";
+            text += "  " + (render.name.empty() ? std::string("(unnamed)") : render.name);
+            text += "  vs  ";
+            text += capture.name.empty() ? std::string("(unnamed)") : capture.name;
+            text += "\n  Windows reports them as different device instances, so they cannot be\n"
+                    "  identified as the two sides of one virtual cable. If they are, capturing one\n"
+                    "  while rendering to the other is a feedback loop the guard cannot prove, so it\n"
+                    "  is not refused: do not do it.\n";
+            return;  // one instance of the note makes the point
+        }
+    }
+}
+
 // One end of the route being checked, in the terms the decision used: the role,
 // the capture mode, and the endpoint that was resolved.
 std::string formatSelectedEndpoint(const char* role, const char* mode, const DeviceInfo& device) {
@@ -628,6 +657,7 @@ std::string formatDeviceList(const std::vector<DeviceInfo>& renderDevices,
     // sections under different names. The pairing is what the routing rules act
     // on, so it is printed rather than left for the user to infer.
     appendVirtualCableSection(text, renderDevices, captureDevices);
+    appendUnpairedSoftwareNote(text, renderDevices, captureDevices);
 
     text += "\n* marks the default endpoint. Use the id= value with --device,\n"
             "--capture-device, or --input-device.\n";
