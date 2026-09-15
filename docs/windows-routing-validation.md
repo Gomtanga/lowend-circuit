@@ -78,6 +78,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | GUI 선택 저장·복원·거부 (신규) | `python scripts\check-windows-gui-persistence.py build\win-cli\Release\lowend_gui.exe` | (1) 저장된 endpoint가 있으면 그대로 선택됨 (2) 사라진 저장 id는 콤보를 비우고 Start가 "no longer present"로 거부 (3) 선택 변경이 사용자 설정 파일에 기록됨. 검사는 사용자의 실제 선택 파일을 백업·복원함 |
 | 케이블 검사기 자체 판별력 (신규) | `python scripts\check-windows-cable-route.py --self-check` | 자기가 만든 신호로 통과/거부를 구별: 440 Hz·0.40·양 채널 신호는 수용, 무음·한쪽 채널만·디튠(404 Hz)·감쇠 없는 Circuit은 거부 |
 | 순환 가드 규칙 (오프라인) | `--self-test`의 `routing:` 검사 2종 | 같은 컨테이너 + ROOT 버스의 재생/녹음 쌍은 충돌, USB 헤드셋의 마이크·스피커는 충돌 아님, 컨테이너를 못 읽으면 충돌 아님(식별 불가는 허용), 케이블 한쪽 + 물리 출력은 허용 |
+| **테스트 톤 실기기 검증 (사용자 동의 후)** | `--monitor 5 --capture-device <ZH3>`(백그라운드, `--dump-wav` 동시 기록) + `--play-tone 3 --device <ZH3>` | `--play-tone`: 144,000 프레임(3.00 s) 기록, peak 0.400000, 양 채널. 동시에 관찰한 **ZH3 자신의 loopback**: 342 패킷/164,160 프레임, **input peak 0.399963 (L 0.399963, R 0.399963)**. 덤프를 검사기의 분석 코드로 읽어 **우세 주파수 440.0 Hz**, 2 ch, 48,000 Hz, 레벨·채널·피치 기준 전부 통과. 즉 지정한 endpoint로 보낸 신호가 그 endpoint의 loopback에서 그대로 관측됨 |
 | 주입(mutation) 시험 | 아래 참조 | 새 검사가 실제로 결함을 잡는지 확인 |
 | **GitHub CI (이 브랜치의 첫 실행)** | push `814f29b` → Actions | **Windows CI**(`34976189957`, Debug·Release·no-UI 3개 잡) success, **Core CI**(`34976189997`, ubuntu·windows × Debug·Release) success, **macOS Native and Core CI**(`34976189959`) success. Windows 잡의 12/12·7/7 단계가 모두 success이며, 여기에는 신규 단계(**GUI 선택 저장/복원**, **케이블 검사기 self-check**)가 포함됩니다 |
 | CI에서의 이정표 첫 시도 실패 → 수정 | push `254e8c2`, `d6d126c` → Actions | Windows 3개 잡이 모두 `check-windows-cli.py` 단계에서 실패했습니다(빌드·ctest는 통과). 원인은 검사가 **엔드포인트가 없는 러너**를 가정하지 않은 것 — `--route-check`가 없는 *render* id를 지목한다고 단정했지만, 엔드포인트가 하나도 없는 머신에서는 capture 쪽 기본 장치가 먼저 해석에 실패합니다. 엔드포인트 유무와 무관하게 같은 답을 내는 capture id 기준으로 바꾸고, 러너에 엔드포인트가 없을 때의 계약도 함께 검증하도록 고쳤습니다 |
@@ -101,14 +102,19 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | **케이블 경로 실행 검증** (`check-windows-cable-route.py`) | 이 머신에 가상 케이블이 없음. 스크립트는 `SKIPPED: the two endpoints given as the cable are not paired as one virtual device…`로 보고하고 통과로 세지 않음 | VB-CABLE 설치(외부 드라이버, **사용자 동의 필요**) |
 | 30분 연속 재생 안정성 | 같은 이유 | 케이블 + ZH3 |
 | 정지/재시작 10회 | 같은 이유 | 케이블 + ZH3 |
-| 엔진 OFF / 바이패스 / Circuit 3상태 비교 | 같은 이유 | 케이블 + ZH3 |
-| 테스트 톤을 ZH3로 재생 | **테스트 톤은 소리를 냅니다.** 대상과 레벨을 알리고 동의를 받아야 하므로 이번 자동 실행에서는 재생하지 않았습니다 | 사용자 동의 |
+| 엔진 OFF / 바이패스 / Circuit 3상태 비교 | 같은 이유(테스트 톤 자체는 위에서 검증됨) | 케이블 + ZH3 |
 | GUI 새로 고침의 라이브 경로 절반 | 이 머신에서 사용 가능한 캡처/렌더 쌍이 없음(기본 loopback 조합은 자기 캡처 가드가 거부) | 케이블 또는 서로 다른 출력 |
 | 물리 USB 탈착·Bluetooth 실행 검증 | 관리자 권한/장치 없음 | 별도 환경 |
 | 사람의 청취 평가 | 이 문서가 주장하지 않는 영역 | 사람 |
 
 `--dump-wav`가 기록한 WO Mic 캡처가 무음이었던 것은 결함이 아닙니다: 그 장치는 실제로
 무음(peak 0.000000)을 전달했고, 덤프는 그 사실을 그대로 기록했습니다.
+
+테스트 톤 실행은 **대상(ZH3)과 레벨(진폭 0.40, 3초)을 먼저 알리고 사용자 동의를 받은 뒤**에만
+수행했습니다. 그 실행은 `--play-tone`이 지정한 endpoint로 정확한 레벨의 신호를 보낸다는 것과
+`--dump-wav`+분석 경로가 실제 장치에서 동작한다는 것을 보여 주지만, **DSP를 거치는 케이블 경로를
+증명하지는 않습니다**(그 경로는 아직 SKIPPED입니다). 관찰에 사용한 loopback은 ZH3 자신의
+것이므로, 이 측정으로 "신호원이 그 endpoint에 도달했다"까지만 말할 수 있습니다.
 
 ## 4. 이번 이정표가 추가한 것
 
