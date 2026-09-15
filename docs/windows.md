@@ -8,6 +8,12 @@ Windows용 LowEnd Circuit은 **CLI**와 **GUI** 두 가지 front end를 제공�
 
 > 상태: **Phase 4 (GUI) 구현 완료, 로컬 검증 진행 중**. 검증 범위는
 > [검증 범위](#검증-범위)를 참고하세요.
+>
+> 가상 오디오 케이블(VB-CABLE 등)을 사용해 **시스템 전체 오디오를 LowEnd로 처리하는 라우팅
+> 이정표**가 별도로 추가되었습니다. 그 경로·진단 명령·검증 결과·필요한 동의 절차는
+> [Windows 가상 케이블 라우팅 검증](windows-routing-validation.md)에 있습니다. 이 이정표는
+> 외부 드라이버 의존을 명시한 프리뷰이며, 아래 "제한사항"의 성질(loopback은 원본을 대체하지
+> 않음)을 바꾸지 않습니다.
 
 ## 요구 사항
 
@@ -51,6 +57,14 @@ build\win-cli\Release\lowend_gui.exe
   나열합니다. 선택 자체가 모드입니다(CLI의 `--capture-device` / `--input-device`에 해당).
 - **Output**은 렌더 엔드포인트입니다. 캡처와 같은 장치를 고르면 엔진의 자기 캡처 방지가
   동작해 시작이 거부되고 이유가 상태줄에 표시됩니다.
+- 캡처와 출력 선택은 **사용자 프로필에 저장·복원**됩니다:
+  `%LOCALAPPDATA%\LowEndCircuit\device-selection.txt` (지워도 되는 텍스트 파일, 저장소에는
+  들어가지 않습니다). 저장된 endpoint가 더 이상 존재하지 않으면 그 콤보는 **비어 있고** Start가
+  "no longer present"로 거부합니다 — 사용자가 고른 적 없는 장치로 조용히 대체하지 않기
+  위해서이므로, 그때는 두 목록에서 다시 선택한 뒤 Start를 누르세요.
+- 가상 케이블이 있으면 목록에서 그 양쪽이 표시됩니다(`[virtual cable: play into it]`,
+  `[virtual cable: recording side]`). LowEnd를 Stop한 동안 Windows 기본 출력이 케이블에 남아
+  있으면 소리가 나지 않습니다: Idle 상태줄이 그 사실과 되돌리는 방법을 알려 줍니다.
 - 슬라이더 옆에 현재 값이 숫자로 표시됩니다. **Speaker width**, **Listener X/Z**는 0.01 단위,
   나머지는 0.1 단위입니다. 이는 표시값이 CLI·Core와 정확히 같은 값이 되도록 하기 위한 것입니다
   (예: Speaker width 기본값 1.65 m).
@@ -87,7 +101,23 @@ build\win-cli\Release\lowend_windows.exe --list-devices
 ```
 
 출력 장치(루프백 가능)와 입력 장치를 나열합니다. `*`는 기본 장치이고, `id=` 값이
-`--device` / `--capture-device` / `--input-device`에 넣을 문자열입니다.
+`--device` / `--capture-device` / `--input-device`에 넣을 문자열입니다. 각 행에는 그 장치가
+올라온 **버스**(`bus=USB`, `bus=HDAUDIO`, `bus=ROOT`)도 표시됩니다. 라우팅 규칙이 버스를 읽기
+때문에 필요합니다: `ROOT`는 드라이버가 스스로 만든 소프트웨어 장치이고, 가상 케이블의 두
+endpoint가 하나의 신호 경로가 되는 이유가 그것입니다.
+
+마지막에 **가상 케이블 절**이 붙습니다. 케이블은 하나의 장치인데 재생 쪽과 녹음 쪽이 서로 다른
+목록에 다른 이름으로 나타나므로, 짝을 지어 보여 주지 않으면 사용자가 추론해야 합니다.
+
+```text
+Virtual cables (playback side -> recording side):
+  스피커(CABLE Input)  ->  마이크(CABLE Output)
+    playback  id={0.0.0.00000000}.{...}
+    recording id={0.0.1.00000000}.{...}
+```
+
+케이블이 없으면 `Virtual cables: none detected.`로 그 사실과, 설치가 **외부 드라이버 설치이며
+사용자 결정**이라는 점을 함께 알립니다.
 
 Bluetooth 장치는 `[Bluetooth]`로 표시됩니다.
 
@@ -100,6 +130,47 @@ lowend_windows.exe --input-device <입력-id> --device <출력-id> --model circu
 rem 시스템 오디오를 처리해서 다른 출력 장치로 보내기
 lowend_windows.exe --capture-device <출력-id> --device <다른-출력-id> --model circuit
 ```
+
+### 2-1. 가상 케이블로 시스템 전체 오디오 처리
+
+가상 오디오 케이블(VB-CABLE 등)은 **하나의 소프트웨어 장치**이고, 앱이 재생하는 **재생 쪽**
+(`CABLE Input`)과 그 신호를 실어 나르는 **녹음 쪽**(`CABLE Output`)을 함께 제공합니다. 녹음 쪽은
+일반 입력 장치이므로 LowEnd는 loopback이 아니라 **일반 capture**로 그것을 읽습니다.
+
+```bat
+rem 1) 케이블의 두 endpoint를 확인 (id는 --list-devices의 Virtual cables 절에서 복사)
+lowend_windows.exe --list-devices
+
+rem 2) 스트림을 열지 않고 경로만 판정 (소리 없음, 0/1 종료 코드)
+lowend_windows.exe --route-check --input-device "<CABLE Output id>" --device "<ZH3 id>"
+
+rem 3) 실행: 케이블 녹음 쪽 → DSP → 명시한 물리 출력
+lowend_windows.exe --input-device "<CABLE Output id>" --device "<ZH3 id>" --model circuit --verbose
+```
+
+3번이 이 라우팅 이정표의 기준 경로입니다. GUI에서는 Capture 목록의
+`Input: CABLE Output  [virtual cable: recording side]`를 고르고, Output에서 물리 장치를 고른 뒤
+Start를 누르면 같은 경로입니다(GUI는 엔진 API만 사용하며 자체 라우팅 모델이 없습니다).
+
+**순환 금지 두 가지** (둘 다 시작 시점과 장치 재개방 시점에 검사되고, 우회 플래그는 없습니다):
+
+| 조합 | 이유 |
+|---|---|
+| 캡처와 렌더가 **같은 endpoint** | loopback은 원본을 대체하지 않으므로 자기 출력을 다시 캡처하는 폐루프 |
+| **한 가상 케이블의 양쪽** (녹음 쪽 캡처 + 재생 쪽 렌더) | endpoint id는 다르지만 하나의 신호 경로라서 같은 폐루프 |
+
+두 번째는 이름이 아니라 장치 신원(같은 컨테이너 + 소프트웨어 버스 `ROOT`)으로 판정합니다.
+USB 헤드셋의 마이크와 스피커처럼 하나의 장치에 속하지만 신호가 독립인 조합은 허용됩니다.
+
+케이블의 **재생 쪽**을 `System audio:`(loopback)로 캡처하는 것도 가능하지만, 그것은 "앱이 그
+케이블로 재생한 것을 처리"하는 경로이며 이 이정표의 기준 경로가 아닙니다. `--route-check`가 그
+차이를 note로 알려 줍니다.
+
+**정지 후 복구**: Windows 기본 출력을 케이블로 바꿔 쓰는 경우, LowEnd를 Stop하거나 종료하면
+소리가 나지 않습니다. LowEnd는 기본 출력을 **바꾸지도, 되돌리지도** 않습니다. 복구는
+설정 → 시스템 → 소리 → 출력에서 물리 장치(예: `스피커(Fosi Audio ZH3)`)를 다시 고르는 것입니다.
+Windows의 "이 장치로 듣기"나 다른 앱의 중복 모니터링을 켜면 처리되지 않은 원본이 물리 출력으로
+직접 흘러 원본/처리본이 겹칩니다.
 
 Ctrl-C로 중지합니다. 중지 시 처리 프레임 수, dropped/underrun, 재시도 횟수를 보고합니다.
 
@@ -123,6 +194,9 @@ Ctrl-C로 중지합니다. 중지 시 처리 프레임 수, dropped/underrun, �
 | `--space <n>` | 공간 처리량 | `35` |
 | `--verbose` | 협상된 경로, 실행 중 2초 간격 통계, 종료 통계 출력 | off |
 | `--monitor <초>` | 캡처만 수행하고 통계를 보고한 뒤 종료 (1~600초) | — |
+| `--dump-wav <파일>` | `--monitor`가 캡처한 신호를 16-bit PCM WAV로 기록 (`--monitor`와 함께만) | — |
+| `--play-tone <초>` | 지정한 `--device` endpoint로 440 Hz 스테레오 톤(진폭 0.40)을 재생하고 종료 (1~600초). 대상·포맷·레벨을 먼저 출력하며 볼륨은 바꾸지 않음 | — |
+| `--route-check` | 선택한 캡처/렌더 조합을 **스트림을 열지 않고** 판정하고 종료. 라우팅 옵션과 함께 쓰며 사용 가능하면 0, 거부하면 1 | — |
 | `--list-devices`, `--dump-settings`, `--self-test`, `--help` | 진단 명령 | — |
 
 ### 진단: `--monitor`
@@ -291,7 +365,8 @@ Windows에서 시스템 전체 오디오 처리는 **macOS처럼 투명하지 �
 ### CI 상태
 
 `.github/workflows/windows-cli-ci.yml`이 추가되어 `windows-latest`에서 Debug/Release 두 구성으로
-빌드·`ctest`·CLI 인자 회귀·**GUI 컨트롤 목록**·**GUI 슬라이더 경로**를 수행하고,
+빌드·`ctest`·CLI 인자 회귀·**GUI 컨트롤 목록**·**GUI 슬라이더 경로**·**GUI 장치 선택 유지**·
+**GUI 선택 저장/복원/거부**·**케이블 검사기 self-check**를 수행하고,
 **UI 비종속 잡**(`windows-no-ui`: 소스·링크 경계 검사 + GUI 타깃 없이 엔진/CLI 빌드·검사)이
 추가되어 있습니다. 또 `.github/workflows/cross-platform-core-ci.yml`에 `windows-latest`가 추가되어
 Core 테스트를 두 OS에서 돌립니다.
@@ -301,10 +376,11 @@ Core 테스트를 두 OS에서 돌립니다.
 이것이 실제 결함(썸은 움직이는데 표시가 안 따라오는 경우)과 구별되는 지점입니다. 로컬
 워크스테이션에서는 21개 드래그가 모두 실행됩니다.
 
-**이 두 워크플로는 아직 GitHub에서 실행되지 않았습니다.** 이 작업은 로컬 브랜치
-(`feature/windows-port`)에서 진행되었고 원격에 푸시되지 않았습니다(자격 증명을 대화형으로
-요구해 푸시할 수 없었습니다). 따라서 CI 구성이 실제 러너에서 통과한다는 관찰은 아직 없습니다.
-대신 **워크플로가 실행하는 명령을 로컬에서 그대로 재현**해 검증했습니다: Visual Studio
+**이 워크플로는 아직 GitHub에서 실행되지 않았습니다.** 이 작업은 로컬 브랜치
+(`feature/windows-port`, 후속 `feature/windows-virtual-routing`)에서 진행되었고 원격에
+푸시되지 않았습니다(자격 증명을 대화형으로 요구해 푸시할 수 없었습니다). 따라서 CI 구성이 실제
+러너에서 통과한다는 관찰은 아직 없습니다. 대신 **워크플로가 실행하는 명령을 로컬에서 그대로
+재현**해 검증했습니다: Visual Studio
 제너레이터(CI 기본값)로 Debug/Release 양쪽 구성, `ctest`, `check-windows-cli.py`까지 모두
 통과했습니다. 또한 YAML 문법과 매트릭스 정의를 파싱해 확인했습니다.
 
@@ -722,6 +798,8 @@ scripts/check-windows-system-audio.py  시스템 오디오 캡처 검증 (장치
 scripts/check-windows-gui-controls.py  GUI 컨트롤 목록 검사 (장치 불필요)
 scripts/check-windows-gui-sliders.py  GUI 슬라이더 실드래그 검사 (장치 불필요, 입력 데스크톱 필요)
 scripts/check-windows-gui-refresh.py   GUI 장치 선택 유지 검사 (장치 불필요)
+scripts/check-windows-gui-persistence.py  GUI 선택 저장·복원·거부 검사 (장치 불필요, 데스크톱 필요)
+scripts/check-windows-cable-route.py   가상 케이블 경로 검사 (명시적 id + --self-check)
 scripts/check-windows-cross-device.py  서로 다른 두 장치 간 라우팅 검사 (출력 장치 2개 필요)
 scripts/check-windows-render-landing.py  렌더 장치 도달 A/B 검사 (출력 장치 2개 + 톤 재생)
 scripts/check-windows-gui.py        GUI 조작 검증 (장치 필요)

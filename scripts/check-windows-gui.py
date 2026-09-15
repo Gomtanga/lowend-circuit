@@ -152,6 +152,32 @@ def main() -> None:
                 raise SystemExit(f"The {name} control is missing.")
         print(f"controls present; initial status: {text_of(status)[:80]!r}")
 
+        # The window must open with the routing guidance on screen, not a bare
+        # "Idle.": it is where a user learns that the documented route needs a
+        # virtual cable, and that stopping LowEnd while Windows' default output is
+        # the cable is why they suddenly hear nothing. Asserting it here means the
+        # guidance cannot be lost by a later change to the startup path, which is
+        # exactly how it went missing the first time - the window set a short
+        # literal and never called the code that composes the full text.
+        initial = text_of(status)
+        if "Idle" not in initial:
+            raise SystemExit(f"Expected an idle status at startup, saw:\n{initial}")
+        if "never changes Windows" not in initial:
+            raise SystemExit(
+                "The startup status does not tell the user that LowEnd leaves Windows' default "
+                "output alone, so it does not say what to do when the cable is still the default:\n"
+                + initial)
+        # Matched without case: the note reads "No virtual cable endpoint detected"
+        # on a machine without one and "Virtual cable detected: ..." on a machine
+        # with one, so the check is on the phrase, not on its capitalization. The
+        # restore path is asserted concretely (the Settings page a user has to
+        # open), because "we do not change your default output" without saying
+        # where to change it back is not guidance a user can act on.
+        lowered = initial.lower()
+        for phrase in ("virtual cable", "settings > system > sound > output"):
+            if phrase not in lowered:
+                raise SystemExit(f"The startup status is missing {phrase!r}:\n{initial}")
+
         capture_count = user32.SendMessageW(capture, CB_GETCOUNT, 0, 0)
         render_count = user32.SendMessageW(render, CB_GETCOUNT, 0, 0)
         if capture_count < 2:
