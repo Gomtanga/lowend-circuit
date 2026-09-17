@@ -466,6 +466,18 @@ Core 테스트를 두 OS에서 돌립니다.
   93 ms 이내로 추종**(296초 구간에서 드리프트 누적 없음), 프레임 단조 증가, 렌더 버퍼 잔량이
   0~3192 프레임에서 정상 진동(고갈이 아니라 평형). 별도로 90/180/240초 실행에서도 dropped 0,
   오류 0, exit 0.
+- **30분 연속 실행과 정지/재시작 10회 (라우팅 이정표에서 추가)**: 입력→출력 경로를 **1800초**
+  연속 실행하고(2초 간격 865 샘플) 같은 경로에서 시작/정지를 **10회** 반복했습니다. 결과:
+  dropped 0, 캡처·렌더 오류 0, 10/10 정상 개방·exit 0. 버퍼 추세는 **보고 대상**이며(30분 동안
+  약 1,929샘플 ≈ 링 용량의 1.5% 상승, 고갈·포화 아님) "완전 평형"이라고 주장하지 않습니다 —
+  수치와 해석은 [가상 케이블 라우팅 검증](windows-routing-validation.md)에 있습니다.
+  재현은 명시적 ID를 받는 스크립트로 합니다(첫 번째 장치나 OS 기본값을 쓰지 않습니다):
+  ```bat
+  python scripts\check-windows-route-stability.py build\win-cli\Release\lowend_windows.exe ^
+    --capture "<입력 또는 케이블 녹음 id>" --render "<출력 id>" --capture-mode input --minutes 30 --cycles 10
+  ```
+  이 스크립트는 장치 오류·dropped·정체·프라이밍 후 underrun 증가·프라이밍 후 링 고갈을 **실패로
+  판정**하고, 버퍼 추세는 판정하지 않고 숫자로 보고합니다.
 - **시작 과도 상태 해석 (중요)**: `Resyncs`와 `Underrun samples`는 **길이에 비례하지 않습니다**.
   90초·180초·240초 실행 모두 **Resyncs = 1**, underrun도 3264~5184 샘플(≈54 ms, 렌더 버퍼
   2~3개)로 일정했습니다. 즉 **시작 시점의 일회성 이벤트**이며 지속적인 고갈이 아닙니다.
@@ -800,6 +812,7 @@ scripts/check-windows-gui-sliders.py  GUI 슬라이더 실드래그 검사 (장�
 scripts/check-windows-gui-refresh.py   GUI 장치 선택 유지 검사 (장치 불필요)
 scripts/check-windows-gui-persistence.py  GUI 선택 저장·복원·거부 검사 (장치 불필요, 데스크톱 필요)
 scripts/check-windows-cable-route.py   가상 케이블 경로 검사 (명시적 id + --self-check)
+scripts/check-windows-route-stability.py  장시간 연속·정지/재시작 검사 (명시적 id 필요)
 scripts/check-windows-cross-device.py  서로 다른 두 장치 간 라우팅 검사 (출력 장치 2개 필요)
 scripts/check-windows-render-landing.py  렌더 장치 도달 A/B 검사 (출력 장치 2개 + 톤 재생)
 scripts/check-windows-gui.py        GUI 조작 검증 (장치 필요)
