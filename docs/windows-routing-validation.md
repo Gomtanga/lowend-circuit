@@ -298,6 +298,20 @@ python scripts\run-windows-cli.py build\win-cli\Release\lowend_windows.exe 1800 
 rem 반복 시작/정지는 같은 명령을 8초 간격으로 10회 실행하고 매 실행의 종료 통계를 기록합니다.
 ```
 
+## 8-1. 저장소 위생
+
+이 이정표가 커밋한 파일에 **실제 장치 id나 전체 개인 경로를 남기지 않는다**는 규칙을 적용해 두
+가지를 정리했습니다.
+
+| 대상 | 문제 | 조치 |
+|---|---|---|
+| `AGENTS.md` | 작성한 머신의 절대 경로가 그대로 들어 있었음 | 규칙(Windows worktree에서 작업)은 유지하고 경로는 제거. 파일 자체가 "저장소에 절대 개인 경로를 적지 않는다"를 명시 |
+| `--self-test`의 충돌 검사 픽스처 | 개발 머신에서 복사한 endpoint id 2개 — 그중 하나는 **이 워크스테이션에 실제로 존재하는 오디오 endpoint의 id**였음 | 합성 id로 교체. 검사에 필요한 것은 서로 다른 well-formed id뿐이므로 동작 변화 없음(재빌드 후 오프라인 검사 전부 통과) |
+
+검증 환경 섹션의 장치 이름(ZH3·Odyssey G5 등)은 사용자가 승인한 대상 장치의 제품명이며,
+endpoint id·컨테이너 id·개인 경로는 저장소에 넣지 않았습니다. 검증 로그(`build/` 아래)는
+`.gitignore` 대상이라 커밋되지 않습니다.
+
 ## 9. 남은 작업
 
 1. **후속 Draft PR: #25** — <https://github.com/Gomtanga/lowend-circuit/pull/25>
