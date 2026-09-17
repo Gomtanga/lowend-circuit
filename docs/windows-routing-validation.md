@@ -87,7 +87,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | Release 빌드 + 오프라인 검사 | `scripts\build-windows-cli.bat Release` | exit 0: `ctest` 1/1, CLI 인자 회귀 33건(그중 25건은 거부 사유 문구까지), UI 비종속 검사(엔진 13개 소스), 케이블 검사기 self-check |
 | Debug 빌드 | `scripts\build-windows-cli.bat Debug` | exit 0, 동일 검사 통과 |
 | GUI 비활성 빌드 | `cmake -S Windows -B build/win-routing-no-ui -DLOWEND_WINDOWS_BUILD_GUI=OFF -DLOWEND_WINDOWS_BUILD_TESTING=ON` + `cmake --build` + `ctest` | 구성·빌드·ctest 통과(`NO_UI_BUILD_OK`) |
-| 오프라인 검사 (신규 포함) | `lowend_windows.exe --self-test` | 24개 검사 전부 통과. 신규 2개: `routing: pass-through feedback rule`, `routing: endpoint selection and capture mode` |
+| 오프라인 검사 (신규 포함) | `lowend_windows.exe --self-test` | **23개 검사** 전부 통과(실행 출력의 섹션 배너를 세어 확인). 신규 2개: `routing: pass-through feedback rule`, `routing: endpoint selection and capture mode` |
 | 장치 열거에 버스/케이블 정보 | `lowend_windows.exe --list-devices` | 각 행에 `bus=`(USB/HDAUDIO/ROOT) 추가, 마지막에 `Virtual cables:` 절. 이 머신은 `none detected` |
 | 경로 진단 (기본 선택) | `lowend_windows.exe --route-check` | `REFUSED (same endpoint)`, exit 1 — 기본 출력 loopback과 기본 렌더가 같은 ZH3 |
 | 경로 진단 (입력 → ZH3) | `--route-check --input-device <mic> --device <zh3>` | `READY`, exit 0. 케이블 부재 안내(설치 필요·사용자 동의 필요)를 note로 출력 |
