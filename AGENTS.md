@@ -7,9 +7,10 @@
 
 ## 작업공간
 
-- Windows 작업은 worktree `C:/Users/Gomtang/lowend-winport`(`feature/windows-port` 계열
-  브랜치)에서 합니다. 다른 worktree(`lowend-circuit`)는 `main`을 체크아웃한 별도 작업공간이며,
-  이름만 보고 같은 작업으로 가정하지 않습니다.
+- Windows 작업은 **Windows 전용 worktree**(`lowend-winport`, `feature/windows-port` 계열
+  브랜치)에서 합니다. 같은 저장소의 다른 worktree(`lowend-circuit`)는 `main`을 체크아웃한 별도
+  작업공간이며, 이름만 보고 같은 작업으로 가정하지 않습니다. 저장소에 절대 개인 경로를 적지
+  않습니다 — 이 문서도 예외가 아니며, 경로가 필요하면 사용자에게 확인합니다.
 - 옛 프로토타입(`spike/windows-native-prototype`, `WindowsNativePrototype/`,
   `LowEndWinPrototype.exe`)은 **수정·실행·삭제·이식하지 않습니다.** 그 미커밋 변경은 사용자
   자산으로 보존합니다(현재 `git stash`에 보관됨).

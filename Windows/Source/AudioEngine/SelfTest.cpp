@@ -902,8 +902,12 @@ void checkRecoveryPolicy() {
     // side that is closed or failed to report its id cannot be read as a
     // collision. That last case is the one that matters - treating "unknown" as
     // a match would stop a healthy stream.
-    const std::string defaultOutput = "{0.0.0.00000000}.{c8ab9a54-56f9-427b-b2a4-e4f28822f899}";
-    const std::string otherOutput = "{0.0.0.00000000}.{889f15cf-7c47-42b5-9a7e-18c59fe8f0d2}";
+    // The ids are deliberately synthetic. An earlier version of this check used
+    // ids copied from the machine it was written on, which put a real endpoint id
+    // (and with it the hardware it names) into a public repository for no benefit:
+    // the check needs two well-formed ids that differ, nothing more.
+    const std::string defaultOutput = "{0.0.0.00000000}.{aaaaaaaa-0000-4000-8000-000000000001}";
+    const std::string otherOutput = "{0.0.0.00000000}.{aaaaaaaa-0000-4000-8000-000000000002}";
     check(endpointsCollide(endpointHash(defaultOutput), endpointHash(defaultOutput)),
           "the same endpoint id collides");
     check(!endpointsCollide(endpointHash(defaultOutput), endpointHash(otherOutput)),
