@@ -187,7 +187,11 @@ def main() -> int:
     parser.add_argument("--cycle-seconds", type=float, default=8.0)
     args = parser.parse_args()
 
-    executable = pathlib.Path(args.executable).resolve(strict=True)
+    try:
+        executable = pathlib.Path(args.executable).resolve(strict=True)
+    except OSError:
+        raise SystemExit(f"check-windows-route-stability.py: no such executable: {args.executable}\n"
+                         "build it first: scripts\\build-windows-cli.bat Release")
     if args.capture == args.render:
         raise SystemExit("--capture and --render are the same endpoint; that route is refused")
     if args.minutes <= 0 and args.cycles <= 0:

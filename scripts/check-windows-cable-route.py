@@ -473,7 +473,11 @@ def self_check() -> int:
 # ─── Device run ───────────────────────────────────────────────────────
 
 def device_run(args) -> int:
-    executable = pathlib.Path(args.executable).resolve(strict=True)
+    try:
+        executable = pathlib.Path(args.executable).resolve(strict=True)
+    except OSError:
+        raise SystemExit(f"check-windows-cable-route.py: no such executable: {args.executable}\n"
+                         "build it first: scripts\\build-windows-cli.bat Release")
     ids = {
         "cable_playback": args.cable_playback,
         "cable_recording": args.cable_recording,
