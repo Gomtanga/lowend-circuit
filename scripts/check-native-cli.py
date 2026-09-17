@@ -8,7 +8,10 @@ import sys
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("Usage: check-native-cli.py /absolute/path/to/SystemAudioProcessor")
-    executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    try:
+        executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    except OSError:
+        raise SystemExit(f"check-native-cli.py: no such path: {sys.argv[1]}")
     cases = [
         ["--intensity", "inf"],
         ["--output", "nan"],

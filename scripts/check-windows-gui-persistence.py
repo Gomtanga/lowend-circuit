@@ -203,7 +203,11 @@ def write_selection(path: pathlib.Path, capture: str, render: str) -> None:
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("Usage: check-windows-gui-persistence.py /path/to/lowend_gui.exe")
-    executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    try:
+        executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    except OSError:
+        raise SystemExit(f"check-windows-gui-persistence.py: no such executable: {sys.argv[1]}\n"
+                         "build it first: scripts\\build-windows-cli.bat Release")
 
     outputs, inputs = parse_devices(executable)
     if len(outputs) < 2 or not inputs:

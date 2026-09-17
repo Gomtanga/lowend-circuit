@@ -82,7 +82,11 @@ def main() -> None:
         raise SystemExit("Usage: check-windows-system-audio.py /path/to/lowend_windows.exe")
     if winsound is None:
         raise SystemExit("This check needs Windows (winsound).")
-    executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    try:
+        executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    except OSError:
+        raise SystemExit(f"check-windows-system-audio.py: no such executable: {sys.argv[1]}\n"
+                         "build it first: scripts\\build-windows-cli.bat Release")
 
     with tempfile.TemporaryDirectory() as scratch:
         tone = pathlib.Path(scratch) / "tone.wav"

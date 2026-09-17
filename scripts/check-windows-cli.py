@@ -19,7 +19,11 @@ def run(executable: pathlib.Path, arguments: list) -> subprocess.CompletedProces
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("Usage: check-windows-cli.py /path/to/lowend_windows.exe")
-    executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    try:
+        executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    except OSError:
+        raise SystemExit(f"check-windows-cli.py: no such executable: {sys.argv[1]}\n"
+                         "build it first: scripts\\build-windows-cli.bat Release")
 
     rejected = [
         ["--intensity", "inf"],

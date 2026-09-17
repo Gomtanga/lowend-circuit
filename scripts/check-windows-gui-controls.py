@@ -57,7 +57,11 @@ def find_window(title: str):
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("Usage: check-windows-gui-controls.py /path/to/lowend_gui.exe")
-    executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    try:
+        executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    except OSError:
+        raise SystemExit(f"check-windows-gui-controls.py: no such executable: {sys.argv[1]}\n"
+                         "build it first: scripts\\build-windows-cli.bat Release")
 
     process = subprocess.Popen([str(executable)])
     try:
