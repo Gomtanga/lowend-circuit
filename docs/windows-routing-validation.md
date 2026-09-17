@@ -117,6 +117,8 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | GUI 시작 안내 결함 (자체 발견·수정) | 실행 중인 창의 상태 컨트롤을 직접 읽음 | 창을 열면 상태줄이 `Idle. Choose an output endpoint, then Start.`만 보였습니다. 케이블 안내와 "LowEnd는 Windows 기본 출력을 바꾸지 않는다 + 되돌리는 경로"는 `updateStatusText()`가 만들지만, 시작 시에는 그 함수를 부르지 않고 짧은 리터럴을 설정하고 있었습니다. 이제 `create()`가 장치 목록을 채운 뒤 `updateStatusText()`를 호출하고, GUI end-to-end 검사가 시작 시점에 그 안내(`virtual cable`, `Settings > System > Sound > Output`)가 화면에 있는지 확인합니다. **옛 시작 줄을 주입하면 검사가 실패**하는 것을 확인했습니다 |
 | GUI end-to-end (재확인) | `python scripts\check-windows-gui.py build\win-cli\Release\lowend_gui.exe` | 같은 endpoint 시작 거부 → 입력 장치로 시작 → 통계 진행(20,928 → 165,504) → 실행 중 모델 변경이 오디오 스레드에 반영 → Stop → 재시작 시 통계 초기화(→ 21,792) → 두 번째 Stop → 정상 종료. 상태 텍스트가 박스에 맞음(192/276 px) |
 
+| 스크립트 인자 오류 (자체 발견·수정) | 각 검사 스크립트에 존재하지 않는 실행 파일 경로를 주고 실행 | 12개 검사 스크립트 전부 `pathlib`의 `FileNotFoundError` **트레이스백**을 내고 있었습니다 — 사용자가 안내서의 명령을 잘못된 빌드 경로로 실행하면 스크립트가 깨진 것처럼 보입니다. 이제 각 스크립트가 **자기 이름과 찾지 못한 경로**를 밝히고 빌드 명령을 안내한 뒤 **exit 1**로 끝냅니다(`check-native-cli.py`는 앱 경로를 받으므로 빌드 안내 없이 경로만). 12개 전부 트레이스백 없음·exit 1·자기 이름 표기 확인, 실제 실행은 그대로 통과(`check-windows-cli.py` 33 거부 케이스) |
+
 #### 주입 시험 (검사가 정말 잡는가)
 
 | 주입한 결함 | 결과 | 되돌림 후 |
