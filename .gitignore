@@ -46,3 +46,7 @@ dist/
 
 # Scratch output from local firecrawl CLI research
 .firecrawl/
+
+# Python bytecode
+__pycache__/
+*.pyc

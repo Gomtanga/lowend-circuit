@@ -325,6 +325,7 @@ python scripts\check-windows-route-stability.py build\win-cli\Release\lowend_win
 | `AGENTS.md` | 작성한 머신의 절대 경로가 그대로 들어 있었음 | 규칙(Windows worktree에서 작업)은 유지하고 경로는 제거. 파일 자체가 "저장소에 절대 개인 경로를 적지 않는다"를 명시 |
 | `--self-test`의 충돌 검사 픽스처 | 개발 머신에서 복사한 endpoint id 2개 — 그중 하나는 **이 워크스테이션에 실제로 존재하는 오디오 endpoint의 id**였음 | 합성 id로 교체. 검사에 필요한 것은 서로 다른 well-formed id뿐이므로 동작 변화 없음(재빌드 후 오프라인 검사 전부 통과) |
 
+| **저장소에 커밋된 파이썬 바이트코드 (자체 발견·수정)** | `git ls-files` 점검 | 검사 스크립트 12개를 한 번에 고치면서 `git add scripts/`를 실행했고, 그 직전에 돌린 `python -m py_compile scripts/*.py`가 만든 `scripts/__pycache__/*.pyc` **16개가 그 커밋에 함께 들어갔습니다**(`576d105`). 기계마다 달라지는 컴파일 산출물이고, 그중 하나는 **수정 전 안정성 검사기의 바이트코드**였습니다. 인덱스에서 제거하고 파일을 지운 뒤 `.gitignore`에 `__pycache__/`·`*.pyc`를 추가했습니다. 작업 트리 전체를 다시 훑어 추적 중인 `.pyc`·`.obj`·`.exe`·`.pdb`·`.wav`가 없음을 확인했습니다. **교훈**: 스크립트를 고친 뒤에는 `git add scripts/` 같은 디렉터리 단위 스테이징 대신 파일을 지정합니다 |
 검증 환경 섹션의 장치 이름(ZH3·Odyssey G5 등)은 사용자가 승인한 대상 장치의 제품명이며,
 endpoint id·컨테이너 id·개인 경로는 저장소에 넣지 않았습니다. 검증 로그(`build/` 아래)는
 `.gitignore` 대상이라 커밋되지 않습니다.
