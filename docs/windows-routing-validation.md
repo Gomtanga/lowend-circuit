@@ -102,6 +102,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 순환 가드 규칙 (오프라인) | `--self-test`의 `routing:` 검사 2종 | 같은 컨테이너 + ROOT 버스의 재생/녹음 쌍은 충돌, USB 헤드셋의 마이크·스피커는 충돌 아님, 컨테이너를 못 읽으면 충돌 아님(식별 불가는 허용), 케이블 한쪽 + 물리 출력은 허용 |
 | **테스트 톤 실기기 검증 (사용자 동의 후)** | `--monitor 5 --capture-device <ZH3>`(백그라운드, `--dump-wav` 동시 기록) + `--play-tone 3 --device <ZH3>` | `--play-tone`: 144,000 프레임(3.00 s) 기록, peak 0.400000, 양 채널. 동시에 관찰한 **ZH3 자신의 loopback**: 342 패킷/164,160 프레임, **input peak 0.399963 (L 0.399963, R 0.399963)**. 덤프를 검사기의 분석 코드로 읽어 **우세 주파수 440.0 Hz**, 2 ch, 48,000 Hz, 레벨·채널·피치 기준 전부 통과. 즉 지정한 endpoint로 보낸 신호가 그 endpoint의 loopback에서 그대로 관측됨 |
 | **CLI 엔진 시작 가드 (실기기)** | `lowend_windows.exe --capture-device <ZH3> --device <ZH3>` (기본 loopback 흐름 + 같은 출력) | `Failed to start audio processing: capture and render resolved to the same endpoint (스피커(Fosi Audio ZH3)); … Pass --device with a different output endpoint to break the loop.` + **exit 1**, 즉시 종료(0.14초). 스트림이 열린 채로 남지 않고, 우회 플래그 없이 거부됨. `--route-check`의 사전 판정과 별개로 **실제 엔진 `start()` 경로**가 하드웨어에서 거부하는 것을 확인 |
+| **안정성·재시작 검사기 (신규, 명시적 ID)** | `python scripts\check-windows-route-stability.py <exe> --capture <id> --render <id> [--capture-mode input\|loopback] --minutes N --cycles N` | 입력 라우트(WO Mic → ZH3)로 3회 사이클 + 1분 연속 실행: 사이클마다 개방·dropped 0·오류 0, 연속 구간 frames 2,885,664·dropped 0·underrun 고정, 버퍼 추세 보고. **판별력 확인**: 존재하지 않는 endpoint를 주면 `the engine exited with code 1`·`no statistics were reported`로 **실패(exit 1)**, 같은 endpoint 양쪽 지정은 실행 전에 거부, 인자 누락은 사용법 오류로 거부. 30분 연속·10회 재시작의 고정 기준(장치 오류·dropped·정체·프라이밍 후 underrun 증가·버퍼 고갈)이 코드에 박혀 있어 케이블 설치 후 그대로 실행합니다 |
 | 주입(mutation) 시험 | 아래 참조 | 새 검사가 실제로 결함을 잡는지 확인 |
 | **30분 연속 재생 (실제 장치, 케이블 경로 아님)** | capture = WO Mic(무음 전달), render = ZH3, `--model circuit --verbose`, 1800.3초 벽시계 | 865 샘플(2.1초 간격). **dropped 0 (전 구간), 캡처/렌더 오류 0, exit 0.** 처리 프레임 86,406,336 = 1800.13초분, 벽시계 대비 **−0.068초** 드리프트(누적 없음). 프레임 단조 증가. **underrun은 프라이밍 구간에 4,992로 확정된 뒤 안정 구간에서 5,568~5,952(델타 384 샘플 = 4 ms)로 사실상 고정**, 62.0 ms(렌더 버퍼 약 3개). `Resyncs 1`(시작 시 1회) |
 | 30분 실행의 버퍼 추세 (쏠림 여부) | 같은 로그의 `buffered` 열, 3분 창 9개 | 창별 평균 2,545 → 2,889 → 3,004 → 3,206 → 3,411 → 3,725 → 3,808 → 4,032 → 4,119 샘플. 선형 기울기 **+1.07 샘플/초** → 30분 동안 약 1,929 샘플(≈1.8 렌더 주기) 증가. 링 용량은 131,072 샘플(65,536 프레임)이므로 **용량의 약 1.5%**이며, 고갈(buffer 0)이나 포화 방향이 아니라 완만한 상승입니다. 후반에도 min이 0에 닿지 않고 max가 5,760에서 멈춥니다(주기 1,056프레임의 약 5.5개). **두 장치의 clock 차이가 원인이면 선형으로 계속 늘어야 하므로**, 이 추세는 정상 범위로 기록하되 **"완전히 평형"이라고 주장하지 않습니다** |
@@ -302,10 +303,10 @@ python scripts\check-windows-gui-persistence.py build\win-cli\Release\lowend_gui
 python scripts\check-windows-cable-route.py --self-check
 python scripts\check-windows-cable-route.py build\win-cli\Release\lowend_windows.exe --cable-playback "<CABLE Input id>" --cable-recording "<CABLE Output id>" --output "<ZH3 id>"
 
-rem 30분 안정성과 정지/재시작 10회는 로컬 하네스로 실행합니다(저장소 스크립트 아님).
-rem 무음이 전달되는 입력 장치를 쓰면 소리가 나지 않습니다.
-python scripts\run-windows-cli.py build\win-cli\Release\lowend_windows.exe 1800 --input-device "<입력 id>" --device "<출력 id>" --model circuit --verbose
-rem 반복 시작/정지는 같은 명령을 8초 간격으로 10회 실행하고 매 실행의 종료 통계를 기록합니다.
+rem 30분 연속과 정지/재시작 10회는 명시적 ID를 받는 저장소 스크립트로 실행합니다.
+rem (무음이 전달되는 입력 장치를 쓰면 소리가 나지 않습니다.)
+python scripts\check-windows-route-stability.py build\win-cli\Release\lowend_windows.exe ^
+  --capture "<케이블 녹음 id 또는 입력 id>" --render "<ZH3 id>" --capture-mode input --minutes 30 --cycles 10
 ```
 
 ## 8-1. 저장소 위생
