@@ -108,7 +108,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | **3상태(OFF/바이패스/Circuit) 방법을 실제 라우트에서 실행** (케이블 경로 아님) | 캡처 = ZH3 loopback(48 kHz) → 렌더 = Odyssey G5, 톤은 ZH3로. `--monitor 6 --capture-device <Odyssey>` + `--dump-wav`, 엔진 유/무, `--play-tone 3` | **OFF**: tone이 케이블 대신 ZH3로 갔고(이 실행은 케이블 대신 loopback 경로), Odyssey loopback은 **프레임 0** — 엔진이 없으면 목적지에 아무것도 도달하지 않음. **바이패스**(clean/0/0/0/spatial off): 228,000 프레임, peak **0.999054** (L 0.962952, R 0.999054), **440.0 Hz**. **Circuit**(기본): 223,680 프레임, peak **0.554871**, 440.0 Hz, 바이패스의 **0.555×**. 즉 이 방법(신호원→엔진→목적지 loopback 관측)이 실제 장치에서 동작하고, 두 채널·피치·DSP 감쇠가 관측됨 |
 | 3상태 실행에서 드러난 판정 기준 결함 → 수정 | 위 실행의 레벨 | 바이패스 peak 0.999는 소스 진폭 0.40의 **2.5배**였습니다. 같은 엔진 출력이 어떤 endpoint의 loopback에서는 0.40으로, 다른 endpoint에서는 1.0으로 읽힙니다(엔드포인트 볼륨·드라이버 효과가 render 스트림과 loopback 탭 사이에 있음). 즉 "바이패스는 소스의 0.5~1.05배"라는 절대 기준은 **정상 경로를 실패로 판정**합니다. 검사기는 이제 엔진을 끈 상태에서 같은 톤을 **목적지 endpoint에 직접** 보내 그 loopback으로 기준값을 먼저 측정하고, 바이패스를 그 기준의 0.50~1.15배로 판정합니다. 기준을 얻지 못하면 상대 판정을 하지 않고 중단합니다 |
 | 위 수정의 자체 검증 | `--self-check` | 기준 대비 0.75배 바이패스는 수용, **2.5배**(증폭·중복 경로)와 **0.25배**(무음 감쇠)는 거부, 감쇠 없는 Circuit은 거부 |
-| **GitHub CI (푸시된 모든 커밋)** | push `814f29b` … `6d6eefa` → Actions | 마지막 커밋 `6d6eefa`에서 **Windows CI success**(Debug·Release·no-UI 3잡: `windows-cli (Release)` 12단계 전부 success, 신규 GUI 선택 저장/복원·케이블 검사기 self-check 포함), **Core CI success**, **macOS Native and Core CI success**. 모든 커밋이 green입니다 |
+| **GitHub CI (푸시된 모든 커밋)** | push `814f29b` … `8de1275` → Actions | 마지막 커밋 `8de1275`에서 **Windows CI success**(Debug·Release·no-UI 3잡: `windows-cli (Release)` 12단계 전부 success, 신규 GUI 선택 저장/복원·케이블 검사기 self-check 포함), **Core CI success**(ubuntu·windows × Debug·Release), **macOS Native and Core CI success** — 합계 16/16 check success. 이 브랜치의 모든 커밋이 green입니다 |
 | CI에서의 첫 시도 실패 → 수정 | push `254e8c2`, `d6d126c` → Actions | Windows 3개 잡이 모두 `check-windows-cli.py` 단계에서 실패했습니다(빌드·ctest는 통과). 원인은 검사가 **엔드포인트가 없는 러너**를 가정하지 않은 것 — `--route-check`가 없는 *render* id를 지목한다고 단정했지만, 엔드포인트가 하나도 없는 머신에서는 capture 쪽 기본 장치가 먼저 해석에 실패합니다. 엔드포인트 유무와 무관하게 같은 답을 내는 capture id 기준으로 바꾸고, 러너에 엔드포인트가 없을 때의 계약도 함께 검증하도록 고쳤습니다 |
 | GUI 선택 저장 결함 (자체 발견·수정) | `check-windows-gui-persistence.py` 4단계 | 한쪽 콤보를 바꾸면 **저장 파일의 두 줄을 모두 다시 썼고**, 선택이 없는 쪽은 빈 값으로 기록되었습니다. 그러면 사용자가 고른 id가 지워지고 다음 실행에서 첫 목록 항목이 선택되어 **사용자가 고른 적 없는 endpoint로 시작**합니다(빈 콤보가 막으려던 바로 그 대체가 한 실행 뒤에 발생). 이제 선택이 없는 쪽은 이전 값을 유지합니다. 수정 전 빌드에서 새 단계가 `the file now holds ''`로 실패하고, 수정 후 통과하는 것을 확인했습니다 |
 | GUI 시작 안내 결함 (자체 발견·수정) | 실행 중인 창의 상태 컨트롤을 직접 읽음 | 창을 열면 상태줄이 `Idle. Choose an output endpoint, then Start.`만 보였습니다. 케이블 안내와 "LowEnd는 Windows 기본 출력을 바꾸지 않는다 + 되돌리는 경로"는 `updateStatusText()`가 만들지만, 시작 시에는 그 함수를 부르지 않고 짧은 리터럴을 설정하고 있었습니다. 이제 `create()`가 장치 목록을 채운 뒤 `updateStatusText()`를 호출하고, GUI end-to-end 검사가 시작 시점에 그 안내(`virtual cable`, `Settings > System > Sound > Output`)가 화면에 있는지 확인합니다. **옛 시작 줄을 주입하면 검사가 실패**하는 것을 확인했습니다 |
@@ -263,11 +263,17 @@ loopback 탭 사이에 있어서, 같은 출력이 어떤 endpoint에서는 0.40
 * **좌우 뒤바뀜**은 레벨만으로는 판정할 수 없습니다. 이 검사는 "한 채널 누락"은 잡지만 "교체"는
   잡지 못하며, 그렇게 주장하지 않습니다.
 * **사람이 듣는 아날로그 출력**은 검증 대상이 아닙니다. 이 문서의 통과는 디지털 경로 관측입니다.
-* **원격 endpoint의 clock**: 이 머신의 유일한 입력 장치는 WO Mic(ROOT, 원격)이며 48 kHz 모노입니다.
-  원격 장치는 독립 clock을 가지므로, 원격 입력 기반 경로의 장시간 안정성은 별도 측정이 필요합니다
-  (`--route-check`가 이 사실을 note로 알려 줍니다).
+* **원격 endpoint의 clock**: 이 머신의 유일한 입력 장치는 WO Mic(ROOT, WiFi로 폰의 마이크를
+  전달)이며 48 kHz **모노**입니다. 두 장치의 clock이 독립일 수 있으므로 이 입력을 쓰는 장시간
+  경로는 별도 측정이 필요합니다.
+  **정정**: `--route-check`의 원격 경고는 Windows가 `Network` form factor로 보고하는 endpoint를
+  기준으로 하는데, 이 머신의 WO Mic은 그 값으로 보고되지 않아 **그 note가 실제로 출력되는 것을
+  확인하지 못했습니다**(관측된 `--route-check` 출력에는 케이블 부재 note만 있습니다). 즉 이
+  항목은 "도구가 경고해서 아는 위험"이 아니라 **도구가 잡지 못하는, 문서로만 남긴 위험**입니다.
+  규칙 자체(모든 캡처 endpoint가 Network일 때 note)는 `--self-test`의 합성 endpoint로 검증되어
+  있지만, 실기기에서 그 분기를 관찰한 적은 없습니다.
 * **Bluetooth·HDMI·독점 모드·DRM**: 이번 이정표의 범위가 아니며 검증하지 않았습니다.
-* **CI**: 이 브랜치는 푸시되었고 세 워크플로가 `814f29b`에서 모두 success입니다(3절). 다만 **CI 잡 요약의 VERIFIED/SKIPPED 구분은 저장소 자격 증명 없이 읽을 수 없습니다** — 확인할 수 있는 것은 단계가 실패하지 않았다는 사실이며, GUI 단계가 러너에서 "SKIPPED"로 자기 보고했을 가능성은 배제하지 않습니다. 러너에 오디오 장치가 없다는 것과 데스크톱 제약은 위 SKIPPED 표의 항목을 대체하지 않습니다.
+* **CI**: 이 브랜치의 모든 커밋이 푸시되었고, 마지막 커밋 `8de1275`에서 **Windows CI(Debug·Release·no-UI), Core CI(ubuntu·windows × Debug·Release), macOS Native and Core CI가 모두 success**(16/16 check)입니다. 다만 **CI 잡 요약의 VERIFIED/SKIPPED 구분은 저장소 자격 증명 없이 읽을 수 없습니다** — 확인할 수 있는 것은 단계가 실패하지 않았다는 사실이며, GUI 단계가 러너에서 "SKIPPED"로 자기 보고했을 가능성은 배제하지 않습니다. 러너에 오디오 장치가 없다는 것과 데스크톱 제약은 위 SKIPPED 표의 항목을 대체하지 않습니다.
 * **`--list-devices`/`--route-check`와 엔드포인트가 없는 머신**: 러너처럼 장치가 하나도 없는 환경에서 두 명령은 열거 실패 또는 "기본 장치를 찾을 수 없음"을 보고합니다. 그 계약도 CI에서 검증되지만, "장치가 있는 머신에서의 경로 판정"과는 다른 경로입니다.
 * **3상태 방법을 돌린 ad-hoc 실행의 underrun**: 그 실행은 같은 endpoint에서 톤 재생 + loopback
   캡처 + 세 번째 관측 스트림이 동시에 도는 구성이었고, 바이패스 712 ms·Circuit 6,256 ms의
@@ -318,8 +324,8 @@ endpoint id·컨테이너 id·개인 경로는 저장소에 넣지 않았습니�
 ## 9. 남은 작업
 
 1. **후속 Draft PR: #25** — <https://github.com/Gomtanga/lowend-circuit/pull/25>
-   (base `feature/windows-port` `400fa25`, head `feature/windows-virtual-routing`, 22 커밋, draft,
-   커밋 `240ac40`에서 CI 16/16 success). PR #24가 병합되면 base를 `main`으로 바꿉니다.
+   (base `feature/windows-port` `400fa25`, head `feature/windows-virtual-routing` `8de1275`, 26 커밋,
+   draft, 이 브랜치의 모든 커밋에서 CI green). PR #24가 병합되면 base를 `main`으로 바꿉니다.
    **병합은 하지 않았습니다.**
 2. **VB-CABLE 설치 동의 → 재부팅 → 5절의 3~9번 실행**(경로 검증, 30분 안정성, 재시작 10회,
    3상태 OFF/바이패스/Circuit 비교). 이 단계는 외부 드라이버 설치·재부팅·기본 출력 변경·테스트 톤
