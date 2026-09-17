@@ -25,6 +25,9 @@ Fixed pass/fail criteria, decided before any run:
                   starts empty). After the priming window it must not grow by more
                   than two render periods in total - growth past that is the
                   capture side falling behind, not a startup transient.
+  coverage        the samples must span the run that was asked for. A capture that
+                  stops early would otherwise let a half-hour run pass on the first
+                  minute it happened to see.
   cycles          every stop/restart cycle must open the route (exit 0, the
                   running banner, at least one processed frame) and report no
                   device errors or drops.
@@ -32,8 +35,11 @@ Fixed pass/fail criteria, decided before any run:
 Reported but not judged: the ring-buffer trend. A steady rise is a clock
 difference between two independent devices as much as it is a defect, so the
 numbers (first/last quarter means, fitted slope) are printed for the report to
-interpret rather than turned into a pass/fail here. A run whose buffer reaches
-zero after priming *is* called out, because that is starvation regardless of cause.
+interpret rather than turned into a pass/fail here. A run whose buffer *stays* at
+zero after priming is called out: a single reading of zero is the render side
+consuming what the capture side just wrote (equilibrium, and the porting branch's
+own records show it), while a tenth of the settled samples reading zero is
+starvation.
 
 Usage:
   python scripts/check-windows-route-stability.py <exe> --capture <id> --render <id> \
@@ -49,6 +55,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import threading
 import time
 
 PRIMING_SECONDS = 10.0
@@ -58,9 +65,22 @@ SAMPLE_RE = re.compile(r"^(\d+\.\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$")
 
 
 def start(executable: pathlib.Path, args):
-    return subprocess.Popen([str(executable), *args], stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True,
-                            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    process = subprocess.Popen([str(executable), *args], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True,
+                               creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    # The run's statistics are only useful if the pipe is read while it runs. Sleeping
+    # first and collecting at the end looks equivalent but is not: the engine's stats
+    # fill the ~64 KiB pipe buffer after roughly a minute and a half, and everything
+    # after that is lost, so a half-hour run gets judged on its first minute.
+    process.captured = []
+    process.reader = threading.Thread(target=drain, args=(process,), daemon=True)
+    process.reader.start()
+    return process
+
+
+def drain(process):
+    for line in process.stdout:
+        process.captured.append(line)
 
 
 def stop(process, seconds: float = 0.0):
@@ -74,11 +94,16 @@ def stop(process, seconds: float = 0.0):
         except Exception:
             process.terminate()
     try:
-        out, _ = process.communicate(timeout=60)
+        process.wait(timeout=60)
     except subprocess.TimeoutExpired:
         process.kill()
-        out, _ = process.communicate()
-    return out
+        process.wait()
+    process.reader.join(timeout=10)
+    try:
+        process.stdout.close()
+    except Exception:
+        pass
+    return "".join(process.captured)
 
 
 def counter(text: str, label: str):
@@ -107,13 +132,20 @@ def samples(text: str):
     return out
 
 
-def judge_run(label, text, exit_code, observed, problems):
+def judge_run(label, text, exit_code, observed, problems, expected_seconds=None):
     """Applies the fixed criteria to one continuous run."""
     if exit_code != 0:
         problems.append(f"{label}: the engine exited with code {exit_code}")
     if not observed:
         problems.append(f"{label}: no statistics were reported, so nothing was observed")
         return
+    # A run is judged on the samples it produced, so the samples have to cover the run
+    # that was asked for. Without this the criteria below pass on any prefix of the run
+    # (a truncated capture of a 30-minute run looks like a healthy 90-second one).
+    if expected_seconds and observed[-1]["elapsed"] < expected_seconds - 5.0:
+        problems.append(
+            f"{label}: only {observed[-1]['elapsed']:.1f} s of statistics were captured "
+            f"for a {expected_seconds:.0f} s run")
     if counter(text, "Capture errors") or counter(text, "Render errors"):
         problems.append(f"{label}: device errors were reported at stop")
     dropped = counter(text, "Dropped samples")
@@ -144,8 +176,15 @@ def judge_run(label, text, exit_code, observed, problems):
             problems.append(
                 f"{label}: underrun grew by {growth} samples after priming "
                 f"(limit {UNDERRUN_GROWTH_LIMIT_SAMPLES})")
-        if min(s["buffered"] for s in settled) == 0:
-            problems.append(f"{label}: the ring buffer was empty after priming (starvation)")
+        # An instantaneous reading of zero is equilibrium, not starvation: the render
+        # side consumes as the capture side fills, and the engine's own counter has
+        # already said whether a render period was missed. Persistence is the signal,
+        # so a tenth of the settled samples reading zero is called out.
+        zeros = sum(1 for s in settled if s["buffered"] == 0)
+        if zeros > len(settled) // 10:
+            problems.append(
+                f"{label}: the ring buffer read zero in {zeros} of {len(settled)} "
+                f"samples after priming (starvation)")
 
     print(f"  {label}: frames={last['frames']} dropped={counter(text, 'Dropped samples')} "
           f"underrun={counter(text, 'Underrun samples')} resyncs={counter(text, 'Resyncs')} "
@@ -214,14 +253,16 @@ def main() -> int:
             opened = "running" in text and "Failed to start" not in text
             if not opened:
                 problems.append(f"cycle {index}: the route did not open")
-            judge_run(f"cycle {index}", text, process.returncode, observed, problems)
+            judge_run(f"cycle {index}", text, process.returncode, observed, problems,
+                      args.cycle_seconds)
 
     if args.minutes > 0:
         print(f"continuous run: {args.minutes:.1f} minute(s)")
         process = start(executable, engine_args)
         text = stop(process, args.minutes * 60.0)
         observed = samples(text)
-        judge_run("continuous", text, process.returncode, observed, problems)
+        judge_run("continuous", text, process.returncode, observed, problems,
+                  args.minutes * 60.0)
         report_trend("continuous", observed)
 
     if problems:

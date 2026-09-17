@@ -476,8 +476,11 @@ Core 테스트를 두 OS에서 돌립니다.
   python scripts\check-windows-route-stability.py build\win-cli\Release\lowend_windows.exe ^
     --capture "<입력 또는 케이블 녹음 id>" --render "<출력 id>" --capture-mode input --minutes 30 --cycles 10
   ```
-  이 스크립트는 장치 오류·dropped·정체·프라이밍 후 underrun 증가·프라이밍 후 링 고갈을 **실패로
-  판정**하고, 버퍼 추세는 판정하지 않고 숫자로 보고합니다.
+  이 스크립트는 장치 오류·dropped·정체·프라이밍 후 underrun 증가·프라이밍 후 링이 **지속적으로**
+  0인 경우(프라이밍 이후 샘플의 10% 초과)를 **실패로 판정**하고, 버퍼 추세는 판정하지 않고 숫자로
+  보고합니다. **샘플이 요청한 실행 구간을 덮지 않으면 실패로 판정합니다** - 회귀 검사에서
+  실행이 길 때 통계를 중간에 놓치면 30분 실행이 첫 1분만으로 통과할 수 있었고, 지금은
+  "only 98.0 s of statistics were captured for a 120 s run"처럼 실패합니다.
 - **시작 과도 상태 해석 (중요)**: `Resyncs`와 `Underrun samples`는 **길이에 비례하지 않습니다**.
   90초·180초·240초 실행 모두 **Resyncs = 1**, underrun도 3264~5184 샘플(≈54 ms, 렌더 버퍼
   2~3개)로 일정했습니다. 즉 **시작 시점의 일회성 이벤트**이며 지속적인 고갈이 아닙니다.
