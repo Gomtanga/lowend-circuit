@@ -370,10 +370,26 @@ void ControlPanel::refreshDevices() {
                             L"not make. A real input device works without one.";
     } else {
         const VirtualCable& cable = cables.front();
+        // The Output the note suggests must be a physical device: the cable's own
+        // playback side is the one endpoint the routing rule refuses, so naming it
+        // here would read as an instruction to route the audio back into the cable.
+        std::string physicalOutput;
+        for (const DeviceInfo& device : outputs) {
+            if (isCableSide(device.id, true)) {
+                continue;
+            }
+            if (physicalOutput.empty() || device.isDefault) {
+                physicalOutput = device.name.empty() ? device.id : device.name;
+            }
+            if (device.isDefault) {
+                break;
+            }
+        }
         virtualCableNote_ = L"Virtual cable detected: choose Capture \"Input: "
             + widen(cable.recording.name) + L"\" and Output \""
-            + widen(cable.playback.name.empty() ? std::string("your device") : cable.playback.name)
-            + L"\"-style physical device, then set Windows' default output to the cable's "
+            + widen(physicalOutput.empty() ? std::string("your physical output device")
+                                           : physicalOutput)
+            + L"\", then set Windows' default output to the cable's "
               L"playback side. LowEnd renders to the endpoint chosen above, never to the cable.";
     }
 

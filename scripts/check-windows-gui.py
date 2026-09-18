@@ -36,6 +36,8 @@ ID_STATUS = 1014
 CB_GETCOUNT = 0x0146
 CB_SETCURSEL = 0x014E
 CB_GETCURSEL = 0x0147
+CB_GETLBTEXT = 0x0148
+CB_GETLBTEXTLEN = 0x0149
 BM_CLICK = 0x00F5
 WM_CLOSE = 0x0010
 WM_COMMAND = 0x0111
@@ -181,6 +183,25 @@ def main() -> None:
         for phrase in ("virtual cable", "settings > system > sound > output"):
             if phrase not in lowered:
                 raise SystemExit(f"The startup status is missing {phrase!r}:\n{initial}")
+
+        # The note suggests an Output device by name, and that name must be a
+        # physical device. Naming the cable's own playback side would read as an
+        # instruction to route the audio back into the cable, which is the one
+        # combination the routing rule refuses.
+        cable_output_names = []
+        for index in range(user32.SendMessageW(render, CB_GETCOUNT, 0, 0)):
+            length = user32.SendMessageW(render, CB_GETLBTEXTLEN, index, 0)
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.SendMessageW(render, CB_GETLBTEXT, index, ctypes.byref(buffer))
+            label = buffer.value
+            if "[virtual cable: play into it]" in label:
+                cable_output_names.append(label.split("  [")[0])
+        for name in cable_output_names:
+            if name and name in initial:
+                raise SystemExit(
+                    "The startup status suggests the cable's own playback endpoint as the output "
+                    f"({name!r}); the documented route renders to a physical device, and using the "
+                    "same cable on both sides is refused:\n" + initial)
 
         capture_count = user32.SendMessageW(capture, CB_GETCOUNT, 0, 0)
         render_count = user32.SendMessageW(render, CB_GETCOUNT, 0, 0)
