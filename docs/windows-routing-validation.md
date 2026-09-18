@@ -50,9 +50,17 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 흐름 | 이름 | 버스 | 포맷 |
 |---|---|---|---|
 | 출력 (기본) | Fosi Audio ZH3 | USB | 48000 Hz / 2 ch / 32-bit |
+| 출력 | CABLE Input (VB-Audio Virtual Cable) | ROOT | 48000 Hz / 2 ch / 32-bit |
+| 출력 | CABLE In 16ch (VB-Audio Virtual Cable) | ROOT | 48000 Hz / 2 ch / 32-bit |
 | 출력 | Odyssey G5 (NVIDIA High Definition Audio) | HDAUDIO | 48000 Hz / 2 ch / 32-bit |
 | 출력 | Realtek Digital Output | HDAUDIO | 192000 Hz / 2 ch / 32-bit |
 | 입력 (기본) | WO Mic Device | ROOT | 48000 Hz / **1 ch** |
+| 입력 | CABLE Output (VB-Audio Virtual Cable) | ROOT | 48000 Hz / 2 ch / 32-bit |
+
+VB-CABLE(VB-Audio Virtual Cable, `VBCABLE_Driver_Pack45`)은 **사용자가 2026-09-18에 설치**했습니다.
+설치는 외부 드라이버 조작이라 이 저장소의 도구가 대신 실행하지 않습니다. 이 드라이버는 PnP
+인스턴스 하나(`ROOT\MEDIA\0001`)에 재생 2개(`CABLE Input`, `CABLE In 16ch`)와 녹음 1개
+(`CABLE Output`)를 노출합니다.
 
 ### 지원 포맷 열거 (실측 기준 구성)
 
@@ -62,6 +70,8 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 엔드포인트 | 흐름 | mix rate | 채널 |
 |---|---|---|---|
 | Fosi Audio ZH3 (기본 출력, 이정표의 목적지) | render | 48,000 Hz | 2 |
+| CABLE Input / CABLE In 16ch (VB-Audio) | render | 48,000 Hz | 2 |
+| CABLE Output (VB-Audio) | capture | 48,000 Hz | 2 |
 | Odyssey G5 | render | 48,000 Hz | 2 |
 | Realtek Digital Output | render | 192,000 Hz | 2 |
 | WO Mic Device | capture | 48,000 Hz | **1 (모노)** |
@@ -75,9 +85,10 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 * 이 머신의 유일한 입력 장치는 48 kHz **모노**입니다. 모노 입력의 채널 확장은 기존 경로가
   처리하며, 이 문서의 톤 검증은 **스테레오 소스**(케이블 경로) 기준입니다.
 
-**가상 케이블 없음.** 이 머신에서 `--list-devices`는 `Virtual cables: none detected`를 보고합니다
-(3절의 마지막 항목). 그래서 케이블을 지나는 **핵심 경로는 실행 검증되지 않았고**, 이 문서는
-"실기기 검증 대기, 이정표 미완료"로 끝납니다.
+**가상 케이블 설치됨(2026-09-18).** 사용자가 VB-CABLE을 설치한 뒤 `--list-devices`는 `CABLE Input`
+/ `CABLE In 16ch` ↔ `CABLE Output`을 한 장치로 묶어 보고합니다. 케이블을 지나는 **핵심 경로는
+실행 검증됐습니다**(3절의 케이블 경로 행). 남은 항목(케이블 경로의 30분·재시작 10회, GUI의 케이블
+표시, 재개방 가드)은 검증되는 대로 3절로 옮기고, 미검증 항목은 4절의 SKIPPED 표에 남깁니다.
 
 ## 3. 검증 결과
 
@@ -89,9 +100,12 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | Debug 빌드 | `scripts\build-windows-cli.bat Debug` | exit 0, 동일 검사 통과 |
 | GUI 비활성 빌드 | `cmake -S Windows -B build/win-routing-no-ui -DLOWEND_WINDOWS_BUILD_GUI=OFF -DLOWEND_WINDOWS_BUILD_TESTING=ON` + `cmake --build` + `ctest` | 구성·빌드·ctest 통과(`NO_UI_BUILD_OK`) |
 | 오프라인 검사 (신규 포함) | `lowend_windows.exe --self-test` | **23개 검사** 전부 통과(실행 출력의 섹션 배너를 세어 확인). 신규 2개: `routing: pass-through feedback rule`, `routing: endpoint selection and capture mode` |
-| 장치 열거에 버스/케이블 정보 | `lowend_windows.exe --list-devices` | 각 행에 `bus=`(USB/HDAUDIO/ROOT) 추가, 마지막에 `Virtual cables:` 절. 이 머신은 `none detected` |
+| 장치 열거에 버스/케이블 정보 | `lowend_windows.exe --list-devices` | 각 행에 `bus=`(USB/HDAUDIO/ROOT) 추가, 마지막에 `Virtual cables:` 절 |
+| `--list-devices`의 케이블 짝 (설치 후) | `lowend_windows.exe --list-devices` | `CABLE In 16ch → CABLE Output`, `CABLE Input → CABLE Output` **두 줄만** 나옵니다(VB-CABLE 인스턴스 `ROOT\MEDIA\0001`의 재생 2개 × 녹음 1개). WO Mic(`ROOT\MEDIA\0000`)는 짝으로 묶이지 않고, 아래 `Software-bus endpoints NOT paired as one device` 절에 "다른 장치 인스턴스라 식별 불가"로 따로 보고됩니다 — 즉 `CABLE Input → 마이크(WO Mic)` 같은 거짓 짝이 사라졌습니다(아래 결함 행) |
 | 경로 진단 (기본 선택) | `lowend_windows.exe --route-check` | `REFUSED (same endpoint)`, exit 1 — 기본 출력 loopback과 기본 렌더가 같은 ZH3 |
-| 경로 진단 (입력 → ZH3) | `--route-check --input-device <mic> --device <zh3>` | `READY`, exit 0. 케이블 부재 안내(설치 필요·사용자 동의 필요)를 note로 출력 |
+| 경로 진단 (입력 → ZH3) | `--route-check --input-device <mic> --device <zh3>` | `READY`, exit 0. 입력 라우트에서는 케이블 부재 안내가 note로 나옵니다(설치 전 기록) |
+| **경로 진단 (케이블 → ZH3, 설치 후)** | `--route-check --input-device {0.0.1...8eb85364…}(CABLE Output) --device {0.0.0...275d2e95…}(ZH3)` | **`READY`, exit 0**: capture = `CABLE Output`(ROOT, 48 kHz/2 ch), render = `스피커(Fosi Audio ZH3)`(USB, 48 kHz/2 ch), 케이블 짝 2줄 표시. 스트림을 열지 않고 판정만 합니다 |
+| **케이블 경로 실행 검증 (이정표의 핵심)** | `python scripts\check-windows-cable-route.py build\win-cli\Release\lowend_windows.exe --cable-playback {…368e189b…}(CABLE Input) --cable-recording {…8eb85364…}(CABLE Output) --output {…275d2e95…}(ZH3)` | **exit 0 · "cable route verified"**. 톤(440 Hz stereo, 진폭 0.40, 3초)을 **케이블 재생측 endpoint로** 보내고 **ZH3 자신의 loopback**을 관측: 기준값(목적지 직접) peak 0.307343 (L/R 동일), 440.0 Hz · **엔진 OFF: peak 0.000000, 프레임 0**(우회·중복 경로 없음) · **바이패스**: peak 0.307343 = 기준의 1.00×, 440.0 Hz, 양 채널 · **Circuit**: peak 0.213287 = **바이패스의 0.69×**, 440.0 Hz, 양 채널. 즉 앱이 케이블에 재생한 신호가 케이블 녹음측 → LowEnd DSP → 지정한 물리 출력까지 실제로 도달하며, 두 채널·피치가 유지되고 원본/처리본이 겹치지 않습니다. **이 검증은 디지털 경로 관측이며 사람의 청취 평가가 아닙니다** |
 | 경로 진단 (캡처 모드 모순) | `--route-check --capture-device <입력 endpoint>` | `REFUSED (capture mode mismatch)`, exit 1 — "그 id는 입력 endpoint이므로 `--input-device`로 기록하라"는 다음 조치 출력 |
 | 경로 진단 (사라진 렌더 id) | `--route-check ... --device {deadbeef-…}` | `REFUSED (render endpoint missing)`, exit 1 — 요청한 id를 그대로 지목, "재설치하면 새 id가 된다"는 다음 조치 |
 | 캡처 덤프 | `--monitor 2 --input-device <mic> --dump-wav <file>` | 96,480 프레임 기록(2.01 s). Python `wave`로 읽어 2 ch / 48000 Hz / 16-bit / 96,480 프레임 확인. 이 입력 장치는 무음(peak 0.000000)을 보고했고, 덤프도 전부 0 |
@@ -100,7 +114,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | GUI 새로 고침 후 선택 유지 | `python scripts\check-windows-gui-refresh.py …` | 캡처 선택 유지 확인(`Input: 마이크(WO Mic Device)`, index 3) + **라이브 경로 절반도 통과**: 실행 중 새로 고침 전후로 협상된 캡처 경로가 동일(`4회 연속 재현`). 이전 실행에서 이 절반이 SKIPPED로 보고된 것은 **하드웨어 한계가 아니라 그 시점의 저장된 선택이 자기 캡처 조합(기본 출력 loopback + 같은 출력 렌더)이었기 때문**입니다 — 그 조합은 가드가 정당하게 거부합니다. 선택을 입력 장치로 두면 같은 머신에서 라이브 절반이 통과합니다 |
 | GUI 선택 저장·복원·거부 (신규) | `python scripts\check-windows-gui-persistence.py build\win-cli\Release\lowend_gui.exe` | (1) 저장된 endpoint가 있으면 그대로 선택됨 (2) 사라진 저장 id는 콤보를 비우고 Start가 "no longer present"로 거부 (3) 선택 변경이 사용자 설정 파일에 기록됨. 검사는 사용자의 실제 선택 파일을 백업·복원함 |
 | 케이블 검사기 자체 판별력 (신규) | `python scripts\check-windows-cable-route.py --self-check` | 자기가 만든 신호로 통과/거부를 구별: 440 Hz·0.40·양 채널 신호는 수용, 무음·한쪽 채널만·디튠(404 Hz)·감쇠 없는 Circuit은 거부 |
-| 순환 가드 규칙 (오프라인) | `--self-test`의 `routing:` 검사 2종 | 같은 컨테이너 + ROOT 버스의 재생/녹음 쌍은 충돌, USB 헤드셋의 마이크·스피커는 충돌 아님, 컨테이너를 못 읽으면 충돌 아님(식별 불가는 허용), 케이블 한쪽 + 물리 출력은 허용 |
+| 순환 가드 규칙 (오프라인) | `--self-test`의 `routing:` 검사 2종 | 같은 **장치 인스턴스** + ROOT 버스의 재생/녹음 쌍은 충돌, USB 헤드셋의 마이크·스피커는 충돌 아님, 식별자를 못 읽으면 충돌 아님(식별 불가는 허용), 케이블 한쪽 + 물리 출력은 허용, **zero 컨테이너를 공유하는 두 소프트웨어 장치는 충돌 아님·짝 아님** |
 | **테스트 톤 실기기 검증 (사용자 동의 후)** | `--monitor 5 --capture-device <ZH3>`(백그라운드, `--dump-wav` 동시 기록) + `--play-tone 3 --device <ZH3>` | `--play-tone`: 144,000 프레임(3.00 s) 기록, peak 0.400000, 양 채널. 동시에 관찰한 **ZH3 자신의 loopback**: 342 패킷/164,160 프레임, **input peak 0.399963 (L 0.399963, R 0.399963)**. 덤프를 검사기의 분석 코드로 읽어 **우세 주파수 440.0 Hz**, 2 ch, 48,000 Hz, 레벨·채널·피치 기준 전부 통과. 즉 지정한 endpoint로 보낸 신호가 그 endpoint의 loopback에서 그대로 관측됨 |
 | **CLI 엔진 시작 가드 (실기기)** | `lowend_windows.exe --capture-device <ZH3> --device <ZH3>` (기본 loopback 흐름 + 같은 출력) | `Failed to start audio processing: capture and render resolved to the same endpoint (스피커(Fosi Audio ZH3)); … Pass --device with a different output endpoint to break the loop.` + **exit 1**, 즉시 종료(0.14초). 스트림이 열린 채로 남지 않고, 우회 플래그 없이 거부됨. `--route-check`의 사전 판정과 별개로 **실제 엔진 `start()` 경로**가 하드웨어에서 거부하는 것을 확인 |
 | **안정성·재시작 검사기 (신규, 명시적 ID)** | `python scripts\check-windows-route-stability.py <exe> --capture <id> --render <id> [--capture-mode input\|loopback] --minutes N --cycles N` | 입력 라우트(WO Mic → ZH3)로 3회 사이클 + 1분 연속 실행: 사이클마다 개방·dropped 0·오류 0, 연속 구간 frames 2,885,664·dropped 0·underrun 고정, 버퍼 추세 보고. **판별력 확인**: 존재하지 않는 endpoint를 주면 `the engine exited with code 1`·`no statistics were reported`로 **실패(exit 1)**, 같은 endpoint 양쪽 지정은 실행 전에 거부, 인자 누락은 사용법 오류로 거부. 30분 연속·10회 재시작의 고정 기준(장치 오류·dropped·정체·프라이밍 후 underrun 증가·버퍼 고갈)이 코드에 박혀 있어 케이블 설치 후 그대로 실행합니다 |
@@ -118,6 +132,7 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | GUI 시작 안내 결함 (자체 발견·수정) | 실행 중인 창의 상태 컨트롤을 직접 읽음 | 창을 열면 상태줄이 `Idle. Choose an output endpoint, then Start.`만 보였습니다. 케이블 안내와 "LowEnd는 Windows 기본 출력을 바꾸지 않는다 + 되돌리는 경로"는 `updateStatusText()`가 만들지만, 시작 시에는 그 함수를 부르지 않고 짧은 리터럴을 설정하고 있었습니다. 이제 `create()`가 장치 목록을 채운 뒤 `updateStatusText()`를 호출하고, GUI end-to-end 검사가 시작 시점에 그 안내(`virtual cable`, `Settings > System > Sound > Output`)가 화면에 있는지 확인합니다. **옛 시작 줄을 주입하면 검사가 실패**하는 것을 확인했습니다 |
 | GUI end-to-end (재확인) | `python scripts\check-windows-gui.py build\win-cli\Release\lowend_gui.exe` | 같은 endpoint 시작 거부 → 입력 장치로 시작 → 통계 진행(20,928 → 165,504) → 실행 중 모델 변경이 오디오 스레드에 반영 → Stop → 재시작 시 통계 초기화(→ 21,792) → 두 번째 Stop → 정상 종료. 상태 텍스트가 박스에 맞음(192/276 px) |
 | **GUI 5종 재실행 (현재 바이너리)** | `check-windows-gui-controls.py` · `-sliders` · `-refresh` · `-persistence` · `check-windows-gui.py`, 전부 `build\win-cli\Release\lowend_gui.exe` | 다섯 검사 모두 **exit 0**. 컨트롤 33개(combo 4·trackbar 7·button 3·static 19)가 760×760 클라이언트 안에 들어가고 겹침 없음 · 실제 드래그 21회에서 모든 readout이 썸을 따라감 · 새로 고침 후 캡처 선택(`Input: 마이크(WO Mic Device)`, index 2)과 라이브 라우트 유지 · 저장된 endpoint 복원, 사라진 endpoint는 콤보를 비우고 Start를 그 사유로 거부, 변경은 사용자 설정 파일에 기록, 한쪽 변경이 반대편의 저장된-없는 id를 지우지 않음(검사가 사용자 파일을 원복) · end-to-end: 통계 **21,792 → 165,984** 프레임, 실행 중 모델 변경이 오디오 스레드에 반영(`HighExciter`), Stop 후 재시작 시 통계 초기화(**165,984 → 22,752 → 167,424**), 두 번째 Stop 정상, 정상 종료. 위 GUI 행들의 수치(20,928 → 165,504 등)는 그때 빌드의 실행값이고, 이 재실행은 **현재 바이너리**에서 같은 동작을 다시 확인한 것입니다 |
+| **케이블 짝 판정: 컨테이너가 아니라 장치 인스턴스 (실기기 검증에서 발견·수정)** | VB-CABLE 설치 후 `--list-devices` · `--route-check` | 짝 판정이 `PKEY_Device_ContainerId`를 비교했는데, Windows는 **root 열거(소프트웨어) 장치 전부에 같은 zero 컨테이너** `{00000000-0000-0000-FFFF-FFFFFFFFFFFF}`를 줍니다(VB-Audio 3개 endpoint·WO Mic·Realtek·NVIDIA가 모두 같은 값). 그 결과 ① 목록이 `CABLE Input → 마이크(WO Mic Device)` 같은 **실제로는 없는 짝**을 인쇄했고 ② 순환 가드가 **안전한 조합**(예: WO Mic 캡처 + CABLE Input 렌더)을 순환으로 오판할 수 있었습니다. 실제 구분자는 엔드포인트 속성 `{b3f8fa53-…},2`의 **PnP 인스턴스**(`ROOT\MEDIA\0001` vs `ROOT\MEDIA\0000`, ZH3는 `USB\VID_152A&…`)입니다. 이제 판정·키·거부 메시지가 모두 장치 인스턴스를 쓰고, 컨테이너는 **실제 값일 때만** fallback으로 씁니다. 수정 후 목록은 VB-CABLE 내부 조합 2줄만 남고 WO Mic는 "식별 불가" 절로 분리됩니다. `--self-test`에 회귀 3건 추가, **주입 시험에서 컨테이너 전용 판정으로 되돌리면 그 3건이 각각 다른 메시지로 실패**함을 확인 |
 | 스크립트 인자 오류 (자체 발견·수정) | 각 검사 스크립트에 존재하지 않는 실행 파일 경로를 주고 실행 | 12개 검사 스크립트 전부 `pathlib`의 `FileNotFoundError` **트레이스백**을 내고 있었습니다 — 사용자가 안내서의 명령을 잘못된 빌드 경로로 실행하면 스크립트가 깨진 것처럼 보입니다. 이제 각 스크립트가 **자기 이름과 찾지 못한 경로**를 밝히고 빌드 명령을 안내한 뒤 **exit 1**로 끝냅니다(`check-native-cli.py`는 앱 경로를 받으므로 빌드 안내 없이 경로만). 12개 전부 트레이스백 없음·exit 1·자기 이름 표기 확인, 실제 실행은 그대로 통과(`check-windows-cli.py` 33 거부 케이스) |
 | **안정성 검사기: 긴 실행의 통계를 중간부터 잃음 (자체 발견·수정)** | `check-windows-route-stability.py`로 30분 + 10회 실행 | 검사기가 자식의 파이프를 **읽지 않고** 잠든 뒤 마지막에 한 번만 수집했습니다. 엔진이 2초마다 찍는 통계가 64 KiB 파이프 버퍼를 약 97초에 채우고 그 뒤 출력은 버려져, **30분 실행이 첫 ~98초 샘플(프레임 4,643,904 ≈ 96.75초)만으로 "통과"**했습니다 — 판정 대상 구간은 건강했지만 **주장한 구간을 덮지 않았습니다**(검증 범위 ≠ 주장 범위). 이제 `start()`가 드레인 스레드를 띄워 실행 중 계속 읽고, `judge_run`이 **샘플이 요청 구간을 덮지 않으면 실패**로 판정합니다(커버리지 기준 신설). **검증**: 고정 버전은 2분 실행에서 샘플 118초·exit 0, old capture 동작으로 되돌린 mutant는 `only 98.0 s of statistics were captured for a 120 s run`으로 **exit 1** |
 | **안정성 검사기: 순간적인 `buffer 0`을 고갈로 판정 (자체 발견·수정)** | 같은 30분 실행에서 | 기준이 프라이밍 후 `buffered == 0` **한 번**만으로 실패를 냈습니다. 그러나 이 브랜치의 기존 실측이 "렌더 버퍼 잔량이 0~3192 프레임에서 정상 진동(고갈이 아니라 평형)"이라고 기록하고 있고, 그 실행에서 **underrun은 증가하지 않았습니다**(4992 고정) — 렌더가 제때 공급받았다는 뜻입니다. 이제 **프라이밍 이후 샘플의 10% 초과가 0일 때만** 고갈로 판정하고, 순간 0은 보고 숫자(`buffer a..b`)로 남깁니다. **검증**: 같은 2분 실행이 `buffer 0..3840`·exit 0으로 통과 |
@@ -140,15 +155,14 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 
 | 항목 | 이유 | 필요한 것 |
 |---|---|---|
-| **케이블 경로 실행 검증** (`check-windows-cable-route.py`) | 이 머신에 가상 케이블이 없음. 스크립트는 `SKIPPED: the two endpoints given as the cable are not paired as one virtual device…`로 보고하고 통과로 세지 않음 | VB-CABLE 설치(외부 드라이버, **사용자 동의 필요**) |
-| **케이블 경로에서의 30분 안정성** | 30분 실행 자체는 위에서 실제 장치로 완료했지만, 그것은 **WO Mic 입력 → ZH3** 라우트이며 케이블 경로가 아님. 케이블의 두 endpoint가 서로 다른 clock을 갖는 구성은 측정하지 않았음 | 케이블 + ZH3 |
-| **케이블 경로에서의 정지/재시작 10회** | 10회 반복은 완료했지만 같은 이유로 **입력 라우트**에서 측정. 케이블 endpoint 재개방은 미검증 | 케이블 + ZH3 |
-| 엔진 OFF / 바이패스 / Circuit 3상태 비교(케이블 경로) | 방법 자체는 실제 장치에서 검증했지만(위 항목), **케이블 소스**에 대한 비교는 케이블이 없어 미실행 | 케이블 + ZH3 |
-| **GUI의 케이블 표시**(`[virtual cable: play into it]` / `[virtual cable: recording side]`) | 목록은 엔진의 `findVirtualCables` 결과로 라벨을 붙이므로 케이블이 있어야 그 분기가 실행됩니다. 순수 판정 규칙과 `--list-devices`의 짝 표시는 오프라인 검사·실제 출력으로 확인했지만, **GUI 라벨 자체는 관찰하지 않았습니다** | 케이블 + GUI |
-| **케이블 쌍에 대한 재개방 시점 가드(실기기)** | 규칙은 `--self-test`(합성 endpoint)로, 재개방 경로는 정책 단위로 검증했지만, **실제 케이블 두 endpoint가 재개방 중 충돌하는 상황은 관찰하지 않았습니다** | 케이블 + ZH3 |
-| **GUI Idle 안내의 "케이블 감지" 분기** | 이 머신은 케이블이 없어 `No virtual cable endpoint detected…` 분기만 화면에서 확인했습니다. 케이블이 있을 때의 `Virtual cable detected: …` 분기는 미관찰 | 케이블 + GUI |
+| **케이블 경로에서의 30분 안정성 · 정지/재시작 10회** | 케이블 설치 후 실행 중이며, 판정이 나오면 3절로 옮깁니다. 그 전까지는 검증된 것으로 세지 않습니다 | (실행 중) |
+| **GUI의 케이블 표시**(`[virtual cable: play into it]` / `[virtual cable: recording side]`) | 목록은 엔진의 `findVirtualCables` 결과로 라벨을 붙이므로 케이블이 있어야 그 분기가 실행됩니다. 순수 판정 규칙과 `--list-devices`의 짝 표시는 오프라인 검사·실제 출력으로 확인했지만, **GUI 라벨 자체는 아직 관찰하지 않았습니다** | 케이블 + GUI |
+| **케이블 쌍에 대한 재개방 시점 가드(실기기)** | 규칙은 `--self-test`(합성 endpoint)로, 재개방 경로는 정책 단위로 검증했고 케이블 경로의 정지/재시작 10회가 그 재개방을 지나갑니다. **두 케이블 endpoint가 한 실행에서 충돌하는 상황 자체는 아직 관찰하지 않았습니다** | 케이블 + ZH3 |
+| **GUI Idle 안내의 "케이블 감지" 분기** | 케이블이 없을 때의 `No virtual cable endpoint detected…` 분기만 화면에서 확인했습니다. 케이블이 있을 때의 `Virtual cable detected: …` 분기는 아직 미관찰 | 케이블 + GUI |
 | 물리 USB 탈착·Bluetooth 실행 검증 | 관리자 권한/장치 없음 | 별도 환경 |
 | 사람의 청취 평가 | 이 문서가 주장하지 않는 영역 | 사람 |
+
+**참고**: 케이블 경로의 3상태(OFF/바이패스/Circuit) 비교는 위 VERIFIED 표의 "케이블 경로 실행 검증" 행에서 실제 케이블 소스로 확인했습니다.
 
 **정정 기록**: `check-windows-gui-refresh.py`의 라이브 경로 절반은 처음에 SKIPPED로 보고되었으나,
 그 원인은 하드웨어가 아니라 **그 시점의 저장된 선택이 자기 캡처 조합**(기본 출력 loopback + 같은
