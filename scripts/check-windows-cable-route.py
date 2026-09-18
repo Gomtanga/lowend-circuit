@@ -724,6 +724,7 @@ def device_run(args) -> int:
                                  ids, scratch / f"{driven}-only.wav", tone_channel=driven)
             print(f"{driven}-only:      peak={one_sided['peak']:.6f} "
                   f"(L {one_sided['peak_left']:.6f}, R {one_sided['peak_right']:.6f}) "
+                  f"rms L {one_sided['rms_left']:.6f}, R {one_sided['rms_right']:.6f} "
                   f"freq={one_sided['frequency']} frames={one_sided['frames']}")
             problems += judge_channel_case(f"{driven}-only", one_sided, driven)
 
