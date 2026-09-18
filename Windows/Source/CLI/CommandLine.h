@@ -46,6 +46,23 @@ inline constexpr int toneMaxSeconds = 600;
 inline constexpr double toneFrequencyHz = 440.0;
 inline constexpr double toneAmplitude = 0.4;
 
+// Which channel(s) --play-tone drives.
+//
+// "both" is the default and what a level comparison needs. A single-channel tone
+// is what makes a left/right swap observable at the far end of a route: two
+// identical channels can only show that a side is missing or duplicated, never
+// that the sides were exchanged.
+enum class ToneChannel { both, left, right };
+
+inline const char* toneChannelName(ToneChannel channel) {
+    switch (channel) {
+        case ToneChannel::left: return "left";
+        case ToneChannel::right: return "right";
+        case ToneChannel::both: break;
+    }
+    return "both";
+}
+
 // Longest and shortest capture-only monitoring window the CLI accepts. The
 // monitor exists to answer "is this endpoint actually delivering audio?", which
 // needs long enough to span a device's startup and short enough to stay a
@@ -66,6 +83,9 @@ struct CommandLine {
 
     // Seconds to play for Command::playTone; 0 when the flag was not given.
     int toneSeconds = 0;
+
+    // Which channel(s) Command::playTone drives.
+    ToneChannel toneChannel = ToneChannel::both;
 
     // File --monitor writes the captured signal to; empty when not requested.
     std::string monitorDumpPath;

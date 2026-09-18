@@ -308,8 +308,12 @@ int runPlayTone(const CommandLine& commandLine) {
 
     // Printed before anything is written, and flushed: the user has to be able to
     // see what will make a sound, through which endpoint, and at what level.
-    std::printf("Playing a %.1f Hz stereo tone at amplitude %.2f for %d s\n",
-                toneFrequencyHz, toneAmplitude, commandLine.toneSeconds);
+    const char* const channelText =
+        commandLine.toneChannel == ToneChannel::both ? "both channels"
+            : (commandLine.toneChannel == ToneChannel::left ? "the left channel only"
+                                                            : "the right channel only");
+    std::printf("Playing a %.1f Hz tone at amplitude %.2f for %d s on %s\n",
+                toneFrequencyHz, toneAmplitude, commandLine.toneSeconds, channelText);
     std::printf("  endpoint: %s\n",
                 render.openedDeviceName().empty() ? "(unnamed)"
                                                   : render.openedDeviceName().c_str());
@@ -328,6 +332,10 @@ int runPlayTone(const CommandLine& commandLine) {
         static_cast<double>(commandLine.toneSeconds) * static_cast<double>(format.sampleRate);
     uint64_t written = 0;
     double peak = 0.0;
+    // Decided once: a single-channel tone leaves the other side silent, which is
+    // what lets a check at the far end of the route see a swap.
+    const bool drivesLeft = commandLine.toneChannel != ToneChannel::right;
+    const bool drivesRight = commandLine.toneChannel != ToneChannel::left;
     const auto deadline = std::chrono::steady_clock::now()
         + std::chrono::seconds(commandLine.toneSeconds);
 
@@ -344,8 +352,8 @@ int runPlayTone(const CommandLine& commandLine) {
             const double phase = 2.0 * 3.14159265358979323846 * toneFrequencyHz
                 * static_cast<double>(written + i) / static_cast<double>(format.sampleRate);
             const float sample = static_cast<float>(toneAmplitude * std::sin(phase));
-            left[i] = sample;
-            right[i] = sample;
+            left[i] = drivesLeft ? sample : 0.0f;
+            right[i] = drivesRight ? sample : 0.0f;
             // Measured from the samples that were actually generated rather than
             // reported from the constant: the number a verification run compares
             // against has to be what left this process.
@@ -368,8 +376,8 @@ int runPlayTone(const CommandLine& commandLine) {
     render.close();
 
     const double seconds = static_cast<double>(written) / static_cast<double>(format.sampleRate);
-    std::printf("  wrote:    %llu frames (%.2f s), peak %.6f, both channels\n",
-                static_cast<unsigned long long>(written), seconds, peak);
+    std::printf("  wrote:    %llu frames (%.2f s), peak %.6f on %s\n",
+                static_cast<unsigned long long>(written), seconds, peak, channelText);
     return 0;
 }
 

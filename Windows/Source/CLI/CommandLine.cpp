@@ -276,6 +276,7 @@ CommandLine parseCommandLine(int argc, char** argv) {
     std::string inputDeviceId;
     bool captureDeviceGiven = false;
     std::string captureDeviceId;
+    bool toneChannelGiven = false;
 
     // Reads the value that follows the current argument.
     //
@@ -375,6 +376,23 @@ CommandLine parseCommandLine(int argc, char** argv) {
                         + std::to_string(toneMaxSeconds));
                 } else {
                     result.toneSeconds = static_cast<int>(seconds);
+                }
+            }
+        } else if (argument == "--tone-channel") {
+            // Selects which channel the tone source drives. Single-channel
+            // tones are what a route check needs to tell left from right; the
+            // cross-option rule below keeps it tied to --play-tone.
+            if (takeValue("--tone-channel needs both, left, or right")) {
+                toneChannelGiven = true;
+                if (value == "both") {
+                    result.toneChannel = ToneChannel::both;
+                } else if (value == "left") {
+                    result.toneChannel = ToneChannel::left;
+                } else if (value == "right") {
+                    result.toneChannel = ToneChannel::right;
+                } else {
+                    result.rejectionReasons.emplace_back(
+                        "--tone-channel needs both, left, or right");
                 }
             }
         } else if (argument == "--monitor") {
@@ -547,6 +565,14 @@ CommandLine parseCommandLine(int argc, char** argv) {
             "--dump-wav writes what --monitor captured, so it needs --monitor");
     }
 
+    // The channel selection belongs to the tone source. On any other command it
+    // would silently do nothing, which reads as "the check ran" when it did not.
+    if (toneChannelGiven && result.command != Command::playTone) {
+        result.rejectionReasons.emplace_back(
+            "--tone-channel selects which channel --play-tone drives, so it needs"
+            " --play-tone");
+    }
+
     // The header contract: an invalid command line never selects a runnable
     // command, so Main.cpp prints the reasons, then the usage, and exits 1.
     if (!result.rejectionReasons.empty()) {
@@ -566,7 +592,8 @@ std::string usageText() {
         "  lowend_windows --dump-settings\n"
         "  lowend_windows --self-test\n"
         "  lowend_windows --route-check [routing options]\n"
-        "  lowend_windows --play-tone <seconds> [--device <id>]\n"
+        "  lowend_windows --play-tone <seconds> [--tone-channel both|left|right]\n"
+        "                             [--device <id>]\n"
         "  lowend_windows --monitor <seconds> [--capture-device <id>]\n"
         "  lowend_windows --help\n"
         "\n"
@@ -622,13 +649,18 @@ std::string usageText() {
         "                          file. Needs --monitor. Exists so a verification run\n"
         "                          can measure the signal at the end of a route (level,\n"
         "                          channels, frequency) instead of trusting a summary\n"
-        "  --play-tone 1...600     Play a known 440 Hz stereo tone at amplitude 0.40 to\n"
-        "                          the --device endpoint (default output when absent),\n"
-        "                          then exit. The target, its period and the level are\n"
-        "                          printed before anything is written, and no volume is\n"
-        "                          changed. Not processed by the DSP: this is a signal\n"
-        "                          source for measuring a route, and DSP options do not\n"
-        "                          apply to it\n"
+        "  --play-tone 1...600     Play a known 440 Hz tone at amplitude 0.40 to the\n"
+        "                          --device endpoint (default output when absent), then\n"
+        "                          exit. The target, its period, the channel(s) and the\n"
+        "                          level are printed before anything is written, and no\n"
+        "                          volume is changed. Not processed by the DSP: this is a\n"
+        "                          signal source for measuring a route, and DSP options do\n"
+        "                          not apply to it\n"
+        "  --tone-channel both|left|right\n"
+        "                          Which channel(s) --play-tone drives (default: both).\n"
+        "                          One channel at a time is how a check tells left from\n"
+        "                          right at the far end of a route: two identical channels\n"
+        "                          can only show a missing or duplicated side, never a swap\n"
         "  --verbose               Print the negotiated route and running statistics\n"
         "  --help, -h              Print this text\n"
         "\n"

@@ -24,6 +24,13 @@ engine's own opinion of its output.
 
 Fixed acceptance criteria, decided before any run rather than after one:
 
+  destination_idle
+                 before anything is played, the destination is observed for
+                 MONITOR_SECONDS with no tone and no engine: peak < 0.02. A level
+                 here means another source is playing to the destination, and
+                 every level criterion below would be measuring that source as
+                 much as the tone, so the check stops instead.
+
   reference      with the engine stopped, the same tone is played to the *output*
                  endpoint itself and observed there. This measures how the
                  destination's own loopback reports a 0.40 tone, and it is what
@@ -47,9 +54,19 @@ Fixed acceptance criteria, decided before any run rather than after one:
                  0.90x of the bypass level (documented attenuation) and at least
                  0.02: the DSP is in the path.
   channels       both channels carry the tone in every run that has signal
-                 (peak_l >= 0.02 and peak_r >= 0.02). A single-channel or
-                 swapped source fails; a swap alone cannot be seen from levels,
-                 which is stated as a limit rather than asserted.
+                 (peak_l >= 0.02 and peak_r >= 0.02). A single-channel source
+                 fails here, and a swapped source cannot be seen from two
+                 identical channels at all.
+  channel_identity
+                 two extra runs drive *one* channel at a time through the same
+                 route (bypass) and observe the destination: a left-only tone
+                 must arrive on the left and a right-only tone on the right, with
+                 the undriven side at most 0.20x of the driven one **in RMS**.
+                 This is what makes a swap between the capture and the
+                 destination observable; the `channels` criterion alone cannot
+                 show it. RMS rather than a sample peak: a single stray sample
+                 on the undriven side is not the signal arriving on the wrong
+                 channel, and one sample must not decide the test.
   pitch          the dominant frequency of the observed signal is within 10 Hz of
                  440 Hz in every run that has signal. A stream replayed at the
                  wrong rate lands tens of Hz away (44.1k -> 48k gives 479 Hz,
@@ -97,6 +114,13 @@ BYPASS_MIN_RATIO = 0.50
 BYPASS_MAX_RATIO = 1.15
 CIRCUIT_MAX_RATIO = 0.90
 CHANNEL_MIN_PEAK = 0.02
+# The single-channel criterion compares sustained level, so its floor is an RMS.
+CHANNEL_MIN_RMS = 0.02
+# A single-channel run: the channel that was not driven has to stay this far
+# below the one that was. A swap puts the driven signal on the other side, which
+# is a ratio near zero the wrong way round; bleed or a mono downmix shows up as
+# a ratio that is not small. Decided before the runs, like the rest.
+CHANNEL_SILENCE_RATIO = 0.20
 PITCH_TOLERANCE_HZ = 10.0
 
 # The bypass has to be the documented one, including the stages that are off by
@@ -131,6 +155,13 @@ def read_wav(path: pathlib.Path):
     right = [samples[i + 1] * scale for i in range(0, len(samples) - 1, channels)] \
         if channels > 1 else list(left)
     return rate, channels, left, right
+
+
+def rms(values):
+    """Root mean square, the sustained level a single stray sample cannot move."""
+    if not values:
+        return 0.0
+    return math.sqrt(sum(v * v for v in values) / len(values))
 
 
 def peak(values):
@@ -172,13 +203,21 @@ def analyze(dump: pathlib.Path):
     skip = int(rate * 0.5)
     left = left[skip:]
     right = right[skip:]
+    peak_left, peak_right = peak(left), peak(right)
+    # The pitch is measured on the channel that carries the signal. A
+    # single-channel run leaves the other side silent, and a silent channel has
+    # no dominant frequency: measuring the left side unconditionally would report
+    # "no frequency" for a right-only tone that arrived correctly.
+    carrier = left if peak_left >= peak_right else right
     return {
         "rate": rate,
         "channels": channels,
-        "peak_left": peak(left),
-        "peak_right": peak(right),
-        "peak": max(peak(left), peak(right)),
-        "frequency": dominant_frequency(left, rate),
+        "peak_left": peak_left,
+        "peak_right": peak_right,
+        "peak": max(peak_left, peak_right),
+        "rms_left": rms(left),
+        "rms_right": rms(right),
+        "frequency": dominant_frequency(carrier, rate),
         "frames": len(left),
     }
 
@@ -239,6 +278,43 @@ def judge_case(label, measured, *, expect_silence=False, reference_peak=None,
                 f"reference ({reference_peak:.6f}), outside "
                 f"{BYPASS_MIN_RATIO:.2f}x..{BYPASS_MAX_RATIO:.2f}x; the route does not pass "
                 f"the signal through unchanged")
+    return problems
+
+
+def judge_channel_case(label, measured, driven):
+    """Problems for one single-channel run observed at the destination.
+
+    `driven` is "left" or "right": the side the source carried. A swap between
+    the source and the destination puts the signal on the other side, which is
+    what this catches; two identical channels could not show it.
+
+    The comparison is on RMS, not on the sample peak: a stray sample or a brief
+    onset transient on the undriven side is not the signal arriving on the wrong
+    channel, and a peak rule would let a single sample decide the test. A real
+    swap or a mono downmix moves the sustained level, which RMS measures.
+    """
+    problems = []
+    if measured["frames"] <= 0:
+        return [f"{label}: the destination delivered no frames at all"]
+    loud, quiet = ((measured["rms_left"], measured["rms_right"]) if driven == "left"
+                   else (measured["rms_right"], measured["rms_left"]))
+    other = "right" if driven == "left" else "left"
+    if loud < CHANNEL_MIN_RMS:
+        problems.append(
+            f"{label}: the {driven} channel only reached RMS {loud:.6f}; the {driven}-only "
+            f"tone did not arrive at a usable level ({other} {quiet:.6f})")
+    elif quiet > loud * CHANNEL_SILENCE_RATIO:
+        problems.append(
+            f"{label}: a {driven}-only tone arrived with {other} RMS {quiet:.6f} against "
+            f"{driven} {loud:.6f}, above the {CHANNEL_SILENCE_RATIO:.2f}x bleed bound; "
+            f"the channel driven by the source was not the one that carried it")
+    if measured["frequency"] is None:
+        problems.append(f"{label}: the observed signal had no measurable frequency")
+    elif abs(measured["frequency"] - TONE_HZ) > PITCH_TOLERANCE_HZ:
+        problems.append(
+            f"{label}: the destination's dominant frequency is {measured['frequency']:.0f} Hz, "
+            f"not {TONE_HZ:.0f} +/- {PITCH_TOLERANCE_HZ:.0f} Hz; the stream is being replayed "
+            f"at the wrong rate")
     return problems
 
 
@@ -324,14 +400,19 @@ def stop(process, seconds: float = 0.0):
         return process.communicate()
 
 
-def run_case(executable, label, engine_args, ids, dump, tone_device=None):
+def run_case(executable, label, engine_args, ids, dump, tone_device=None,
+             tone_channel=None):
     """Runs one measurement: optional engine, tone into one endpoint, observe the output.
 
     The tone normally goes into the cable's playback endpoint; the reference case
     sends it to the output endpoint itself, which is what makes the level
-    criteria relative to this destination.
+    criteria relative to this destination. `tone_channel` selects one channel of
+    the source when the caller needs the two sides to be distinguishable.
     """
     target = tone_device if tone_device is not None else ids["cable_playback"]
+    tone_args = ["--play-tone", str(TONE_SECONDS), "--device", target]
+    if tone_channel is not None:
+        tone_args += ["--tone-channel", tone_channel]
     engine = None
     monitor = None
     try:
@@ -346,8 +427,7 @@ def run_case(executable, label, engine_args, ids, dump, tone_device=None):
                                      "--capture-device", ids["output"],
                                      "--dump-wav", str(dump)])
         time.sleep(0.5)
-        tone = subprocess.run([str(executable), "--play-tone", str(TONE_SECONDS),
-                               "--device", target],
+        tone = subprocess.run([str(executable), *tone_args],
                               capture_output=True, text=True, timeout=TONE_SECONDS + 60)
         if tone.returncode != 0:
             raise CheckFailure(f"{label}: --play-tone failed: {tone.stdout}\n{tone.stderr}")
@@ -365,16 +445,50 @@ def run_case(executable, label, engine_args, ids, dump, tone_device=None):
     return analyze(dump)
 
 
+def observe_quiet(executable, ids, dump):
+    """Captures the destination with no tone and no engine, and returns its level.
+
+    Every level criterion here assumes the destination is otherwise silent. If
+    something else is playing to it - another application, or a leftover LowEnd
+    process - the measured levels belong to that source as much as to the tone,
+    and a verdict from them would be meaningless. This runs first so that is
+    reported instead of being measured.
+    """
+    monitor = None
+    try:
+        monitor = start(executable, ["--monitor", str(MONITOR_SECONDS),
+                                     "--capture-device", ids["output"],
+                                     "--dump-wav", str(dump)])
+        monitor_out, monitor_err = stop(monitor, MONITOR_SECONDS + 1.5)
+    finally:
+        if monitor is not None and monitor.poll() is None:
+            stop(monitor)
+    if not dump.exists():
+        raise CheckFailure("no dump was written while checking that the destination is quiet, "
+                           "so the level criteria cannot be evaluated")
+    return analyze(dump)
+
+
 # ─── Self-check (no hardware) ─────────────────────────────────────────
 
 def write_tone(path: pathlib.Path, frequency: float, amplitude: float,
-               seconds: float, right_only: bool = False) -> None:
+               seconds: float, driven: str = "both", stray: float = 0.0) -> None:
+    """Writes a tone file. `driven` is "both", "left" or "right"; `stray` puts one
+    stale-looking sample of that value on the *other* channel, which is what the
+    cable driver does when a new playback stream starts."""
     rate = 48000
     frames = bytearray()
+    stray_at = int(rate * seconds) // 2
     for i in range(int(rate * seconds)):
         sample = int(amplitude * 32767 * math.sin(2.0 * math.pi * frequency * i / rate))
-        left = 0 if right_only else sample
-        frames += struct.pack("<hh", left, sample)
+        left = sample if driven in ("both", "left") else 0
+        right = sample if driven in ("both", "right") else 0
+        if stray and i == stray_at:
+            if driven == "left":
+                right = int(stray * 32767)
+            elif driven == "right":
+                left = int(stray * 32767)
+        frames += struct.pack("<hh", left, right)
     with wave.open(str(path), "w") as handle:
         handle.setnchannels(2)
         handle.setsampwidth(2)
@@ -414,10 +528,34 @@ def self_check() -> int:
                 f"a 404 Hz signal measured {detuned_result['frequency']} Hz")
 
         one_channel = scratch / "right-only.wav"
-        write_tone(one_channel, TONE_HZ, TONE_AMPLITUDE, 1.0, right_only=True)
+        write_tone(one_channel, TONE_HZ, TONE_AMPLITUDE, 1.0, driven="right")
         if not any("one channel" in problem
                    for problem in judge_case("right-only", analyze(one_channel))):
             problems.append("a right-channel-only signal passed the channel criterion")
+
+        # Channel identity: the same right-only signal, judged against the side
+        # it actually carried (accepted) and against the other side (a swap, which
+        # has to fail). Without the second half the criterion would accept a
+        # swapped route, which is the defect it exists for.
+        if judge_channel_case("right-only-correct", analyze(one_channel), "right"):
+            problems.append("a right-only signal was rejected when judged against the right side")
+        if not any("which carried" in problem or "usable level" in problem
+                   for problem in judge_channel_case("right-only-swapped",
+                                                     analyze(one_channel), "left")):
+            problems.append("a swapped single-channel signal passed the channel identity criterion")
+        both_sides = scratch / "both-sides.wav"
+        write_tone(both_sides, TONE_HZ, TONE_AMPLITUDE, 1.0)
+        if not judge_channel_case("both-sides-driven-left", analyze(both_sides), "left"):
+            problems.append("a two-channel signal passed the single-channel identity criterion")
+
+        # A single stray sample on the undriven side is not a swap. The criterion
+        # compares RMS so that one sample cannot decide it; this case fails if it
+        # ever goes back to a sample peak.
+        stray = scratch / "left-with-stray.wav"
+        write_tone(stray, TONE_HZ, TONE_AMPLITUDE, 1.0, driven="left", stray=0.14)
+        if judge_channel_case("left-with-stray", analyze(stray), "left"):
+            problems.append("a single stray sample on the undriven channel failed the "
+                            "channel identity criterion")
 
         silent = scratch / "silence.wav"
         write_tone(silent, TONE_HZ, 0.0, 1.0)
@@ -463,10 +601,11 @@ def self_check() -> int:
         for problem in problems:
             print(f"  FAIL: {problem}", file=sys.stderr)
         return 1
-    print("checker self-check passed: the level, channel and pitch criteria accept the "
-          "signal they describe and reject silence, a single-channel source, a detuned "
-          "stream, an unattenuated Circuit run, and a bypass whose level is 2.5x or 0.25x "
-          "of the destination's own measured reference.")
+    print("checker self-check passed: the level, channel, channel-identity and pitch criteria "
+          "accept the signal they describe and reject silence, a single-channel source, a "
+          "swapped single-channel source, a two-channel source judged as one-sided, a detuned "
+          "stream, an unattenuated Circuit run, and a bypass whose level is 2.5x or 0.25x of "
+          "the destination's own measured reference.")
     return 0
 
 
@@ -507,14 +646,29 @@ def device_run(args) -> int:
     print(f"  cable playback   {outputs[ids['cable_playback']][:70]}")
     print(f"  cable recording  {inputs[ids['cable_recording']][:70]}")
     print(f"  output           {outputs[ids['output']][:70]}")
-    print(f"signal: {TONE_HZ:.0f} Hz stereo at amplitude {TONE_AMPLITUDE:.2f} for "
-          f"{TONE_SECONDS} s, played by --play-tone into the cable playback endpoint")
+    print(f"signal: {TONE_HZ:.0f} Hz at amplitude {TONE_AMPLITUDE:.2f} for "
+          f"{TONE_SECONDS} s, played by --play-tone into the cable playback endpoint "
+          f"(both channels, then one channel at a time for the identity phase)")
     print(f"observed: the output endpoint's own loopback for {MONITOR_SECONDS} s\n")
     sys.stdout.flush()
 
     problems = []
     with tempfile.TemporaryDirectory() as scratch:
         scratch = pathlib.Path(scratch)
+
+        # -1. The destination has to be quiet before anything is measured.
+        quiet = observe_quiet(executable, ids, scratch / "quiet.wav")
+        print(f"destination idle: peak={quiet['peak']:.6f} "
+              f"(L {quiet['peak_left']:.6f}, R {quiet['peak_right']:.6f}) "
+              f"frames={quiet['frames']}")
+        if quiet["peak"] >= LEVEL_OFF_MAX:
+            print("  MISMATCH: the destination is already carrying audio before anything was "
+                  "played", file=sys.stderr)
+            raise CheckFailure(
+                f"the output endpoint carried peak {quiet['peak']:.6f} with nothing played by "
+                f"this check; another source (an application, or a leftover LowEnd process) is "
+                f"playing to it, and every level below would include it. Stop that source and "
+                f"re-run - a verdict from these levels would not be about the route")
 
         # 0. The destination's own reference: the same tone, played to the output
         #    endpoint itself, observed there. Every level comparison below is
@@ -559,6 +713,20 @@ def device_run(args) -> int:
               f"freq={circuit['frequency']} frames={circuit['frames']} ({ratio:.2f}x bypass)")
         problems += judge_case("circuit", circuit, reference_bypass=bypass)
 
+        # Channel identity. Two identical channels cannot show a swap, so each
+        # side is driven on its own through the same route and observed at the
+        # destination. Bypass is the reference setting for this: a swap is a
+        # routing defect, and the DSP stages are not part of the question.
+        for driven in ("left", "right"):
+            one_sided = run_case(executable, f"{driven}-only",
+                                 ["--input-device", ids["cable_recording"],
+                                  "--device", ids["output"], *BYPASS_ARGS],
+                                 ids, scratch / f"{driven}-only.wav", tone_channel=driven)
+            print(f"{driven}-only:      peak={one_sided['peak']:.6f} "
+                  f"(L {one_sided['peak_left']:.6f}, R {one_sided['peak_right']:.6f}) "
+                  f"freq={one_sided['frequency']} frames={one_sided['frames']}")
+            problems += judge_channel_case(f"{driven}-only", one_sided, driven)
+
     if problems:
         for problem in problems:
             print(f"  MISMATCH: {problem}", file=sys.stderr)
@@ -566,8 +734,9 @@ def device_run(args) -> int:
 
     print("\ncable route verified: the tone played into the cable's playback endpoint reached "
           "the named output endpoint only while the engine was running, with both channels "
-          "carrying it at 440 Hz, and the Circuit model attenuated it relative to the "
-          "documented bypass.")
+          "carrying it at 440 Hz, a left-only and a right-only tone each arriving on the side "
+          "that was driven, and the Circuit model attenuated it relative to the documented "
+          "bypass.")
     return 0
 
 

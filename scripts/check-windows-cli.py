@@ -48,6 +48,12 @@ def main() -> None:
         ["--play-tone", "9999"],
         ["--play-tone", "abc"],
         ["--play-tone"],
+        # The channel selector belongs to the tone source: on any other command it
+        # would do nothing at all, which would read as "the check ran".
+        ["--tone-channel", "sideways"],
+        ["--tone-channel"],
+        ["--tone-channel", "left"],
+        ["--tone-channel", "left", "--monitor", "1"],
         # The capture dump is filled by --monitor only. Asking for it anywhere else
         # would either write nothing or keep audio the user did not ask to keep.
         ["--dump-wav"],
@@ -98,6 +104,10 @@ def main() -> None:
         (["--device", ""], "needs a device id"),
         (["--input-device", ""], "needs a device id"),
         (["--capture-device", ""], "needs a device id"),
+        (["--tone-channel"], "needs both, left, or right"),
+        (["--tone-channel", "sideways"], "needs both, left, or right"),
+        (["--tone-channel", "left"], "needs --play-tone"),
+        (["--tone-channel", "right", "--monitor", "1"], "needs --play-tone"),
     ]
     # Missing value and invalid value, for every option macOS also accepts.
     for option, message in macos_message:
