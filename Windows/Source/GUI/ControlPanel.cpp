@@ -170,7 +170,7 @@ bool ControlPanel::create(HWND parent, HINSTANCE instance) {
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         controlX, y, 150, 26, parent,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(idRefreshDevices)), instance, nullptr);
-    y += rowHeight + 10;
+    y += rowHeight + 6;
 
     createLabel(L"Model", marginX, y + 5, labelWidth);
     controlSlot(idModel) = CreateWindowExW(
@@ -182,7 +182,7 @@ bool ControlPanel::create(HWND parent, HINSTANCE instance) {
     SendMessageW(controlSlot(idModel), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Circuit"));
     SendMessageW(controlSlot(idModel), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"HighExciter"));
 
-    createLabel(L"Harmonic quality", controlX + 200, y + 5, 120);
+    controlSlot(idHarmonicLabel) = createLabel(idHarmonicLabel, L"Harmonic quality", controlX + 200, y + 5, 120);
     controlSlot(idExciterOversampling) = CreateWindowExW(
         0, L"COMBOBOX", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
@@ -195,19 +195,27 @@ bool ControlPanel::create(HWND parent, HINSTANCE instance) {
     y += rowHeight + 6;
 
     createTrackbar(idIntensity, controlX, y, controlWidth);
-    createLabel(L"LowEnd", marginX, y + 6, labelWidth);
+    controlSlot(idIntensityLabel) = createLabel(idIntensityLabel, L"LowEnd", marginX, y + 6, labelWidth);
     createValueLabel(idIntensity, controlX + controlWidth + 8, y + 6, 60);
     y += rowHeight;
 
     createTrackbar(idBody, controlX, y, controlWidth);
-    createLabel(L"Body", marginX, y + 6, labelWidth);
+    controlSlot(idBodyLabel) = createLabel(idBodyLabel, L"Body", marginX, y + 6, labelWidth);
     createValueLabel(idBody, controlX + controlWidth + 8, y + 6, 60);
     y += rowHeight;
 
     createTrackbar(idOutput, controlX, y, controlWidth);
-    createLabel(L"Output", marginX, y + 6, labelWidth);
+    controlSlot(idOutputLabel) = createLabel(idOutputLabel, L"Output", marginX, y + 6, labelWidth);
     createValueLabel(idOutput, controlX + controlWidth + 8, y + 6, 60);
-    y += rowHeight + 10;
+    y += rowHeight;
+
+    // One line stating what the selected model does with the controls above it.
+    // The macOS app puts this in per-slider tooltips, which this window does not
+    // have; without it a greyed slider or a hidden Output row is a puzzle rather
+    // than an explanation.
+    controlSlot(idModelNote) = createLabel(idModelNote, L"",
+                                           marginX, y + 4, clientWidth() - 2 * marginX);
+    y += rowHeight - 6;
 
     controlSlot(idSpatialEnable) = CreateWindowExW(
         0, L"BUTTON", L"Enable spatial processing",
@@ -234,7 +242,7 @@ bool ControlPanel::create(HWND parent, HINSTANCE instance) {
     createTrackbar(idListenerZ, controlX, y, controlWidth);
     createLabel(L"Listener Z", marginX, y + 6, labelWidth);
     createValueLabel(idListenerZ, controlX + controlWidth + 8, y + 6, 60);
-    y += rowHeight + 10;
+    y += rowHeight + 6;
 
     controlSlot(idStartStop) = CreateWindowExW(
         0, L"BUTTON", L"Start",
@@ -267,9 +275,15 @@ bool ControlPanel::create(HWND parent, HINSTANCE instance) {
     return true;
 }
 
-void ControlPanel::createLabel(const wchar_t* text, int x, int y, int width) {
-    CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                    x, y, width, 20, parent_, nullptr, instance_, nullptr);
+HWND ControlPanel::createLabel(const wchar_t* text, int x, int y, int width) {
+    return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                           x, y, width, 20, parent_, nullptr, instance_, nullptr);
+}
+
+HWND ControlPanel::createLabel(ControlId id, const wchar_t* text, int x, int y, int width) {
+    return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                           x, y, width, 20, parent_,
+                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
 }
 
 void ControlPanel::createValueLabel(ControlId id, int x, int y, int width) {
@@ -542,7 +556,53 @@ void ControlPanel::writeSettings(const Settings& settings) {
     SendMessageW(controlSlot(idListenerZ), TBM_SETPOS, TRUE,
                  toSlider(settings.listenerZ, specFor(idListenerZ)));
 
+    applyModelAffordances(settings);
     refreshValueLabels();
+}
+
+void ControlPanel::applyModelAffordances(const Settings& settings) {
+    // The three models use different parts of the panel, and the macOS app spells
+    // out which: Clean runs no tone DSP at all, Circuit is the only model that
+    // applies the output gain, and HighExciter adds harmonics to the dry signal
+    // without an output stage. A control that a model does not use is disabled
+    // (Clean) or hidden (HighExciter's Output row) rather than left looking
+    // adjustable, and the line under them says why.
+    const bool clean = settings.dspModel == dsp_model::clean;
+    const bool exciter = settings.dspModel == dsp_model::high_exciter;
+
+    const auto show = [](HWND handle, bool visible) {
+        if (handle != nullptr) {
+            ShowWindow(handle, visible ? SW_SHOW : SW_HIDE);
+        }
+    };
+    const auto enable = [](HWND handle, bool enabled) {
+        if (handle != nullptr) {
+            EnableWindow(handle, enabled ? TRUE : FALSE);
+        }
+    };
+
+    show(controlHandle(idOutputLabel), !exciter);
+    show(controlHandle(idOutput), !exciter);
+    show(valueSlot(idOutput), !exciter);
+    show(controlHandle(idHarmonicLabel), exciter);
+    show(controlHandle(idExciterOversampling), exciter);
+
+    enable(controlHandle(idIntensity), !clean);
+    enable(controlHandle(idBody), !clean);
+    enable(controlHandle(idOutput), !clean && !exciter);
+    enable(controlHandle(idExciterOversampling), exciter);
+
+    SetWindowTextW(controlHandle(idIntensityLabel),
+                   clean ? L"Bypass" : (exciter ? L"Exciter Drive" : L"LowEnd"));
+    SetWindowTextW(controlHandle(idBodyLabel),
+                   clean ? L"Bypass" : (exciter ? L"Wet Mix" : L"Body"));
+
+    const wchar_t* note = clean
+        ? L"Clean runs no tone DSP: the amount sliders are inactive. Spatial still applies."
+        : exciter
+            ? L"HighExciter keeps the dry signal and applies no output gain, so Output is hidden."
+            : L"Circuit applies the low-end stages and the output gain.";
+    SetWindowTextW(controlHandle(idModelNote), note);
 }
 
 void ControlPanel::setRunning(bool running) {

@@ -28,12 +28,128 @@ user32.MapWindowPoints.argtypes = [wintypes.HWND, wintypes.HWND,
 user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 
 # The breakdown the guide documents. The static count is the one worth pinning:
-# 13 section labels, 6 value readouts, and 1 status line. (The guide used to
-# claim a single static, which undercounted the window by 18 controls - the
-# class totals for combo, trackbar and button were right, so only a check that
-# counts every class catches a wrong total.)
-EXPECTED = {"ComboBox": 4, "msctls_trackbar32": 7, "Button": 3, "Static": 19}
-EXPECTED_TOTAL = 33
+# 12 label rows, the model note that says what the selected model does, 6 value
+# readouts, and 1 status line. (The guide used to claim a single static, which
+# undercounted the window by 18 controls - the class totals for combo, trackbar
+# and button were right, so only a check that counts every class catches a wrong
+# total.)
+EXPECTED = {"ComboBox": 4, "msctls_trackbar32": 7, "Button": 3, "Static": 20}
+EXPECTED_TOTAL = 34
+
+# The controls whose visibility or text follows the selected model, and what the
+# macOS app does with the same engine: HighExciter keeps the dry signal and never
+# applies the output gain, so its Output row is hidden and the exciter's own
+# oversampling control is shown in its place. A slider that does nothing when it
+# is dragged is a defect the user sees, not a documentation problem.
+ID_MODEL = 1003
+ID_EXCITER_OVERSAMPLING = 1004
+ID_INTENSITY = 1005
+ID_BODY = 1006
+ID_OUTPUT = 1007
+ID_OUTPUT_LABEL = 1015
+ID_INTENSITY_LABEL = 1016
+ID_BODY_LABEL = 1017
+ID_HARMONIC_LABEL = 1018
+ID_MODEL_NOTE = 1019
+
+# What each model does with the controls, taken from the macOS app, which drives
+# the same engine: Clean runs no tone DSP (its amount sliders are disabled),
+# Circuit is the only model that applies the output gain, and HighExciter adds
+# harmonics to the dry signal without an output stage (its Output row is hidden
+# and the exciter's own oversampling control takes its place).
+MODEL_STATES = {
+    "Clean": {
+        "visible": {ID_OUTPUT: True, ID_OUTPUT_LABEL: True,
+                    ID_EXCITER_OVERSAMPLING: False, ID_HARMONIC_LABEL: False},
+        "enabled": {ID_INTENSITY: False, ID_BODY: False, ID_OUTPUT: False,
+                    ID_EXCITER_OVERSAMPLING: False},
+        "labels": {ID_INTENSITY_LABEL: "Bypass", ID_BODY_LABEL: "Bypass"},
+        "note": "Clean runs no tone DSP",
+    },
+    "Circuit": {
+        "visible": {ID_OUTPUT: True, ID_OUTPUT_LABEL: True,
+                    ID_EXCITER_OVERSAMPLING: False, ID_HARMONIC_LABEL: False},
+        "enabled": {ID_INTENSITY: True, ID_BODY: True, ID_OUTPUT: True,
+                    ID_EXCITER_OVERSAMPLING: False},
+        "labels": {ID_INTENSITY_LABEL: "LowEnd", ID_BODY_LABEL: "Body"},
+        "note": "Circuit applies the low-end stages",
+    },
+    "HighExciter": {
+        "visible": {ID_OUTPUT: False, ID_OUTPUT_LABEL: False,
+                    ID_EXCITER_OVERSAMPLING: True, ID_HARMONIC_LABEL: True},
+        "enabled": {ID_INTENSITY: True, ID_BODY: True, ID_OUTPUT: False,
+                    ID_EXCITER_OVERSAMPLING: True},
+        "labels": {ID_INTENSITY_LABEL: "Exciter Drive", ID_BODY_LABEL: "Wet Mix"},
+        "note": "HighExciter keeps the dry signal and applies no output gain",
+    },
+}
+# Combo index for each model, in the order the panel adds them.
+MODEL_INDEX = {"Clean": 0, "Circuit": 1, "HighExciter": 2}
+# Which selection each state is asserted under, including a return to Circuit so
+# a switch back is observed and not only the switch away.
+CHECK_ORDER = ("Circuit", "Clean", "HighExciter", "Circuit")
+
+
+def child_by_id(parent, control_id):
+    found = []
+
+    @WNDENUMPROC
+    def callback(hwnd, _):
+        if user32.GetDlgCtrlID(hwnd) == control_id:
+            found.append(hwnd)
+            return False
+        return True
+
+    user32.EnumChildWindows(parent, callback, 0)
+    return found[0] if found else None
+
+
+def window_text(hwnd) -> str:
+    buffer = ctypes.create_unicode_buffer(256)
+    user32.GetWindowTextW(hwnd, buffer, 256)
+    return buffer.value
+
+
+def check_state(window, state_name: str, problems: list) -> None:
+    expected = MODEL_STATES[state_name]
+    for control_id, should_be_visible in expected["visible"].items():
+        hwnd = child_by_id(window, control_id)
+        if hwnd is None:
+            problems.append(f"{state_name}: control {control_id} is missing")
+            continue
+        visible = bool(user32.IsWindowVisible(hwnd))
+        if visible != should_be_visible:
+            problems.append(
+                f"{state_name}: control {control_id} should be "
+                f"{'visible' if should_be_visible else 'hidden'}, it is "
+                f"{'visible' if visible else 'hidden'}")
+    for control_id, should_be_enabled in expected["enabled"].items():
+        hwnd = child_by_id(window, control_id)
+        if hwnd is None:
+            problems.append(f"{state_name}: control {control_id} is missing")
+            continue
+        enabled = bool(user32.IsWindowEnabled(hwnd))
+        if enabled != should_be_enabled:
+            problems.append(
+                f"{state_name}: control {control_id} should be "
+                f"{'enabled' if should_be_enabled else 'disabled'}, it is "
+                f"{'enabled' if enabled else 'disabled'}")
+    for control_id, text in expected["labels"].items():
+        hwnd = child_by_id(window, control_id)
+        actual = window_text(hwnd) if hwnd else ""
+        if actual != text:
+            problems.append(
+                f"{state_name}: control {control_id} reads {actual!r}, expected {text!r}")
+    note = window_text(child_by_id(window, ID_MODEL_NOTE))
+    if expected["note"] not in note:
+        problems.append(f"{state_name}: the model note does not say {expected['note']!r}: {note!r}")
+
+
+def select_model(window, index: int) -> None:
+    """Selects a model the way the combo does: CB_SETCURSEL, then the notification."""
+    combo = child_by_id(window, ID_MODEL)
+    user32.SendMessageW(combo, 0x014E, index, 0)          # CB_SETCURSEL
+    user32.PostMessageW(window, 0x0111, (1 << 16) | ID_MODEL, combo)  # WM_COMMAND, CBN_SELCHANGE
 
 
 def find_window(title: str):
@@ -172,10 +288,30 @@ def main() -> None:
                 print(f"  MISMATCH: {problem}", file=sys.stderr)
             raise SystemExit("The control inventory does not match the documented breakdown.")
 
+        # The model-dependent affordances, checked through a real selection each
+        # time so the switch itself is exercised rather than only the startup
+        # state.
+        for position, state_name in enumerate(CHECK_ORDER):
+            # The first entry is the window's startup state; every later one is
+            # reached by selecting it, so each transition is exercised.
+            if position > 0:
+                select_model(window, MODEL_INDEX[state_name])
+                time.sleep(0.5)
+            check_state(window, state_name, problems)
+
+        if problems:
+            for problem in problems:
+                print(f"  MISMATCH: {problem}", file=sys.stderr)
+            raise SystemExit("The per-model affordances do not follow the selected model.")
+
         print(f"control inventory matches the documented breakdown "
-              f"({len(controls)} controls: 4 combo, 7 trackbar, 3 button, 19 static); "
+              f"({len(controls)} controls: 4 combo, 7 trackbar, 3 button, 20 static); "
               f"every control is sized and inside the {client.right}x{client.bottom} "
               f"client area, and no two interactive controls overlap")
+        print("model affordances follow the selection: Circuit enables the amount "
+              "sliders and the Output row, Clean disables them and says so, and "
+              "HighExciter hides Output and shows Harmonic quality with the sliders "
+              "labelled by what they do for that model")
     finally:
         if process.poll() is None:
             process.terminate()

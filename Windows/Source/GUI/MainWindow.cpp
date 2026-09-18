@@ -199,6 +199,17 @@ void MainWindow::onCommand(int controlId, int notification) {
             refreshDeviceLists();
             return;
         case idModel:
+            // The controls a model does not use are hidden rather than left
+            // looking adjustable (the Output gain is the exciter's case), so the
+            // panel is refreshed with the model that was just selected - before
+            // the settings are read, so what is sent to the engine is read from
+            // the controls as they are now.
+            panel_.applyModelAffordances(panel_.readSettings());
+            if (running_ && engine_ != nullptr) {
+                engine_->requestSettings(panel_.readSettings());
+            }
+            updateStatusText();
+            return;
         case idExciterOversampling:
         case idSpatialEnable:
             if (running_ && engine_ != nullptr) {
