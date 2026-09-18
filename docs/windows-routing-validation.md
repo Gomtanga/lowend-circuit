@@ -41,8 +41,8 @@ Windows 기본 재생 장치 또는 테스트 앱 출력
 | 브랜치 | `feature/windows-virtual-routing` (PR #24 `feature/windows-port` head `400fa25` 기반) |
 | PR #24 실행 시점 재확인 | 2026-09-15: `state=open`, `merged=false`, `draft=false`, head `400fa2574472907294b834a97a0985e6cb0f5568`, base `main`(`52f745421cf17e5f070c690263ec8d79f51ff3ae`), `mergeable_state=clean`. 따라서 후속 PR의 base는 `feature/windows-port`입니다 |
 | 이정표 시작 시점의 HEAD | `400fa2574472907294b834a97a0985e6cb0f5568` |
-| 코드 검증 대상 commit | `6d6eefa` — 이 커밋에서 Windows(3잡)·Core(4잡)·macOS CI가 모두 success입니다. 그 뒤 **C++ 변경은 `a06240f` 하나**입니다: `--self-test`의 충돌 fixture를 실제 머신에서 복사한 endpoint id 대신 합성 id로 바꾸고 `AGENTS.md`에서 실제 절대 경로를 지운 위생 커밋이며 **동작은 바뀌지 않습니다**(fixture는 모양만 유지). `2d0517c`는 검사 스크립트(`scripts/check-windows-route-stability.py`)만 추가했고 나머지는 문서입니다. 이 문서가 마지막으로 CI를 확인한 commit은 `66468b9`이고 거기서 16/16 check success였습니다. 이 문서를 고치는 commit 자체가 그 뒤에 오는 문서 커밋이므로, 위 문장은 "그 뒤 커밋에 C++ 변경이 없다"는 뜻을 유지합니다(확인: `git log --oneline 6d6eefa..HEAD -- Windows/Source`). 브랜치 tip의 현재 CI는 PR #25의 checks에서 확인합니다 |
-| 이 표의 실기기 측정을 만든 바이너리 | 이 브랜치에서 빌드한 `build/win-cli/Release/lowend_windows.exe`(CLI)와 `build/win-cli/Release/lowend_gui.exe`(GUI 행), 그리고 `build/win-routing-no-ui/Release/lowend_windows.exe`(no-UI 행)입니다. 측정은 `296efd3` 이후 빌드로 시작했고, **마지막 C++ 변경(`a06240f`) 이후에 세 바이너리가 모두 다시 만들어졌습니다** — 파일 시각이 CLI·GUI 02:05:17, no-UI 02:06:09로 마지막 C++ 소스 시각 02:05:13보다 새것이고, `SelfTest.obj`도 소스보다 새것임을 확인한 다음 `--self-test`를 재실행해 통과시켰습니다. GUI 소스(`MainWindow.obj`, 09-16)는 그 뒤 바뀌지 않았습니다. 그 뒤 커밋은 문서뿐이므로 이 표의 숫자는 현재 C++ 소스와 같은 동작의 바이너리에서 나온 것입니다. "Release"라는 디렉터리 이름을 근거로 삼지 않습니다 |
+| 코드 검증 대상 commit | `6d6eefa` — 이 커밋에서 Windows(3잡)·Core(4잡)·macOS CI가 모두 success입니다. `2d0517c`는 검사 스크립트(`scripts/check-windows-route-stability.py`)만 추가했습니다. **`6d6eefa` 이후의 C++ 변경은 세 개**입니다: `a06240f`(위생 — fixture id를 합성값으로 바꾸고 `AGENTS.md`에서 실제 경로를 지움, 동작 불변), `3f3badf`(순환 짝 판정을 컨테이너가 아니라 **장치 인스턴스**로 — 4절의 결함 행), `57a7001`(GUI 시작 안내가 **물리 출력**을 가리킴 — 4절의 결함 행). 두 동작 변경은 각각 회귀 검사와 주입 시험으로 확인했습니다. **마지막으로 CI를 확인한 commit은 `a93c1b1`이고 거기서 16/16 check success**입니다(`8abb973`도 16/16). 이 문서를 고치는 commit은 그 뒤에 오는 **문서 전용** 커밋이며, 그 CI도 push 후 확인합니다(확인: `git log --oneline 6d6eefa..HEAD -- Windows/Source`). PR #24가 아직 열려 있으므로 tip의 공식 상태는 후속 PR #25의 checks에서 확인합니다 |
+| 이 표의 실기기 측정을 만든 바이너리 | 이 브랜치에서 빌드한 `build/win-cli/Release/lowend_windows.exe`(CLI 행)와 `build/win-cli/Release/lowend_gui.exe`(GUI 행), `build/win-routing-no-ui/Release/lowend_windows.exe`(no-UI 행), `build/win-cli/Debug/lowend_windows.exe`(Debug 행)입니다. 마지막 C++ 변경은 `57a7001`(GUI 시작 안내, 소스 2026-09-18 15:38:14)이고, 2026-09-18 16:15에 **Debug CLI·GUI와 no-UI Release를 현재 소스로 다시 빌드**했습니다. Release CLI(14:09:44)는 엔진 소스 `RouteDiagnosis.cpp`(14:09:41)보다, Release GUI(15:38:16)는 `ControlPanel.cpp`(15:38:14)보다 새것입니다. 각 빌드는 소스보다 새 바이너리·`.obj`를 만들었음을 파일 시각으로 확인했고, 그 CLI 바이너리로 `--self-test`를 다시 실행해 **exit 0**(`All offline checks passed.`)을 확인했습니다. "Release"라는 디렉터리 이름을 근거로 삼지 않습니다 |
 | 이 저장소의 빌드 산출물 | `build/win-cli/Release/lowend_windows.exe`, `build/win-cli/Debug/lowend_windows.exe`, `build/win-cli/Release/lowend_gui.exe`, `build/win-routing-no-ui/Release/lowend_windows.exe` |
 
 ### 이 워크스테이션의 오디오 엔드포인트 (검증 시점)
@@ -87,8 +87,7 @@ VB-CABLE(VB-Audio Virtual Cable, `VBCABLE_Driver_Pack45`)은 **사용자가 2026
 
 **가상 케이블 설치됨(2026-09-18).** 사용자가 VB-CABLE을 설치한 뒤 `--list-devices`는 `CABLE Input`
 / `CABLE In 16ch` ↔ `CABLE Output`을 한 장치로 묶어 보고합니다. 케이블을 지나는 **핵심 경로는
-실행 검증됐습니다**(3절의 케이블 경로 행). 케이블 경로의 **30분 연속 검증은 2회 실행되어 1차 실패·
-2차 통과**했고(사유·기전·두 표본은 4절 FAILED), **GUI의 케이블 라벨과 시작 안내 분기도 실제 창에서
+실행 검증됐습니다**(3절의 케이블 경로 행). 케이블 경로의 **30분 연속 검증은 3회 실행되어 1차 실패, 2·3차 통과**했고(사유·기전·세 표본은 4절 FAILED), **GUI의 케이블 라벨과 시작 안내 분기도 실제 창에서
 관측**했습니다(3절). 재개방 가드의 실기기 충돌 상황 등 남은 항목은 SKIPPED 표에 있습니다.
 
 ## 3. 검증 결과
@@ -97,9 +96,9 @@ VB-CABLE(VB-Audio Virtual Cable, `VBCABLE_Driver_Pack45`)은 **사용자가 2026
 
 | 항목 | 명령 | 관찰 |
 |---|---|---|
-| Release 빌드 + 오프라인 검사 | `scripts\build-windows-cli.bat Release` | exit 0: `ctest` 1/1, CLI 인자 회귀 33건(그중 25건은 거부 사유 문구까지), UI 비종속 검사(엔진 13개 소스), 케이블 검사기 self-check |
-| Debug 빌드 | `scripts\build-windows-cli.bat Debug` | exit 0, 동일 검사 통과 |
-| GUI 비활성 빌드 | `cmake -S Windows -B build/win-routing-no-ui -DLOWEND_WINDOWS_BUILD_GUI=OFF -DLOWEND_WINDOWS_BUILD_TESTING=ON` + `cmake --build` + `ctest` | 구성·빌드·ctest 통과(`NO_UI_BUILD_OK`) |
+| Release 빌드 + 오프라인 검사 | `scripts\build-windows-cli.bat Release` | exit 0: `ctest` 1/1, CLI 인자 회귀 33건(그중 25건은 거부 사유 문구까지), UI 비종속 검사(엔진 13개 소스), 케이블 검사기 self-check. **2026-09-18 재실행(현재 소스)**: 같은 줄들로 exit 0, `lowend_windows.exe`·`lowend_gui.exe` 모두 각자의 소스보다 새것 |
+| Debug 빌드 | `scripts\build-windows-cli.bat Debug` | exit 0, 동일 검사 통과. **2026-09-18 재빌드**: 그 전 Debug 바이너리(02:05)는 마지막 C++ 변경(14:07~15:38)보다 오래돼 있어 다시 만들었고(엔진·CLI·GUI 소스 재컴파일) 새 바이너리로 같은 검사가 exit 0 |
+| GUI 비활성 빌드 | `cmake -S Windows -B build/win-routing-no-ui -DLOWEND_WINDOWS_BUILD_GUI=OFF -DLOWEND_WINDOWS_BUILD_TESTING=ON` + `cmake --build … --config Release --parallel` + `ctest --test-dir build/win-routing-no-ui -C Release --output-on-failure` (VS 동봉 cmake 3.31.6-msvc6 경로로 실행) | 구성·빌드·ctest 통과: 엔진·CLI 소스가 이 구성에서 다시 컴파일되고 `lowend_windows_self_test` **1/1 Passed**. **2026-09-18 재실행(현재 소스)** |
 | 오프라인 검사 (신규 포함) | `lowend_windows.exe --self-test` | **23개 검사** 전부 통과(실행 출력의 섹션 배너를 세어 확인). 신규 2개: `routing: pass-through feedback rule`, `routing: endpoint selection and capture mode` |
 | 장치 열거에 버스/케이블 정보 | `lowend_windows.exe --list-devices` | 각 행에 `bus=`(USB/HDAUDIO/ROOT) 추가, 마지막에 `Virtual cables:` 절 |
 | `--list-devices`의 케이블 짝 (설치 후) | `lowend_windows.exe --list-devices` | `CABLE In 16ch → CABLE Output`, `CABLE Input → CABLE Output` **두 줄만** 나옵니다(VB-CABLE 인스턴스 `ROOT\MEDIA\0001`의 재생 2개 × 녹음 1개). WO Mic(`ROOT\MEDIA\0000`)는 짝으로 묶이지 않고, 아래 `Software-bus endpoints NOT paired as one device` 절에 "다른 장치 인스턴스라 식별 불가"로 따로 보고됩니다 — 즉 `CABLE Input → 마이크(WO Mic)` 같은 거짓 짝이 사라졌습니다(아래 결함 행) |
@@ -127,7 +126,7 @@ VB-CABLE(VB-Audio Virtual Cable, `VBCABLE_Driver_Pack45`)은 **사용자가 2026
 | **3상태(OFF/바이패스/Circuit) 방법을 실제 라우트에서 실행** (케이블 경로 아님) | 캡처 = ZH3 loopback(48 kHz) → 렌더 = Odyssey G5, 톤은 ZH3로. `--monitor 6 --capture-device <Odyssey>` + `--dump-wav`, 엔진 유/무, `--play-tone 3` | **OFF**: tone이 케이블 대신 ZH3로 갔고(이 실행은 케이블 대신 loopback 경로), Odyssey loopback은 **프레임 0** — 엔진이 없으면 목적지에 아무것도 도달하지 않음. **바이패스**(clean/0/0/0/spatial off): 228,000 프레임, peak **0.999054** (L 0.962952, R 0.999054), **440.0 Hz**. **Circuit**(기본): 223,680 프레임, peak **0.554871**, 440.0 Hz, 바이패스의 **0.555×**. 즉 이 방법(신호원→엔진→목적지 loopback 관측)이 실제 장치에서 동작하고, 두 채널·피치·DSP 감쇠가 관측됨 |
 | 3상태 실행에서 드러난 판정 기준 결함 → 수정 | 위 실행의 레벨 | 바이패스 peak 0.999는 소스 진폭 0.40의 **2.5배**였습니다. 같은 엔진 출력이 어떤 endpoint의 loopback에서는 0.40으로, 다른 endpoint에서는 1.0으로 읽힙니다(엔드포인트 볼륨·드라이버 효과가 render 스트림과 loopback 탭 사이에 있음). 즉 "바이패스는 소스의 0.5~1.05배"라는 절대 기준은 **정상 경로를 실패로 판정**합니다. 검사기는 이제 엔진을 끈 상태에서 같은 톤을 **목적지 endpoint에 직접** 보내 그 loopback으로 기준값을 먼저 측정하고, 바이패스를 그 기준의 0.50~1.15배로 판정합니다. 기준을 얻지 못하면 상대 판정을 하지 않고 중단합니다 |
 | 위 수정의 자체 검증 | `--self-check` | 기준 대비 0.75배 바이패스는 수용, **2.5배**(증폭·중복 경로)와 **0.25배**(무음 감쇠)는 거부, 감쇠 없는 Circuit은 거부 |
-| **GitHub CI (푸시된 모든 커밋)** | push `814f29b` … `9d08c8f` → Actions | 현재 팁 `9d08c8f`에서 **16/16 job success**입니다(Windows Debug·Release·no-UI 3잡, Core ubuntu·windows × Debug·Release 4잡, macOS — 워크플로마다 PR용·푸시용 2회 실행되어 총 6개 워크플로). 이번에는 **자격 증명으로 잡 로그까지 읽어 단계별 자기 보고를 확인**했습니다: `windows-cli` 잡에서 CLI 검사(33 거부 사례)와 **GUI 컨트롤 목록·슬라이더 경로는 VERIFIED**, **새로 고침 선택 유지·선택 저장/복원 두 단계는 러너에 엔드포인트가 없어 스스로 `SKIPPED`**(실패 아님, 통과로도 세지 않음)로 보고했습니다. `2d0517c`, `a0e1ccb`, `8de1275`, `66468b9`도 16/16 — 이 브랜치의 푸시된 커밋은 모두 green입니다 |
+| **GitHub CI (푸시된 모든 커밋)** | push `814f29b` … `9d08c8f` → Actions | 현재 팁(마지막으로 확인한 `a93c1b1`)에서 **16/16 job success**입니다(Windows Debug·Release·no-UI 3잡, Core ubuntu·windows × Debug·Release 4잡, macOS — 워크플로마다 PR용·푸시용 2회 실행되어 총 6개 워크플로). 이번에는 **자격 증명으로 잡 로그까지 읽어 단계별 자기 보고를 확인**했습니다: `windows-cli` 잡에서 CLI 검사(33 거부 사례)와 **GUI 컨트롤 목록·슬라이더 경로는 VERIFIED**, **새로 고침 선택 유지·선택 저장/복원 두 단계는 러너에 엔드포인트가 없어 스스로 `SKIPPED`**(실패 아님, 통과로도 세지 않음)로 보고했습니다. `2d0517c`, `a0e1ccb`, `8de1275`, `66468b9`, `8abb973`, `a93c1b1`도 16/16 — 이 브랜치의 푸시된 커밋은 모두 green입니다(마지막으로 확인한 팁 `a93c1b1`) |
 | CI에서의 첫 시도 실패 → 수정 | push `254e8c2`, `d6d126c` → Actions | Windows 3개 잡이 모두 `check-windows-cli.py` 단계에서 실패했습니다(빌드·ctest는 통과). 원인은 검사가 **엔드포인트가 없는 러너**를 가정하지 않은 것 — `--route-check`가 없는 *render* id를 지목한다고 단정했지만, 엔드포인트가 하나도 없는 머신에서는 capture 쪽 기본 장치가 먼저 해석에 실패합니다. 엔드포인트 유무와 무관하게 같은 답을 내는 capture id 기준으로 바꾸고, 러너에 엔드포인트가 없을 때의 계약도 함께 검증하도록 고쳤습니다 |
 | GUI 선택 저장 결함 (자체 발견·수정) | `check-windows-gui-persistence.py` 4단계 | 한쪽 콤보를 바꾸면 **저장 파일의 두 줄을 모두 다시 썼고**, 선택이 없는 쪽은 빈 값으로 기록되었습니다. 그러면 사용자가 고른 id가 지워지고 다음 실행에서 첫 목록 항목이 선택되어 **사용자가 고른 적 없는 endpoint로 시작**합니다(빈 콤보가 막으려던 바로 그 대체가 한 실행 뒤에 발생). 이제 선택이 없는 쪽은 이전 값을 유지합니다. 수정 전 빌드에서 새 단계가 `the file now holds ''`로 실패하고, 수정 후 통과하는 것을 확인했습니다 |
 | GUI 시작 안내 결함 (자체 발견·수정) | 실행 중인 창의 상태 컨트롤을 직접 읽음 | 창을 열면 상태줄이 `Idle. Choose an output endpoint, then Start.`만 보였습니다. 케이블 안내와 "LowEnd는 Windows 기본 출력을 바꾸지 않는다 + 되돌리는 경로"는 `updateStatusText()`가 만들지만, 시작 시에는 그 함수를 부르지 않고 짧은 리터럴을 설정하고 있었습니다. 이제 `create()`가 장치 목록을 채운 뒤 `updateStatusText()`를 호출하고, GUI end-to-end 검사가 시작 시점에 그 안내(`virtual cable`, `Settings > System > Sound > Output`)가 화면에 있는지 확인합니다. **옛 시작 줄을 주입하면 검사가 실패**하는 것을 확인했습니다 |
@@ -163,17 +162,19 @@ VB-CABLE(VB-Audio Virtual Cable, `VBCABLE_Driver_Pack45`)은 **사용자가 2026
 | 위 실패의 기전 | 엔진 코드: `runCapture()`가 `isDiscontinuity()`를 보면 `lc_ring_buffer_request_discard()`를 걸고, `runRender()`가 그 요청을 소비해 **백로그를 버리고 DSP 상태를 리셋**합니다(문서화된 정책: 끊긴 뒤의 오래된 오디오를 이어 붙이지 않음). 버린 백로그만큼 렌더가 무음을 쓰고, 그 무음은 링이 정직하게 underrun으로 셉니다. 같은 정책이 캡처 스트림 재개방에도 적용됩니다 | 이 실행의 +6,528 샘플은 그 재프라이밍 구간이며, **무음을 숨기거나 이전 샘플을 재생해서 없애지 않습니다**(이정표가 금지). 장치 오류·드롭·정체는 없었습니다 |
 
 **정리**: 이 실패는 환경 부재가 아니라 실제로 관찰된 결과이며, 회피하지 않고 위에 그대로 기록합니다.
-같은 고정 기준으로 **두 번째 표본**을 실행했고, 그 결과는 다음과 같습니다.
+같은 고정 기준으로 **두 번째·세 번째 표본**을 실행했고, 그 결과는 다음과 같습니다.
 
 | 항목 | 명령 | 관찰 |
 |---|---|---|
 | **케이블 경로 30분 연속 (2차 실행, 통과)** | 같은 명령을 같은 endpoint로 재실행 | **exit 0 · `route stability checks passed`**, 벽시계 1,882.60초. 사이클 10/10 정상(각 8.0초, dropped 0·장치 오류 0/0·Resyncs 1). 연속 구간 30.0분: frames **86,353,536**, dropped **0**, 장치 오류 **0/0**, **Resyncs 1**(실행 중 재개방·불연속 없음), **underrun 5,952 고정**(프라이밍 이후 증가 **0**), buffer 0..5,568(1/4분위 평균 2,286 → 4/4분위 3,365, 기울기 +0.83/s) |
+| **케이블 경로 30분 연속 (3차 실행, 통과)** | 같은 명령을 같은 endpoint로 재실행 | **exit 0 · `route stability checks passed`**, 벽시계 1,881.58초. 사이클 10/10 정상(각 8.0초, frames 293,760~393,024, dropped 0·장치 오류 0/0·Resyncs 1, underrun 4,224~5,952 = 프라이밍). 연속 구간 30.0분: frames **86,341,920**, dropped **0**, 장치 오류 **0/0**, **Resyncs 1**(실행 중 재개방·불연속 없음), **underrun 5,952 고정**(프라이밍 이후 증가 **0**), buffer 960..5,184(1/4분위 평균 2,415 → 4/4분위 3,749, 기울기 +0.99/s, 1,799초 구간) |
 
-**두 표본의 판정**: 1차는 실행 중 캡처 스트림 불연속 1회로 기준을 넘겼고(기전은 위에 기록), 2차는 같은
-경로·같은 기준에서 30분 내내 증가 없이 통과했습니다. 즉 이 기준은 **재현되지 않는 간헐적 이벤트**에
-반응한 것이며, **두 실행을 모두 기록**합니다 — 2차 통과로 1차 실패를 지우지 않습니다. 케이블 경로의
-안정성은 "2회 중 1회 실패, 실패 기전은 문서화됨"으로 남기고, "항상 안정"이라고 주장하지 않습니다.
-3차 실행은 하지 않았습니다(같은 실패에 대한 근거 없는 반복을 피하기 위해).
+**세 표본의 판정**: 1차는 실행 중 캡처 스트림 불연속 1회로 기준을 넘겼고(기전은 위에 기록), 2·3차는
+같은 경로·같은 기준에서 30분 내내 프라이밍 이후 underrun 증가 **0**으로 통과했습니다(둘 다 `Resyncs 1` =
+시작 시 1회뿐, 실행 중 불연속 없음). 3차 표본은 "그 실패가 얼마나 자주 나오는가"를 한 표본 더 관찰하려고
+같은 명령을 재실행한 것이며, **세 실행을 모두 기록**합니다 — 통과가 실패를 지우지 않습니다. 케이블 경로의
+안정성은 **"3회 중 1회 실패(그 1회는 캡처 스트림 재동기 1회), 실패 기전은 문서화됨"**으로 남기고,
+**"항상 안정"이라고 주장하지 않습니다**.
 
 ### SKIPPED (관찰하지 못했으므로 성공의 근거가 아님)
 
@@ -317,12 +318,12 @@ loopback 탭 사이에 있어서, 같은 출력이 어떤 endpoint에서는 0.40
   규칙 자체(모든 캡처 endpoint가 Network일 때 note)는 `--self-test`의 합성 endpoint로 검증되어
   있지만, 실기기에서 그 분기를 관찰한 적은 없습니다.
 * **Bluetooth·HDMI·독점 모드·DRM**: 이번 이정표의 범위가 아니며 검증하지 않았습니다.
-* **CI**: 이 브랜치의 모든 커밋이 푸시되었고, 마지막으로 확인한 팁 `9d08c8f`에서 **Windows CI(Debug·Release·no-UI), Core CI(ubuntu·windows × Debug·Release), macOS Native and Core CI가 모두 success**(16/16 job, 워크플로마다 PR용·푸시용 2회 실행)입니다(`a0e1ccb`, `2d0517c`, `8de1275`, `66468b9`도 같음). 이번에는 **자격 증명으로 잡 로그까지 읽어 각 단계의 자기 보고를 확인**했습니다: `windows-cli` 잡의 **GUI 컨트롤 목록·슬라이더 경로 단계는 VERIFIED**로 통과했고, **새로 고침 선택 유지·선택 저장/복원 두 단계는 러너에 엔드포인트가 없어 스스로 `SKIPPED`**로 보고했습니다(실패가 아니지만 통과도 아닙니다). 러너에 오디오 장치가 없다는 것과 데스크톱 제약은 위 SKIPPED 표의 항목을 대체하지 않습니다. **이 항목은 하드웨어 검증이 아니라, 하드웨어가 필요 없는 계층이 tip에서 여전히 깨지지 않았다는 증거입니다.**
+* **CI**: 이 브랜치의 모든 커밋이 푸시되었고, 마지막으로 확인한 팁 **`a93c1b1`**에서 **Windows CI(Debug·Release·no-UI), Core CI(ubuntu·windows × Debug·Release), macOS Native and Core CI가 모두 success**(16/16 job, 워크플로마다 PR용·푸시용 2회 실행)입니다(`a0e1ccb`, `2d0517c`, `8de1275`, `66468b9`, `8abb973`도 같음). 이번에는 **자격 증명으로 잡 로그까지 읽어 각 단계의 자기 보고를 확인**했습니다: `windows-cli` 잡의 **GUI 컨트롤 목록·슬라이더 경로 단계는 VERIFIED**로 통과했고, **새로 고침 선택 유지·선택 저장/복원 두 단계는 러너에 엔드포인트가 없어 스스로 `SKIPPED`**로 보고했습니다(실패가 아니지만 통과도 아닙니다). 러너에 오디오 장치가 없다는 것과 데스크톱 제약은 위 SKIPPED 표의 항목을 대체하지 않습니다. **이 항목은 하드웨어 검증이 아니라, 하드웨어가 필요 없는 계층이 tip에서 여전히 깨지지 않았다는 증거입니다.**
 * **`--list-devices`/`--route-check`와 엔드포인트가 없는 머신**: 러너처럼 장치가 하나도 없는 환경에서 두 명령은 열거 실패 또는 "기본 장치를 찾을 수 없음"을 보고합니다. 그 계약도 CI에서 검증되지만, "장치가 있는 머신에서의 경로 판정"과는 다른 경로입니다.
 * **3상태 방법을 돌린 ad-hoc 실행의 underrun**: 그 실행은 같은 endpoint에서 톤 재생 + loopback
   캡처 + 세 번째 관측 스트림이 동시에 도는 구성이었고, 바이패스 712 ms·Circuit 6,256 ms의
   underrun을 보고했습니다. 이는 **그 임시 구성의 관측**이며 이정표의 안정성 주장과 무관합니다.
-  안정성은 케이블 경로에서 별도로 측정하며, 아직 측정하지 않았습니다(SKIPPED).
+  안정성은 케이블 경로에서 따로 측정했습니다(4절 FAILED의 세 표본: 1차 실패, 2·3차 통과).
 * **그 실행의 절대 레벨**: 목적지(Odyssey G5)에 대해 톤을 직접 재생해 기준값을 측정하는 것은
   모니터로 소리를 내는 조작이라 동의 범위 밖이어서 하지 않았습니다. 따라서 그 실행의 레벨을
   소스 진폭 0.40과 직접 비교할 수 없고, 비교하지 않았습니다. 케이블 경로 검사는 기준값을 스스로
@@ -369,9 +370,10 @@ endpoint id·컨테이너 id·개인 경로는 저장소에 넣지 않았습니�
 ## 9. 남은 작업
 
 1. **후속 Draft PR: #25** — <https://github.com/Gomtanga/lowend-circuit/pull/25>
-   (base `feature/windows-port` `400fa25`, head `feature/windows-virtual-routing`, draft, 이 브랜치의 모든 커밋에서 CI green). 이 문서를 마지막으로 갱신한 commit의 **부모가 `66468b9`**(32번째 커밋, CI 16/16)이고 문서 수정 자체가 33번째 커밋입니다. PR #24가 병합되면 base를 `main`으로 바꿉니다.
+   (base `feature/windows-port` `400fa25`, head `feature/windows-virtual-routing`, draft, 이 브랜치의 모든 커밋에서 CI green). 이 문서를 마지막으로 갱신한 commit의 **부모가 `a93c1b1`**(CI 16/16)이고 문서 수정 자체가 그 뒤 커밋입니다. PR #24가 병합되면 base를 `main`으로 바꿉니다.
    **병합은 하지 않았습니다.**
-2. **VB-CABLE 설치 동의 → 재부팅 → 5절의 3~9번 실행**(경로 검증, 30분 안정성, 재시작 10회,
-   3상태 OFF/바이패스/Circuit 비교). 이 단계는 외부 드라이버 설치·재부팅·기본 출력 변경·테스트 톤
-   재생을 포함하므로 **사용자 동의 없이는 진행하지 않습니다.**
-3. 사람의 청취 평가(별도, 이 문서의 주장 범위 밖).
+2. **사용자 쪽에 남은 조작(도구가 대신 실행하지 않음)**: Windows 기본 출력을 케이블 재생측으로
+   바꾸는 설정과, Stop/종료 뒤 Windows 출력을 물리 장치로 되돌리는 절차입니다. 안내는
+   `docs/windows.md`에 있고, 앱은 기본 장치를 자동으로 바꾸거나 복구하지 않습니다.
+3. **관찰하지 못한 항목**: 사람의 청취 평가, 물리 USB 탈착·Bluetooth 실행, 재개방 시점의 순환 충돌
+   실기기 확인 — SKIPPED 표에 남아 있습니다.
