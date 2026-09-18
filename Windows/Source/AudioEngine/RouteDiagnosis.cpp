@@ -50,12 +50,32 @@ EndpointIdentity identityOf(const DeviceInfo& device) {
     EndpointIdentity identity;
     identity.id = device.id;
     identity.containerId = device.containerId;
+    identity.deviceInstance = device.deviceInstance;
     identity.enumeratorName = device.enumeratorName;
     return identity;
 }
 
+// Windows gives every root-enumerated (software) device the same zero container
+// ({00000000-0000-0000-FFFF-FFFFFFFFFFFF}), so a container can be present and
+// still carry no information. Treated as missing rather than as a value that
+// matches every other software device.
+bool isZeroContainerId(const std::string& containerId) {
+    return containerId.empty() ||
+           equalsNoCase(containerId, "{00000000-0000-0000-0000-000000000000}") ||
+           equalsNoCase(containerId, "{00000000-0000-0000-FFFF-FFFFFFFFFFFF}");
+}
+
 bool isSameDeviceInstance(const DeviceInfo& a, const DeviceInfo& b) {
-    return !a.containerId.empty() && a.containerId == b.containerId;
+    // The PnP instance is what identifies the device: one instance can offer
+    // several endpoints (VB-CABLE's 2-channel and 16-channel inputs share one),
+    // and two instances never share a path.
+    if (!a.deviceInstance.empty() && a.deviceInstance == b.deviceInstance) {
+        return true;
+    }
+    // The container groups the functions of one physical device (a USB headset's
+    // microphone and speakers), which is why it is only read when it is a real
+    // value. Without an instance on either side it is all an older driver offers.
+    return !isZeroContainerId(a.containerId) && a.containerId == b.containerId;
 }
 
 // A device instance is a pass-through when both of its sides are on a software
@@ -92,21 +112,28 @@ bool isVirtualEnumerator(const std::string& enumeratorName) {
 }
 
 uint64_t virtualPassThroughKey(const EndpointIdentity& identity) {
-    if (identity.containerId.empty() || !isVirtualEnumerator(identity.enumeratorName)) {
+    // The device instance identifies the software device; the container is the
+    // fallback for a driver whose instance property is not readable, and only
+    // when it is a real value rather than the zero container.
+    const std::string& deviceKey =
+        !identity.deviceInstance.empty()
+            ? identity.deviceInstance
+            : (isZeroContainerId(identity.containerId) ? std::string() : identity.containerId);
+    if (deviceKey.empty() || !isVirtualEnumerator(identity.enumeratorName)) {
         return 0;
     }
-    // FNV-1a over the device instance, domain-separated from the endpoint-id hash
+    // FNV-1a over the device identity, domain-separated from the endpoint-id hash
     // in RecoveryPolicy.h so the two key spaces cannot be confused. The same
     // reasoning as there applies to a false positive: the safe direction is
     // refusing the route, never running a loop.
     constexpr uint64_t offsetBasis = 14695981039346656037ull;
     constexpr uint64_t prime = 1099511628211ull;
     uint64_t hash = offsetBasis;
-    for (unsigned char byte : identity.containerId) {
+    for (unsigned char byte : deviceKey) {
         hash ^= static_cast<uint64_t>(byte);
         hash *= prime;
     }
-    hash ^= 0x1full;  // separator: container, then enumerator
+    hash ^= 0x1full;  // separator: device identity, then enumerator
     hash *= prime;
     for (unsigned char byte : identity.enumeratorName) {
         hash ^= static_cast<uint64_t>(byte);
@@ -249,9 +276,12 @@ RouteDiagnosis diagnoseRoute(const RouteSelection& selection,
     } else if (passThroughKeysCollide(virtualPassThroughKey(identityOf(*capture)),
                                       virtualPassThroughKey(identityOf(*render)))) {
         diagnosis.issue = RouteIssue::virtualPassThroughPair;
+        const std::string& deviceIdentity = !capture->deviceInstance.empty()
+                                                ? capture->deviceInstance
+                                                : capture->containerId;
         diagnosis.cause = "capture (" + describeDevice(*capture) + ") and render (" +
-            describeDevice(*render) + ") are the two sides of one virtual device (container " +
-            capture->containerId + ", bus " + capture->enumeratorName +
+            describeDevice(*render) + ") are the two sides of one virtual device (" +
+            deviceIdentity + ", bus " + capture->enumeratorName +
             "); everything rendered to its playback side comes back on its recording side, so the"
             " engine would process its own output forever";
         diagnosis.nextAction =

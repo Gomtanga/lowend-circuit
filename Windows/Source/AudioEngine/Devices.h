@@ -26,7 +26,12 @@ struct DeviceInfo {
     uint32_t mixSampleRate = 0;
     uint32_t mixBitsPerSample = 0;
     std::string formFactor;        // "Speakers", "Headphones", "Bluetooth", ...
-    std::string containerId;       // stable id shared by one physical device
+    std::string containerId;       // id shared by one physical device; the zero
+                                   // container ({00000000-0000-0000-FFFF-FFFFFFFFFFFF})
+                                   // on root-enumerated devices, which says nothing
+    std::string deviceInstance;    // PnP instance behind the endpoint ("ROOT\MEDIA\0001",
+                                   // "USB\VID_..."), which is what tells two software
+                                   // devices apart — the container cannot
     std::string enumeratorName;    // bus the device arrived on: "USB", "ROOT", ...
 };
 
@@ -35,12 +40,15 @@ struct DeviceInfo {
 //
 // The endpoint id alone cannot answer "are these two endpoints one signal path?",
 // because a virtual audio cable's playback and recording sides have different
-// ids while being one device instance. containerId is the id Windows assigns to
-// the device behind the endpoint, and enumeratorName says which bus it arrived
-// on — see isVirtualEnumerator() in RouteDiagnosis.h.
+// ids while being one device instance. deviceInstance is the PnP instance behind
+// the endpoint and containerId the id Windows assigns to the physical device it
+// belongs to; enumeratorName says which bus it arrived on — see
+// isVirtualEnumerator() in RouteDiagnosis.h. A root-enumerated device gets the
+// zero container, so the container alone cannot tell two virtual devices apart.
 struct EndpointIdentity {
     std::string id;
     std::string containerId;
+    std::string deviceInstance;
     std::string enumeratorName;
 };
 

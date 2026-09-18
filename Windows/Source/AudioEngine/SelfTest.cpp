@@ -959,6 +959,7 @@ EndpointIdentity identityOfEndpoint(const DeviceInfo& device) {
     EndpointIdentity identity;
     identity.id = device.id;
     identity.containerId = device.containerId;
+    identity.deviceInstance = device.deviceInstance;
     identity.enumeratorName = device.enumeratorName;
     return identity;
 }
@@ -1017,6 +1018,28 @@ void checkRouteFeedbackRule() {
     check(!passThroughKeysCollide(virtualPassThroughKey(identityOfEndpoint(cablePlayback)),
                                   virtualPassThroughKey(identityOfEndpoint(otherVirtual))),
           "two different virtual devices do not collide");
+    // What Windows actually reports on this class of device: every root-enumerated
+    // device carries the same zero container, so comparing containers would make
+    // one virtual cable and every other software device (a virtual microphone, for
+    // example) one device — listing pairs that are not a signal path and refusing
+    // routes that are safe. The device instance tells them apart.
+    const std::string zeroContainer = "{00000000-0000-0000-FFFF-FFFFFFFFFFFF}";
+    DeviceInfo zeroCablePlayback = cablePlayback;
+    zeroCablePlayback.containerId = zeroContainer;
+    zeroCablePlayback.deviceInstance = "ROOT\\MEDIA\\0001";
+    DeviceInfo zeroVirtualMic = syntheticEndpoint(
+        "{0.0.1.00000000}.{88888888-8888-8888-8888-888888888888}", "Virtual microphone",
+        zeroContainer.c_str(), "ROOT", false, "Microphone");
+    zeroVirtualMic.deviceInstance = "ROOT\\MEDIA\\0000";
+    check(isUnidentifiedSoftwarePair(zeroVirtualMic, zeroCablePlayback),
+          "two software devices that share the zero container stay unidentified");
+    check(!passThroughKeysCollide(virtualPassThroughKey(identityOfEndpoint(zeroCablePlayback)),
+                                  virtualPassThroughKey(identityOfEndpoint(zeroVirtualMic))),
+          "a cable and an unrelated software device do not collide through the zero container");
+    const std::vector<VirtualCable> zeroPairs =
+        findVirtualCables({ zeroCablePlayback }, { zeroVirtualMic });
+    check(zeroPairs.empty(),
+          "the zero container does not pair a cable with another software device");
     // Nothing identifiable: a closed side, or a container the property store did
     // not return. Treated as "cannot collide", because refusing a route on an
     // unreadable property would break working setups, while the endpoint-id check
