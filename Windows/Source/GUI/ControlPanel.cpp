@@ -6,12 +6,16 @@
 
 #include "GUI/ControlPanel.h"
 
+#include "AudioEngine/RouteDiagnosis.h"
+
 #include <commctrl.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 
 namespace lowend::win::gui {
 namespace {
@@ -96,6 +100,45 @@ int toSlider(double value, const SliderSpec& spec) {
     return position < 0 ? 0 : position;
 }
 
+// Where the GUI remembers the endpoints the user chose.
+//
+// The user's own profile, never the repository or the program directory: the file
+// names two endpoints of this machine, so it is user state, not project state,
+// and it must not be shipped or committed. Nothing else is stored — no settings,
+// no paths, no keys.
+std::wstring deviceSelectionPath() {
+    PWSTR localAppData = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData))
+        || localAppData == nullptr) {
+        return std::wstring();
+    }
+    std::wstring path = localAppData;
+    CoTaskMemFree(localAppData);
+    path += L"\\LowEndCircuit";
+    CreateDirectoryW(path.c_str(), nullptr);  // already existing is not an error
+    path += L"\\device-selection.txt";
+    return path;
+}
+
+// Reads `key=value` lines. Anything else is ignored, so a hand-edited file with a
+// comment or a stale key cannot break startup.
+std::string readSelectionValue(const std::wstring& path, const char* key) {
+    if (path.empty()) return {};
+    std::ifstream file(path);
+    if (!file) return {};
+    const std::string prefix = std::string(key) + "=";
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.compare(0, prefix.size(), prefix) != 0) continue;
+        std::string value = line.substr(prefix.size());
+        while (!value.empty() && (value.back() == '\r' || value.back() == '\n' || value.back() == ' ')) {
+            value.pop_back();
+        }
+        return value;
+    }
+    return {};
+}
+
 } // namespace
 
 bool ControlPanel::create(HWND parent, HINSTANCE instance) {
@@ -127,7 +170,7 @@ bool ControlPanel::create(HWND parent, HINSTANCE instance) {
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         controlX, y, 150, 26, parent,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(idRefreshDevices)), instance, nullptr);
-    y += rowHeight + 10;
+    y += rowHeight + 6;
 
     createLabel(L"Model", marginX, y + 5, labelWidth);
     controlSlot(idModel) = CreateWindowExW(
@@ -139,7 +182,7 @@ bool ControlPanel::create(HWND parent, HINSTANCE instance) {
     SendMessageW(controlSlot(idModel), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Circuit"));
     SendMessageW(controlSlot(idModel), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"HighExciter"));
 
-    createLabel(L"Harmonic quality", controlX + 200, y + 5, 120);
+    controlSlot(idHarmonicLabel) = createLabel(idHarmonicLabel, L"Harmonic quality", controlX + 200, y + 5, 120);
     controlSlot(idExciterOversampling) = CreateWindowExW(
         0, L"COMBOBOX", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
@@ -152,19 +195,27 @@ bool ControlPanel::create(HWND parent, HINSTANCE instance) {
     y += rowHeight + 6;
 
     createTrackbar(idIntensity, controlX, y, controlWidth);
-    createLabel(L"LowEnd", marginX, y + 6, labelWidth);
+    controlSlot(idIntensityLabel) = createLabel(idIntensityLabel, L"LowEnd", marginX, y + 6, labelWidth);
     createValueLabel(idIntensity, controlX + controlWidth + 8, y + 6, 60);
     y += rowHeight;
 
     createTrackbar(idBody, controlX, y, controlWidth);
-    createLabel(L"Body", marginX, y + 6, labelWidth);
+    controlSlot(idBodyLabel) = createLabel(idBodyLabel, L"Body", marginX, y + 6, labelWidth);
     createValueLabel(idBody, controlX + controlWidth + 8, y + 6, 60);
     y += rowHeight;
 
     createTrackbar(idOutput, controlX, y, controlWidth);
-    createLabel(L"Output", marginX, y + 6, labelWidth);
+    controlSlot(idOutputLabel) = createLabel(idOutputLabel, L"Output", marginX, y + 6, labelWidth);
     createValueLabel(idOutput, controlX + controlWidth + 8, y + 6, 60);
-    y += rowHeight + 10;
+    y += rowHeight;
+
+    // One line stating what the selected model does with the controls above it.
+    // The macOS app puts this in per-slider tooltips, which this window does not
+    // have; without it a greyed slider or a hidden Output row is a puzzle rather
+    // than an explanation.
+    controlSlot(idModelNote) = createLabel(idModelNote, L"",
+                                           marginX, y + 4, clientWidth() - 2 * marginX);
+    y += rowHeight - 6;
 
     controlSlot(idSpatialEnable) = CreateWindowExW(
         0, L"BUTTON", L"Enable spatial processing",
@@ -191,7 +242,7 @@ bool ControlPanel::create(HWND parent, HINSTANCE instance) {
     createTrackbar(idListenerZ, controlX, y, controlWidth);
     createLabel(L"Listener Z", marginX, y + 6, labelWidth);
     createValueLabel(idListenerZ, controlX + controlWidth + 8, y + 6, 60);
-    y += rowHeight + 10;
+    y += rowHeight + 6;
 
     controlSlot(idStartStop) = CreateWindowExW(
         0, L"BUTTON", L"Start",
@@ -224,9 +275,15 @@ bool ControlPanel::create(HWND parent, HINSTANCE instance) {
     return true;
 }
 
-void ControlPanel::createLabel(const wchar_t* text, int x, int y, int width) {
-    CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                    x, y, width, 20, parent_, nullptr, instance_, nullptr);
+HWND ControlPanel::createLabel(const wchar_t* text, int x, int y, int width) {
+    return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                           x, y, width, 20, parent_, nullptr, instance_, nullptr);
+}
+
+HWND ControlPanel::createLabel(ControlId id, const wchar_t* text, int x, int y, int width) {
+    return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                           x, y, width, 20, parent_,
+                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
 }
 
 void ControlPanel::createValueLabel(ControlId id, int x, int y, int width) {
@@ -274,51 +331,153 @@ void ControlPanel::refreshDevices() {
 
     SendMessageW(controlSlot(idRenderDevice), CB_RESETCONTENT, 0, 0);
     renderIds_.clear();
+    // The virtual-cable pairing is computed before the labels are built, because
+    // it is what makes the milestone route visible in the lists: a cable's two
+    // endpoints appear under different names in different lists, and choosing
+    // "Input: CABLE Output" as the capture source is the whole configuration.
+    // The pairing comes from the engine's own rule, so the GUI cannot disagree
+    // with the CLI about which endpoints form one cable.
+    const std::vector<DeviceInfo> inputs = listDevices(DataFlow::capture, error);
+    const std::vector<VirtualCable> cables = findVirtualCables(outputs, inputs);
+    const auto isCableSide = [&](const std::string& id, bool playback) {
+        for (const VirtualCable& cable : cables) {
+            if ((playback ? cable.playback.id : cable.recording.id) == id) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     for (const DeviceInfo& device : outputs) {
         const std::wstring label = widen(device.name.empty() ? device.id : device.name)
             + (device.isDefault ? L"  (default)" : L"")
-            + (isBluetooth(device) ? L"  [Bluetooth]" : L"");
+            + (isBluetooth(device) ? L"  [Bluetooth]" : L"")
+            + (isCableSide(device.id, true) ? L"  [virtual cable: play into it]" : L"");
         SendMessageW(controlSlot(idRenderDevice), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
         renderIds_.push_back(device.id);
     }
 
     // The capture list mirrors the CLI's two modes: every output endpoint is a
     // loopback candidate, and every input endpoint is a direct capture.
-    const std::vector<DeviceInfo> inputs = listDevices(DataFlow::capture, error);
     SendMessageW(controlSlot(idCaptureDevice), CB_RESETCONTENT, 0, 0);
     captureIds_.clear();
     for (const DeviceInfo& device : outputs) {
         const std::wstring label = std::wstring(L"System audio: ") + widen(device.name)
-            + (device.isDefault ? L"  (default)" : L"");
+            + (device.isDefault ? L"  (default)" : L"")
+            + (isCableSide(device.id, true) ? L"  [virtual cable: play into it]" : L"");
         SendMessageW(controlSlot(idCaptureDevice), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
         captureIds_.push_back(device.id);
     }
     for (const DeviceInfo& device : inputs) {
-        const std::wstring label = std::wstring(L"Input: ") + widen(device.name);
+        const std::wstring label = std::wstring(L"Input: ") + widen(device.name)
+            + (isCableSide(device.id, false) ? L"  [virtual cable: recording side]" : L"");
         SendMessageW(controlSlot(idCaptureDevice), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
         captureIds_.push_back(device.id);
     }
 
-    // Restore each selection when its endpoint is still listed. A device that
-    // disappeared falls back to the first entry below, which is the only thing
-    // left to select.
+    // What this machine offers, in one sentence, for the idle status line.
+    if (cables.empty()) {
+        virtualCableNote_ = L"No virtual cable endpoint detected, so Windows audio cannot be "
+                            L"routed through LowEnd yet. The documented route needs one (for "
+                            L"example VB-CABLE: play into 'CABLE Input', capture 'CABLE Output'); "
+                            L"installing a virtual audio driver is an external change LowEnd does "
+                            L"not make. A real input device works without one.";
+    } else {
+        const VirtualCable& cable = cables.front();
+        // The Output the note suggests must be a physical device: the cable's own
+        // playback side is the one endpoint the routing rule refuses, so naming it
+        // here would read as an instruction to route the audio back into the cable.
+        std::string physicalOutput;
+        for (const DeviceInfo& device : outputs) {
+            if (isCableSide(device.id, true)) {
+                continue;
+            }
+            if (physicalOutput.empty() || device.isDefault) {
+                physicalOutput = device.name.empty() ? device.id : device.name;
+            }
+            if (device.isDefault) {
+                break;
+            }
+        }
+        virtualCableNote_ = L"Virtual cable detected: choose Capture \"Input: "
+            + widen(cable.recording.name) + L"\" and Output \""
+            + widen(physicalOutput.empty() ? std::string("your physical output device")
+                                           : physicalOutput)
+            + L"\", then set Windows' default output to the cable's "
+              L"playback side. LowEnd renders to the endpoint chosen above, never to the cable.";
+    }
+
+    // Restore each selection when its endpoint is still listed.
+    //
+    // A saved id that is gone is *not* replaced with the first entry: that would
+    // start the engine on the default endpoint, a device the user never chose, and
+    // the mistake would look like a working route. The combo is left empty
+    // instead, and the window refuses to start until something is selected. Only
+    // a first run, which has no saved id at all, selects the first entry.
     const auto restore = [](HWND combo, const std::wstring& wanted,
                             const std::vector<std::string>& ids) {
         if (!wanted.empty()) {
             for (size_t i = 0; i < ids.size(); ++i) {
                 if (widen(ids[i]) == wanted) {
                     SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(i), 0);
-                    return;
+                    return true;
                 }
             }
+            SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+            return false;
         }
         if (SendMessageW(combo, CB_GETCURSEL, 0, 0) == CB_ERR && !ids.empty()) {
             SendMessageW(combo, CB_SETCURSEL, 0, 0);
         }
+        return true;
     };
 
-    restore(controlSlot(idRenderDevice), previousRender, renderIds_);
-    restore(controlSlot(idCaptureDevice), previousCapture, captureIds_);
+    const std::wstring savedPath = deviceSelectionPath();
+    // What the user chose in this session wins over what was saved; on the first
+    // refresh there is no in-session choice yet, so the saved id is used.
+    const std::wstring wantedRender = previousRender.empty()
+        ? widen(readSelectionValue(savedPath, "render")) : previousRender;
+    const std::wstring wantedCapture = previousCapture.empty()
+        ? widen(readSelectionValue(savedPath, "capture")) : previousCapture;
+    restore(controlSlot(idRenderDevice), wantedRender, renderIds_);
+    restore(controlSlot(idCaptureDevice), wantedCapture, captureIds_);
+}
+
+bool ControlPanel::hasDeviceSelection() const {
+    return SendMessageW(controlHandle(idCaptureDevice), CB_GETCURSEL, 0, 0) >= 0
+        && SendMessageW(controlHandle(idRenderDevice), CB_GETCURSEL, 0, 0) >= 0;
+}
+
+void ControlPanel::saveDeviceSelection() const {
+    const std::wstring path = deviceSelectionPath();
+    if (path.empty()) {
+        return;
+    }
+    const EngineOptions options = readEngineOptions();
+
+    // A side with no selection is a side whose *saved* endpoint has vanished (the
+    // combo is deliberately left empty in that case). Writing an empty value there
+    // would erase the id the user chose and turn the next launch into a silent
+    // fallback to the first list entry, which is exactly the substitution the
+    // empty combo exists to prevent. The previous value is kept instead, so the
+    // endpoint stays "saved but missing" until the user selects one.
+    const std::string previousCapture = readSelectionValue(path, "capture");
+    const std::string previousRender = readSelectionValue(path, "render");
+    const std::string capture =
+        options.captureDeviceId.empty() ? previousCapture : options.captureDeviceId;
+    const std::string render =
+        options.renderDeviceId.empty() ? previousRender : options.renderDeviceId;
+    if (capture.empty() && render.empty()) {
+        return;  // nothing selected yet; keeping the previous file is more useful
+    }
+
+    std::ofstream file(path, std::ios::trunc);
+    if (!file) {
+        return;  // a read-only profile must not break the app
+    }
+    file << "# Endpoints chosen in the LowEnd Circuit GUI. Written by the app, safe to delete.\n";
+    file << "capture=" << capture << "\n";
+    file << "render=" << render << "\n";
 }
 
 Settings ControlPanel::readSettings() const {
@@ -397,7 +556,53 @@ void ControlPanel::writeSettings(const Settings& settings) {
     SendMessageW(controlSlot(idListenerZ), TBM_SETPOS, TRUE,
                  toSlider(settings.listenerZ, specFor(idListenerZ)));
 
+    applyModelAffordances(settings);
     refreshValueLabels();
+}
+
+void ControlPanel::applyModelAffordances(const Settings& settings) {
+    // The three models use different parts of the panel, and the macOS app spells
+    // out which: Clean runs no tone DSP at all, Circuit is the only model that
+    // applies the output gain, and HighExciter adds harmonics to the dry signal
+    // without an output stage. A control that a model does not use is disabled
+    // (Clean) or hidden (HighExciter's Output row) rather than left looking
+    // adjustable, and the line under them says why.
+    const bool clean = settings.dspModel == dsp_model::clean;
+    const bool exciter = settings.dspModel == dsp_model::high_exciter;
+
+    const auto show = [](HWND handle, bool visible) {
+        if (handle != nullptr) {
+            ShowWindow(handle, visible ? SW_SHOW : SW_HIDE);
+        }
+    };
+    const auto enable = [](HWND handle, bool enabled) {
+        if (handle != nullptr) {
+            EnableWindow(handle, enabled ? TRUE : FALSE);
+        }
+    };
+
+    show(controlHandle(idOutputLabel), !exciter);
+    show(controlHandle(idOutput), !exciter);
+    show(valueSlot(idOutput), !exciter);
+    show(controlHandle(idHarmonicLabel), exciter);
+    show(controlHandle(idExciterOversampling), exciter);
+
+    enable(controlHandle(idIntensity), !clean);
+    enable(controlHandle(idBody), !clean);
+    enable(controlHandle(idOutput), !clean && !exciter);
+    enable(controlHandle(idExciterOversampling), exciter);
+
+    SetWindowTextW(controlHandle(idIntensityLabel),
+                   clean ? L"Bypass" : (exciter ? L"Exciter Drive" : L"LowEnd"));
+    SetWindowTextW(controlHandle(idBodyLabel),
+                   clean ? L"Bypass" : (exciter ? L"Wet Mix" : L"Body"));
+
+    const wchar_t* note = clean
+        ? L"Clean runs no tone DSP: the amount sliders are inactive. Spatial still applies."
+        : exciter
+            ? L"HighExciter keeps the dry signal and applies no output gain, so Output is hidden."
+            : L"Circuit applies the low-end stages and the output gain.";
+    SetWindowTextW(controlHandle(idModelNote), note);
 }
 
 void ControlPanel::setRunning(bool running) {

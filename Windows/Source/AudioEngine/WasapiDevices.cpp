@@ -57,6 +57,16 @@ using Microsoft::WRL::ComPtr;
 namespace lowend::win {
 namespace {
 
+// The PnP instance behind an endpoint ("ROOT\MEDIA\0001"), as the audio service
+// stores it on every endpoint. It is the only value that tells two software
+// devices apart: Windows hands every root-enumerated device the same zero
+// container id ({00000000-0000-0000-FFFF-FFFFFFFFFFFF}), so comparing containers
+// makes one virtual cable and every other virtual device look like one device.
+// Not declared by the SDK headers or by uuid.lib, so it is defined here like the
+// other keys this file needs.
+DEFINE_PROPERTYKEY(PKEY_Device_InstancePath, 0xb3f8fa53, 0x0004, 0x438e, 0x90, 0x03, 0x51, 0xa4, 0x6e, 0x13,
+                  0x9b, 0xfc, 2);
+
 // ─── COM lifetime ────────────────────────────────────────────────────
 // RAII around CoInitializeEx. RPC_E_CHANGED_MODE means the calling thread
 // already lives in another apartment, which is not a failure: the MTA objects
@@ -203,6 +213,26 @@ std::string containerIdString(IPropertyStore* store) {
     if (SUCCEEDED(store->GetValue(PKEY_Device_ContainerId, &value)) && value.vt == VT_CLSID &&
         value.puuid != nullptr) {
         result = guidToString(*value.puuid);
+    }
+    PropVariantClear(&value);
+    return result;
+}
+
+// The device instance behind the endpoint, with the "{n}." prefix the audio
+// service stores in front of it removed: the two endpoints of one device
+// instance carry the same path and two virtual devices never do, while their
+// containers are the same zero GUID. Empty if the property is absent.
+std::string deviceInstanceString(IPropertyStore* store) {
+    PROPVARIANT value;
+    PropVariantInit(&value);
+    std::string result;
+    if (SUCCEEDED(store->GetValue(PKEY_Device_InstancePath, &value)) && value.vt == VT_LPWSTR &&
+        value.pwszVal != nullptr) {
+        result = utf8FromWide(value.pwszVal);
+        const std::size_t prefixEnd = result.find("}.");
+        if (result.size() > 2 && result[0] == '{' && prefixEnd != std::string::npos && prefixEnd < 5) {
+            result = result.substr(prefixEnd + 2);
+        }
     }
     PropVariantClear(&value);
     return result;
@@ -792,9 +822,14 @@ std::vector<DeviceInfo> listDevices(DataFlow flow, std::string& error) {
         if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &store))) {
             readStringProperty(store.Get(), PKEY_Device_FriendlyName, info.name);
             info.containerId = containerIdString(store.Get());
+            info.deviceInstance = deviceInstanceString(store.Get());
 
             std::string enumeratorName;
             readStringProperty(store.Get(), PKEY_Device_EnumeratorName, enumeratorName);
+            // Kept as observed rather than only classified: the routing checks
+            // compare it (a root-enumerated device is a software device, so its
+            // two endpoints can be one signal path) and --list-devices prints it.
+            info.enumeratorName = enumeratorName;
             if (isBluetoothEnumerator(enumeratorName)) {
                 // Reported instead of the form factor: a Bluetooth headset and
                 // its wired twin share a form factor but behave very
@@ -867,7 +902,9 @@ struct WasapiCapture::Impl {
 
     // Resolved endpoint identity, captured at open() so the engine can compare
     // it with the render endpoint even when both were requested as "default".
-    std::string deviceId;
+    // The container and the bus belong to it because two endpoints of one
+    // virtual device are different ids on a single signal path.
+    EndpointIdentity identity;
     std::string deviceName;
 
     WasapiFormat format;
@@ -1017,12 +1054,18 @@ bool WasapiCapture::open(const Options& options, std::string& error) {
     {
         LPWSTR id = nullptr;
         if (SUCCEEDED(impl.device->GetId(&id)) && id != nullptr) {
-            impl.deviceId = utf8FromWide(id);
+            impl.identity.id = utf8FromWide(id);
             CoTaskMemFree(id);
         }
         ComPtr<IPropertyStore> store;
         if (SUCCEEDED(impl.device->OpenPropertyStore(STGM_READ, &store))) {
             readStringProperty(store.Get(), PKEY_Device_FriendlyName, impl.deviceName);
+            // Read while the store is already open: the feedback check runs on the
+            // audio thread and must not start a property read of its own.
+            impl.identity.containerId = containerIdString(store.Get());
+            impl.identity.deviceInstance = deviceInstanceString(store.Get());
+            readStringProperty(store.Get(), PKEY_Device_EnumeratorName,
+                               impl.identity.enumeratorName);
         }
     }
 
@@ -1179,7 +1222,7 @@ void WasapiCapture::close() {
     impl.device.Reset();
     impl.enumerator.Reset();
 
-    impl.deviceId.clear();
+    impl.identity = EndpointIdentity();
     impl.deviceName.clear();
     impl.bufferFrames = 0;
     impl.loopback = false;
@@ -1219,11 +1262,15 @@ bool WasapiCapture::isLoopback() const {
 }
 
 const std::string& WasapiCapture::openedDeviceId() const {
-    return impl_->deviceId;
+    return impl_->identity.id;
 }
 
 const std::string& WasapiCapture::openedDeviceName() const {
     return impl_->deviceName;
+}
+
+const EndpointIdentity& WasapiCapture::openedIdentity() const {
+    return impl_->identity;
 }
 
 DeviceError WasapiCapture::lastError() const {
@@ -1435,7 +1482,9 @@ struct WasapiRender::Impl {
 
     WakeEvent wake;
 
-    std::string deviceId;
+    // Resolved endpoint identity; see the capture Impl for why the container and
+    // the enumerator bus are part of it rather than looked up later.
+    EndpointIdentity identity;
     std::string deviceName;
 
     WasapiFormat format;
@@ -1542,12 +1591,18 @@ bool WasapiRender::open(const Options& options, std::string& error) {
     {
         LPWSTR id = nullptr;
         if (SUCCEEDED(impl.device->GetId(&id)) && id != nullptr) {
-            impl.deviceId = utf8FromWide(id);
+            impl.identity.id = utf8FromWide(id);
             CoTaskMemFree(id);
         }
         ComPtr<IPropertyStore> store;
         if (SUCCEEDED(impl.device->OpenPropertyStore(STGM_READ, &store))) {
             readStringProperty(store.Get(), PKEY_Device_FriendlyName, impl.deviceName);
+            // Read while the store is already open: the feedback check runs on the
+            // audio thread and must not start a property read of its own.
+            impl.identity.containerId = containerIdString(store.Get());
+            impl.identity.deviceInstance = deviceInstanceString(store.Get());
+            readStringProperty(store.Get(), PKEY_Device_EnumeratorName,
+                               impl.identity.enumeratorName);
         }
     }
 
@@ -1768,7 +1823,7 @@ void WasapiRender::close() {
     impl.device.Reset();
     impl.enumerator.Reset();
 
-    impl.deviceId.clear();
+    impl.identity = EndpointIdentity();
     impl.deviceName.clear();
     impl.bufferFrames = 0;
     impl.periodMs = 0.0;
@@ -1807,11 +1862,15 @@ double WasapiRender::streamLatencyMs() const {
 }
 
 const std::string& WasapiRender::openedDeviceId() const {
-    return impl_->deviceId;
+    return impl_->identity.id;
 }
 
 const std::string& WasapiRender::openedDeviceName() const {
     return impl_->deviceName;
+}
+
+const EndpointIdentity& WasapiRender::openedIdentity() const {
+    return impl_->identity;
 }
 
 DeviceError WasapiRender::lastError() const {

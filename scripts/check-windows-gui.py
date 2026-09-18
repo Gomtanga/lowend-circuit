@@ -36,6 +36,8 @@ ID_STATUS = 1014
 CB_GETCOUNT = 0x0146
 CB_SETCURSEL = 0x014E
 CB_GETCURSEL = 0x0147
+CB_GETLBTEXT = 0x0148
+CB_GETLBTEXTLEN = 0x0149
 BM_CLICK = 0x00F5
 WM_CLOSE = 0x0010
 WM_COMMAND = 0x0111
@@ -121,7 +123,11 @@ def measure_text_height(status_hwnd, width: int) -> int:
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("Usage: check-windows-gui.py /path/to/lowend_gui.exe")
-    executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    try:
+        executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    except OSError:
+        raise SystemExit(f"check-windows-gui.py: no such executable: {sys.argv[1]}\n"
+                         "build it first: scripts\\build-windows-cli.bat Release")
 
     process = subprocess.Popen([str(executable)])
     try:
@@ -151,6 +157,51 @@ def main() -> None:
             if not handle:
                 raise SystemExit(f"The {name} control is missing.")
         print(f"controls present; initial status: {text_of(status)[:80]!r}")
+
+        # The window must open with the routing guidance on screen, not a bare
+        # "Idle.": it is where a user learns that the documented route needs a
+        # virtual cable, and that stopping LowEnd while Windows' default output is
+        # the cable is why they suddenly hear nothing. Asserting it here means the
+        # guidance cannot be lost by a later change to the startup path, which is
+        # exactly how it went missing the first time - the window set a short
+        # literal and never called the code that composes the full text.
+        initial = text_of(status)
+        if "Idle" not in initial:
+            raise SystemExit(f"Expected an idle status at startup, saw:\n{initial}")
+        if "never changes Windows" not in initial:
+            raise SystemExit(
+                "The startup status does not tell the user that LowEnd leaves Windows' default "
+                "output alone, so it does not say what to do when the cable is still the default:\n"
+                + initial)
+        # Matched without case: the note reads "No virtual cable endpoint detected"
+        # on a machine without one and "Virtual cable detected: ..." on a machine
+        # with one, so the check is on the phrase, not on its capitalization. The
+        # restore path is asserted concretely (the Settings page a user has to
+        # open), because "we do not change your default output" without saying
+        # where to change it back is not guidance a user can act on.
+        lowered = initial.lower()
+        for phrase in ("virtual cable", "settings > system > sound > output"):
+            if phrase not in lowered:
+                raise SystemExit(f"The startup status is missing {phrase!r}:\n{initial}")
+
+        # The note suggests an Output device by name, and that name must be a
+        # physical device. Naming the cable's own playback side would read as an
+        # instruction to route the audio back into the cable, which is the one
+        # combination the routing rule refuses.
+        cable_output_names = []
+        for index in range(user32.SendMessageW(render, CB_GETCOUNT, 0, 0)):
+            length = user32.SendMessageW(render, CB_GETLBTEXTLEN, index, 0)
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.SendMessageW(render, CB_GETLBTEXT, index, ctypes.byref(buffer))
+            label = buffer.value
+            if "[virtual cable: play into it]" in label:
+                cable_output_names.append(label.split("  [")[0])
+        for name in cable_output_names:
+            if name and name in initial:
+                raise SystemExit(
+                    "The startup status suggests the cable's own playback endpoint as the output "
+                    f"({name!r}); the documented route renders to a physical device, and using the "
+                    "same cable on both sides is refused:\n" + initial)
 
         capture_count = user32.SendMessageW(capture, CB_GETCOUNT, 0, 0)
         render_count = user32.SendMessageW(render, CB_GETCOUNT, 0, 0)

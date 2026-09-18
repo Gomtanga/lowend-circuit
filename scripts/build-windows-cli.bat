@@ -51,5 +51,13 @@ rem link-line check, so it runs before the build result is trusted.
 python "%ROOT%\scripts\check-windows-ui-independence.py"
 if errorlevel 1 exit /b 1
 
+rem The cable-route checker generates its own signals and proves it accepts the
+rem condition it describes and rejects silence, a single-channel source, a
+rem detuned stream and an unattenuated Circuit run. It needs no device, so it can
+rem gate a build; the device half of that script runs only when the cable and the
+rem output endpoint exist and are named explicitly.
+python "%ROOT%\scripts\check-windows-cable-route.py" --self-check
+if errorlevel 1 exit /b 1
+
 echo.
 echo Build and offline checks succeeded: %BUILD_DIR%\%CONFIG%\lowend_windows.exe

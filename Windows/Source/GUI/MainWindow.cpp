@@ -154,8 +154,13 @@ bool MainWindow::create(HINSTANCE instance, int showCommand) {
 
     Settings defaults;
     panel_.writeSettings(defaults);
-    panel_.setStatusText(L"Idle. Choose an output endpoint, then Start.");
+    // The status line is composed by updateStatusText(), not set to a bare
+    // "Idle." here: the routing guidance (what this machine offers for the
+    // virtual-cable route, and how to get sound back if Windows' default output
+    // is still the cable) belongs on screen when the window opens, not only
+    // after the user has already touched a control.
     panel_.setRunning(false);
+    updateStatusText();
 
     ShowWindow(window_, showCommand);
     UpdateWindow(window_);
@@ -167,6 +172,16 @@ void MainWindow::refreshDeviceLists() {
 }
 
 void MainWindow::onCommand(int controlId, int notification) {
+    // A device selection is remembered in the user's own profile as soon as it
+    // changes, so a restart comes back to the endpoints the user chose rather
+    // than to whatever is first in the list.
+    if ((controlId == idCaptureDevice || controlId == idRenderDevice)
+        && notification == CBN_SELCHANGE) {
+        panel_.saveDeviceSelection();
+        updateStatusText();
+        return;
+    }
+
     // A control the user is dragging changes the settings of a running engine
     // immediately; the engine queues it for the audio thread, so a drag never
     // blocks the UI and never restarts the stream.
@@ -184,6 +199,17 @@ void MainWindow::onCommand(int controlId, int notification) {
             refreshDeviceLists();
             return;
         case idModel:
+            // The controls a model does not use are hidden rather than left
+            // looking adjustable (the Output gain is the exciter's case), so the
+            // panel is refreshed with the model that was just selected - before
+            // the settings are read, so what is sent to the engine is read from
+            // the controls as they are now.
+            panel_.applyModelAffordances(panel_.readSettings());
+            if (running_ && engine_ != nullptr) {
+                engine_->requestSettings(panel_.readSettings());
+            }
+            updateStatusText();
+            return;
         case idExciterOversampling:
         case idSpatialEnable:
             if (running_ && engine_ != nullptr) {
@@ -229,6 +255,18 @@ bool MainWindow::toggleEngine() {
 }
 
 bool MainWindow::startEngine() {
+    // A combo with no selection means the *saved* endpoint is gone. Refusing here
+    // is the point: starting anyway would open whichever endpoint happens to be
+    // default, which is a route the user never chose and cannot see.
+    if (!panel_.hasDeviceSelection()) {
+        panel_.setStatusText(
+            L"Cannot start: an endpoint saved from the last run is no longer present.\n\n"
+            L"There is no selection for it in the list above, and picking a device on the\n"
+            L"user's behalf would process a route they did not choose. Choose the capture\n"
+            L"source and the output endpoint again, then Start.");
+        return false;
+    }
+
     const Settings settings = panel_.readSettings();
     EngineOptions options = panel_.readEngineOptions();
 
@@ -290,7 +328,18 @@ void MainWindow::updateStatusText() {
     std::wstring text = describe(settings);
 
     if (!running_ || engine_ == nullptr) {
-        panel_.setStatusText(text + L"\n\nIdle.");
+        // What this machine offers for routing, and what stopping means: the
+        // engine renders to the endpoint selected above and never touches
+        // Windows' default output, so a user who set the default output to a
+        // virtual cable hears nothing while LowEnd is stopped. Stated here
+        // rather than fixed automatically - changing the default output behind
+        // the user's back is exactly what this build does not do.
+        std::wstring idle = text + L"\n\nIdle.\n\n" + panel_.virtualCableNote();
+        idle += L"\n\nLowEnd renders to the endpoint chosen above and never changes Windows'\n"
+                L"default output. If you set the default output to a virtual cable, sound\n"
+                L"stops reaching your device whenever LowEnd is stopped: set it back in\n"
+                L"Settings > System > Sound > Output.";
+        panel_.setStatusText(idle);
         return;
     }
 

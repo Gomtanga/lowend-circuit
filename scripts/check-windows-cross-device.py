@@ -74,7 +74,11 @@ def run(executable: pathlib.Path, args, seconds: int):
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("Usage: check-windows-cross-device.py /path/to/lowend_windows.exe")
-    executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    try:
+        executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    except OSError:
+        raise SystemExit(f"check-windows-cross-device.py: no such executable: {sys.argv[1]}\n"
+                         "build it first: scripts\\build-windows-cli.bat Release")
 
     outputs = list_outputs(executable)
     if len(outputs) < 2:

@@ -29,6 +29,7 @@ add_library(lowend_engine STATIC
     Source/AudioEngine/DspStage.cpp
     Source/AudioEngine/WasapiDevices.cpp
     Source/AudioEngine/Engine.cpp
+    Source/AudioEngine/RouteDiagnosis.cpp
     Source/AudioEngine/SelfTest.cpp
 )
 

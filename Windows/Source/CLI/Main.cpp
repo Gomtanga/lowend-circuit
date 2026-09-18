@@ -21,8 +21,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -121,6 +125,259 @@ int runListDevices() {
         return 1;
     }
     std::fputs(formatDeviceList(outputs, inputs).c_str(), stdout);
+    return 0;
+}
+
+// Judgement only: resolves the selected endpoints against what the machine has
+// and reports whether the pair can run, without opening a stream. This is the
+// same decision the engine applies at start, taken before anything is played —
+// and, unlike the engine, it can say *why* an id did not resolve, because it
+// still has the requested id and both enumerated lists.
+int runRouteCheck(const CommandLine& commandLine) {
+    std::string error;
+    const std::vector<DeviceInfo> outputs = listDevices(DataFlow::render, error);
+    if (!error.empty()) {
+        std::fprintf(stderr, "Device enumeration failed: %s\n", error.c_str());
+        return 1;
+    }
+    std::string captureError;
+    const std::vector<DeviceInfo> inputs = listDevices(DataFlow::capture, captureError);
+    if (!captureError.empty()) {
+        std::fprintf(stderr, "Capture device enumeration failed: %s\n", captureError.c_str());
+        return 1;
+    }
+
+    RouteSelection selection;
+    selection.captureId = commandLine.engine.captureDeviceId;
+    selection.renderId = commandLine.engine.renderDeviceId;
+    selection.captureFlow = commandLine.engine.captureFlow;
+    selection.loopback = commandLine.engine.loopback;
+
+    const RouteDiagnosis diagnosis = diagnoseRoute(selection, outputs, inputs);
+    std::fputs(formatRouteCheck(selection, diagnosis).c_str(), stdout);
+    // A refused route is a failed check, not a warning: a script that gates on
+    // this must not treat "refused" as "fine".
+    return diagnosis.ok() ? 0 : 1;
+}
+
+// Sends a known, unprotected tone to one named endpoint, then exits.
+//
+// Verification needs a signal source that is not "whatever the machine's default
+// output is": the cable route is measured by playing into the cable's playback
+// side, and the whole point of that route is that the OS default output *is* the
+// cable. Windows' own tone players write to the default endpoint, so a
+// controlled source has to name its endpoint itself.
+//
+// The tone does not pass through the DSP: it is the input to a route, and
+// measuring a route against a processed source would prove nothing. The level is
+// fixed and printed before the first sample is written, and nothing here changes
+// a volume.
+
+// Writes captured frames to a 16-bit PCM WAV file.
+//
+// This exists for verification, not for the audio path: a check that claims to
+// have measured the pitch at the end of a route has to have had the samples, and
+// a peak summary cannot answer that. 16-bit PCM is written rather than the float
+// samples so any reader (including Python's own `wave` module) can open the file;
+// the quantisation is far below anything a level or frequency measurement cares
+// about, and nothing here feeds back into the engine.
+//
+// Only --monitor reaches this, and the monitor loop is the CLI's own thread, not
+// a WASAPI callback, so the file I/O is not in an audio callback.
+class WavDump {
+public:
+    ~WavDump() { close(); }
+
+    bool open(const std::string& path, uint32_t sampleRate, std::string& error) {
+        // A stream rather than std::fopen: the C runtime marks fopen deprecated
+        // under /W4, and this build is kept warning-free.
+        file_.open(path, std::ios::binary | std::ios::trunc);
+        if (!file_) {
+            error = "could not open " + path + " for writing";
+            return false;
+        }
+        sampleRate_ = sampleRate == 0 ? 48000u : sampleRate;
+        // The header carries sizes that are only known at the end, so a
+        // placeholder is written now and patched in close().
+        writeHeader(0);
+        return true;
+    }
+
+    void write(const float* left, const float* right, uint32_t frames) {
+        if (!file_) {
+            return;
+        }
+        for (uint32_t i = 0; i < frames; ++i) {
+            writeSample(left[i]);
+            writeSample(right[i]);
+        }
+        frames_ += frames;
+    }
+
+    void close() {
+        if (!file_) {
+            return;
+        }
+        file_.flush();
+        file_.seekp(0);
+        writeHeader(frames_);
+        file_.close();
+    }
+
+    uint64_t frames() const { return frames_; }
+
+private:
+    static int16_t toPcm(float sample) {
+        // Clamped before scaling: a full-scale sample times 32767 is inside the
+        // range, but a sample above 1.0 (which the DSP can produce before its
+        // output gain) would wrap to the opposite sign and turn a peak into a
+        // click in the dump.
+        if (sample > 1.0f) sample = 1.0f;
+        if (sample < -1.0f) sample = -1.0f;
+        return static_cast<int16_t>(sample * 32767.0f);
+    }
+
+    void writeSample(float sample) {
+        const int16_t value = toPcm(sample);
+        const char bytes[2] = {
+            static_cast<char>(value & 0xff),
+            static_cast<char>((value >> 8) & 0xff),
+        };
+        file_.write(bytes, sizeof(bytes));
+    }
+
+    void writeHeader(uint64_t frames) {
+        const uint64_t dataBytes = frames * 2u * 2u;  // stereo, 16-bit
+        // A canonical WAV header has 32-bit sizes. The --monitor window is capped
+        // at 600 s, which even at 768 kHz stays under 4 GB, so the cast cannot
+        // lose a size this command can produce.
+        const uint32_t data32 = static_cast<uint32_t>(dataBytes);
+        const uint32_t byteRate = sampleRate_ * 2u * 2u;
+        unsigned char header[44] = {};
+        const auto put32 = [&](int offset, uint32_t value) {
+            header[offset] = static_cast<unsigned char>(value & 0xff);
+            header[offset + 1] = static_cast<unsigned char>((value >> 8) & 0xff);
+            header[offset + 2] = static_cast<unsigned char>((value >> 16) & 0xff);
+            header[offset + 3] = static_cast<unsigned char>((value >> 24) & 0xff);
+        };
+        const auto put16 = [&](int offset, uint16_t value) {
+            header[offset] = static_cast<unsigned char>(value & 0xff);
+            header[offset + 1] = static_cast<unsigned char>((value >> 8) & 0xff);
+        };
+        std::memcpy(header, "RIFF", 4);
+        put32(4, 36u + data32);
+        std::memcpy(header + 8, "WAVEfmt ", 8);
+        put32(16, 16u);                                   // fmt chunk size
+        put16(20, 1u);                                    // PCM
+        put16(22, 2u);                                    // channels
+        put32(24, sampleRate_);
+        put32(28, byteRate);
+        put16(32, 4u);                                    // block align
+        put16(34, 16u);                                   // bits per sample
+        std::memcpy(header + 36, "data", 4);
+        put32(40, data32);
+        file_.write(reinterpret_cast<const char*>(header), sizeof(header));
+    }
+
+    std::ofstream file_;
+    uint32_t sampleRate_ = 48000;
+    uint64_t frames_ = 0;
+};
+
+int runPlayTone(const CommandLine& commandLine) {
+    WasapiRender::Options options;
+    options.deviceId = commandLine.engine.renderDeviceId;
+    options.bufferMs = commandLine.settings.bufferMs;
+    // 0 means "the endpoint's own mix rate": the tone is generated at the rate
+    // the endpoint consumes, so no conversion sits inside the source.
+    options.requestedSampleRate = 0;
+
+    WasapiRender render;
+    std::string error;
+    if (!render.open(options, error)) {
+        std::fprintf(stderr, "Failed to open the tone endpoint: %s\n", error.c_str());
+        return 1;
+    }
+
+    const WasapiFormat format = render.format();
+    if (format.sampleRate == 0 || format.channels == 0) {
+        std::fprintf(stderr, "The tone endpoint reported no usable format.\n");
+        render.close();
+        return 1;
+    }
+
+    // Printed before anything is written, and flushed: the user has to be able to
+    // see what will make a sound, through which endpoint, and at what level.
+    const char* const channelText =
+        commandLine.toneChannel == ToneChannel::both ? "both channels"
+            : (commandLine.toneChannel == ToneChannel::left ? "the left channel only"
+                                                            : "the right channel only");
+    std::printf("Playing a %.1f Hz tone at amplitude %.2f for %d s on %s\n",
+                toneFrequencyHz, toneAmplitude, commandLine.toneSeconds, channelText);
+    std::printf("  endpoint: %s\n",
+                render.openedDeviceName().empty() ? "(unnamed)"
+                                                  : render.openedDeviceName().c_str());
+    std::printf("  id:       %s\n", render.openedDeviceId().c_str());
+    std::printf("  format:   %u Hz, %u ch, %u-frame period%s\n",
+                format.sampleRate, format.channels, render.bufferFrames(),
+                commandLine.engine.renderDeviceId.empty() ? " (default output)" : "");
+    std::fflush(stdout);
+
+    const uint32_t block = render.bufferFrames() == 0 ? 512u
+        : (render.bufferFrames() > maxBlockFrames ? maxBlockFrames : render.bufferFrames());
+    std::vector<float> left(block);
+    std::vector<float> right(block);
+
+    const double totalFrames =
+        static_cast<double>(commandLine.toneSeconds) * static_cast<double>(format.sampleRate);
+    uint64_t written = 0;
+    double peak = 0.0;
+    // Decided once: a single-channel tone leaves the other side silent, which is
+    // what lets a check at the far end of the route see a swap.
+    const bool drivesLeft = commandLine.toneChannel != ToneChannel::right;
+    const bool drivesRight = commandLine.toneChannel != ToneChannel::left;
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds(commandLine.toneSeconds);
+
+    while (written < static_cast<uint64_t>(totalFrames)
+           && std::chrono::steady_clock::now() < deadline) {
+        uint32_t frames = block;
+        if (written + frames > static_cast<uint64_t>(totalFrames)) {
+            frames = static_cast<uint32_t>(static_cast<uint64_t>(totalFrames) - written);
+        }
+        for (uint32_t i = 0; i < frames; ++i) {
+            // Phase continues across blocks so the tone has no discontinuity at
+            // a block boundary, which a peak measurement would not notice but a
+            // listener or a spectrum would.
+            const double phase = 2.0 * 3.14159265358979323846 * toneFrequencyHz
+                * static_cast<double>(written + i) / static_cast<double>(format.sampleRate);
+            const float sample = static_cast<float>(toneAmplitude * std::sin(phase));
+            left[i] = drivesLeft ? sample : 0.0f;
+            right[i] = drivesRight ? sample : 0.0f;
+            // Measured from the samples that were actually generated rather than
+            // reported from the constant: the number a verification run compares
+            // against has to be what left this process.
+            const double magnitude = std::fabs(static_cast<double>(sample));
+            if (magnitude > peak) {
+                peak = magnitude;
+            }
+        }
+        if (!render.write(left.data(), right.data(), frames, &error)) {
+            std::fprintf(stderr, "The tone endpoint stopped accepting audio: %s\n", error.c_str());
+            render.close();
+            return 1;
+        }
+        written += frames;
+    }
+
+    // Leave the endpoint's buffer filled rather than draining: a render endpoint
+    // that runs dry while still open is what produces a click at the end.
+    render.writeSilence(render.bufferFrames(), &error);
+    render.close();
+
+    const double seconds = static_cast<double>(written) / static_cast<double>(format.sampleRate);
+    std::printf("  wrote:    %llu frames (%.2f s), peak %.6f on %s\n",
+                static_cast<unsigned long long>(written), seconds, peak, channelText);
     return 0;
 }
 
@@ -274,6 +531,21 @@ int runMonitor(const CommandLine& commandLine) {
     std::vector<float> left(maxBlockFrames);
     std::vector<float> right(maxBlockFrames);
 
+    // Optional capture dump, opened after the endpoint so the file's format is
+    // the negotiated one. A dump that cannot be opened fails the command: a
+    // verification run that silently produced no file would be worse than one
+    // that stopped.
+    WavDump dump;
+    if (!commandLine.monitorDumpPath.empty()) {
+        if (!dump.open(commandLine.monitorDumpPath, format.sampleRate, error)) {
+            std::fprintf(stderr, "Failed to open the capture dump: %s\n", error.c_str());
+            capture.close();
+            return 1;
+        }
+        std::printf("  dump:      %s (16-bit PCM, written after the run)\n",
+                    commandLine.monitorDumpPath.c_str());
+    }
+
     uint64_t frames = 0;
     uint64_t silentPackets = 0;
     uint64_t packets = 0;
@@ -387,6 +659,9 @@ int runMonitor(const CommandLine& commandLine) {
         energySamples += count * 2u;
         if (packetSilent) ++silentPackets;
         frames += count;
+        // The captured samples, before the DSP: this is what the endpoint at the
+        // far end of a route delivered, which is what a verification run measures.
+        dump.write(left.data(), right.data(), count);
 
         stage.processBlock(left.data(), right.data(), count);
 
@@ -410,6 +685,8 @@ int runMonitor(const CommandLine& commandLine) {
     finished.store(true, std::memory_order_release);
     watchdog.join();
     capture.close();
+    // Closed before the report so the file is complete when the summary names it.
+    dump.close();
 
     const double seconds = static_cast<double>(frames) / (format.sampleRate == 0 ? 1 : format.sampleRate);
     const double rms = energySamples == 0 ? 0.0 : std::sqrt(energy / static_cast<double>(energySamples));
@@ -436,6 +713,11 @@ int runMonitor(const CommandLine& commandLine) {
     std::printf("  DSP:           %s, %u applied revision(s)\n",
                 dspModelName(stage.activeModel()),
                 static_cast<unsigned>(stage.appliedRevision()));
+    if (!commandLine.monitorDumpPath.empty()) {
+        std::printf("  dump:          %s (%llu frames written)\n",
+                    commandLine.monitorDumpPath.c_str(),
+                    static_cast<unsigned long long>(dump.frames()));
+    }
 
     if (packets != 0 && peak > 1.0e-9) {
         // Both numbers come from the same captured audio, so their difference is
@@ -516,6 +798,10 @@ int main(int argc, char** argv) {
             return finish(0);
         case Command::selfTest:
             return finish(runSelfTest() == 0 ? 0 : 1);
+        case Command::routeCheck:
+            return finish(runRouteCheck(resolved));
+        case Command::playTone:
+            return finish(runPlayTone(resolved));
         case Command::monitor:
             return finish(runMonitor(resolved));
         case Command::run:

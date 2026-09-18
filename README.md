@@ -109,6 +109,7 @@ Clean은 Circuit와 HighExciter 톤 모델만 우회합니다. Spatial과 Output
 | [오디오 가이드](docs/audio-guide.md) | 모델, 프리셋 수치, PCM 2×, 헤드룸, Source와 Rate Match |
 | [개발 가이드](docs/development.md) | 소스 빌드, 검증 명령, Swift·C++ 구조, 상세 설계 문서 |
 | [Windows 가이드](docs/windows.md) | Windows 빌드, CLI 사용, 제한사항과 검증 범위 |
+| [Windows 가상 케이블 라우팅 검증](docs/windows-routing-validation.md) | VB-CABLE 같은 외부 케이블로 시스템 오디오를 처리하는 이정표의 검증 기록 |
 | [기여 안내](CONTRIBUTING.md) | 버그 신고에 필요한 정보와 변경 제안 방법 |
 | [릴리스 노트](https://github.com/Gomtanga/lowend-circuit/releases) | 버전별 변경 사항과 검증 범위 |
 

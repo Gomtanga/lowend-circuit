@@ -39,8 +39,16 @@ enum ControlId : int {
     idListenerZ,
     idStartStop,
     idStatus,
+    // Labels whose text or visibility depends on the selected model. They are
+    // controls with ids like the rest, so a check can address them by id instead
+    // of matching their text - and two of them say "Output" at different times.
+    idOutputLabel,
+    idIntensityLabel,
+    idBodyLabel,
+    idHarmonicLabel,
+    idModelNote,
     idFirst = idCaptureDevice,
-    idLast = idStatus,
+    idLast = idModelNote,
     controlIdCount = idLast - idFirst + 1,
 };
 
@@ -59,8 +67,39 @@ public:
     Settings readSettings() const;
     EngineOptions readEngineOptions() const;
 
+    // Whether both device combos hold a selection.
+    //
+    // Normally true: refreshDevices() selects the first entry when nothing was
+    // saved. It becomes false when the *saved* endpoint is gone, because then the
+    // honest answer is "choose again" — selecting the first entry would start the
+    // engine on the default endpoint, which is the fallback a saved id must never
+    // silently become.
+    bool hasDeviceSelection() const;
+
+    // Writes the current capture/render selection to the user's own settings
+    // directory. Called when the user changes one, not on refresh: a refresh that
+    // drops a vanished device must not overwrite the id the user chose with the
+    // placeholder that replaced it.
+    void saveDeviceSelection() const;
+
+    // What this machine offers for the virtual-cable route, filled by
+    // refreshDevices() from the same pairing rule the CLI uses. Shown while idle.
+    const std::wstring& virtualCableNote() const { return virtualCableNote_; }
+
     // Pushes settings into the controls (used at startup).
     void writeSettings(const Settings& settings);
+
+    // Applies the affordances the selected model actually uses.
+    //
+    // The exciter keeps the dry signal: its DSP path adds harmonics to it and
+    // never applies the output gain (the macOS app states the same rule and
+    // disables its Output slider for that model). Leaving the slider enabled on
+    // a path that ignores it is a control that does nothing when dragged, so the
+    // Output row is hidden for HighExciter and the exciter's own oversampling
+    // control - which does nothing for the other models - is shown instead. The
+    // two sliders keep their positions but are labelled by what they mean for
+    // the selected model.
+    void applyModelAffordances(const Settings& settings);
 
     // Enables/disables the run controls and flips the button label.
     void setRunning(bool running);
@@ -98,7 +137,10 @@ public:
     static constexpr int statusHeight() { return 276; }
 
 private:
-    void createLabel(const wchar_t* text, int x, int y, int width);
+    HWND createLabel(const wchar_t* text, int x, int y, int width);
+    // Same, for a label a check has to address: the window carries the id, so
+    // addressing it does not depend on matching text that changes with the model.
+    HWND createLabel(ControlId id, const wchar_t* text, int x, int y, int width);
     // The range comes from specFor(id), so callers pass only the geometry.
     void createTrackbar(ControlId id, int x, int y, int width);
     void createValueLabel(ControlId id, int x, int y, int width);
@@ -123,6 +165,10 @@ private:
     // string. Empty for a combo that has not been populated yet.
     std::vector<std::string> captureIds_;
     std::vector<std::string> renderIds_;
+
+    // Filled by refreshDevices() from the engine's virtual-cable pairing rule, so
+    // the window can state what this machine offers without deriving it again.
+    std::wstring virtualCableNote_;
 };
 
 } // namespace lowend::win::gui

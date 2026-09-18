@@ -19,7 +19,11 @@ def run(executable: pathlib.Path, arguments: list) -> subprocess.CompletedProces
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("Usage: check-windows-cli.py /path/to/lowend_windows.exe")
-    executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    try:
+        executable = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    except OSError:
+        raise SystemExit(f"check-windows-cli.py: no such executable: {sys.argv[1]}\n"
+                         "build it first: scripts\\build-windows-cli.bat Release")
 
     rejected = [
         ["--intensity", "inf"],
@@ -40,6 +44,21 @@ def main() -> None:
         ["--monitor", "9999"],
         ["--monitor", "abc"],
         ["--monitor"],
+        ["--play-tone", "0"],
+        ["--play-tone", "9999"],
+        ["--play-tone", "abc"],
+        ["--play-tone"],
+        # The channel selector belongs to the tone source: on any other command it
+        # would do nothing at all, which would read as "the check ran".
+        ["--tone-channel", "sideways"],
+        ["--tone-channel"],
+        ["--tone-channel", "left"],
+        ["--tone-channel", "left", "--monitor", "1"],
+        # The capture dump is filled by --monitor only. Asking for it anywhere else
+        # would either write nothing or keep audio the user did not ask to keep.
+        ["--dump-wav"],
+        ["--dump-wav", ""],
+        ["--dump-wav", "capture.wav"],
         # Device selection: an empty or malformed id must be refused outright
         # rather than quietly falling back to the default endpoint. A silent
         # fallback would hide a typo in a saved id and process the wrong route.
@@ -48,6 +67,12 @@ def main() -> None:
         ["--input-device", ""],
         ["--capture-device", ""],
         ["--loopback", "sometimes"],
+        # --route-check judges a route instead of running it, but it is still one
+        # command: combining it with a bare diagnostic is a mistake, not a
+        # request to print two reports.
+        ["--route-check", "--list-devices"],
+        ["--route-check", "--self-test"],
+        ["--route-check", "--device", ""],
     ]
     # Cases where the exit code alone would not prove the right reason. A
     # contradiction between --input-device and --loopback on must be reported as
@@ -79,6 +104,10 @@ def main() -> None:
         (["--device", ""], "needs a device id"),
         (["--input-device", ""], "needs a device id"),
         (["--capture-device", ""], "needs a device id"),
+        (["--tone-channel"], "needs both, left, or right"),
+        (["--tone-channel", "sideways"], "needs both, left, or right"),
+        (["--tone-channel", "left"], "needs --play-tone"),
+        (["--tone-channel", "right", "--monitor", "1"], "needs --play-tone"),
     ]
     # Missing value and invalid value, for every option macOS also accepts.
     for option, message in macos_message:
@@ -113,9 +142,85 @@ def main() -> None:
     if help_result.returncode != 0:
         raise SystemExit(f"--help exit={help_result.returncode}, expected 0")
     for flag in ("--list-devices", "--self-test", "--dump-settings", "--model",
-                 "--exciter-os", "--buffer-ms", "--monitor"):
+                 "--exciter-os", "--buffer-ms", "--monitor", "--route-check"):
         if flag not in help_result.stdout:
             raise SystemExit(f"--help does not document {flag}")
+
+    # --list-devices and --route-check both resolve endpoints through the audio
+    # endpoint enumerator, which a CI runner may not have at all (the workflow
+    # says so explicitly: the "Report missing audio endpoint" step tolerates it).
+    # The contract is asserted in *both* environments, and it differs: with an
+    # enumerator, the commands answer about real endpoints; without one, they must
+    # report the enumeration failure rather than printing a device list or judging
+    # a route they never saw. Accepting either outcome without checking which one
+    # happened would hide a silent fallback, so each branch asserts its own
+    # message.
+    absent_capture = "{0.0.1.00000000}.{deadbeef-0000-0000-0000-000000000000}"
+    absent_render = "{0.0.0.00000000}.{deadbeef-0000-0000-0000-000000000001}"
+    list_result = run(executable, ["--list-devices"])
+    list_output = list_result.stdout + list_result.stderr
+    if "processing is running" in list_output:
+        raise SystemExit("--list-devices started audio processing")
+
+    if list_result.returncode == 0:
+        # `--list-devices` prints "(none)" for a section with no endpoints, which
+        # is what a hosted runner looks like: the audio stack is there, the
+        # devices are not. That distinction matters below, because the first thing
+        # a route check cannot resolve differs between the two machines.
+        no_outputs = "Output devices (loopback-capable):\n  (none)" in list_result.stdout
+        if "Virtual cables" not in list_result.stdout:
+            raise SystemExit("--list-devices did not report the virtual-cable pairing")
+
+        # An id that no endpoint carries must be refused *by name*: falling back to
+        # another device would process a route the user did not choose, which is
+        # the mistake the selection flags exist to prevent. The capture side is
+        # asserted here because it gives the same answer on every machine: with a
+        # capture id that exists nowhere, the refusal is about that id whether or
+        # not any endpoint is present. An absent *render* id cannot be asserted the
+        # same way on a machine with no endpoints at all, because the capture
+        # side's default endpoint is then what fails to resolve first.
+        route_check = run(executable, ["--route-check", "--input-device", absent_capture])
+        route_output = route_check.stdout + route_check.stderr
+        if route_check.returncode != 1:
+            raise SystemExit(
+                f"--route-check with an absent capture id: exit={route_check.returncode}, "
+                f"expected 1")
+        if "no endpoint with the requested capture id is present" not in route_output:
+            raise SystemExit(
+                "--route-check did not report the absent capture id by name:\n" + route_output)
+        if "Result: REFUSED" not in route_output:
+            raise SystemExit("--route-check did not state the refusal:\n" + route_output)
+        if "opens no stream" not in route_output:
+            raise SystemExit("--route-check did not state that it opens no stream")
+
+        if not no_outputs:
+            route_render = run(executable, ["--route-check", "--device", absent_render])
+            render_output = route_render.stdout + route_render.stderr
+            if route_render.returncode != 1:
+                raise SystemExit(
+                    f"--route-check with an absent render id: exit={route_render.returncode}, "
+                    f"expected 1")
+            if "no endpoint with the requested render id is present" not in render_output:
+                raise SystemExit(
+                    "--route-check did not report the absent render id by name:\n"
+                    + render_output)
+    else:
+        if "Device enumeration failed" not in list_output:
+            raise SystemExit(
+                f"--list-devices failed without reporting a device-enumeration failure:\n"
+                f"{list_output}")
+        route_check = run(executable, ["--route-check", "--device", absent])
+        route_output = route_check.stdout + route_check.stderr
+        if route_check.returncode != 1:
+            raise SystemExit(
+                f"--route-check without an enumerator: exit={route_check.returncode}, expected 1")
+        if "Device enumeration failed" not in route_output:
+            raise SystemExit(
+                "--route-check did not report the enumeration failure it hit:\n" + route_output)
+        if "Result: READY" in route_output:
+            raise SystemExit(
+                "--route-check claimed a usable route on a machine whose endpoints it could not "
+                "enumerate")
 
     # --dump-settings is device-free: it must succeed and print DSP planning.
     dump_result = run(executable, ["--dump-settings"])
@@ -136,7 +241,8 @@ def main() -> None:
 
     print(f"Windows CLI checks passed: {len(rejected)} rejected cases, "
           f"{len(rejected_with_reason)} rejections verified by reason, "
-          f"help, device-free --dump-settings, and --self-test")
+          f"help, device-free --dump-settings and --self-test, the route refusal "
+          f"reason, and the device-instance columns")
 
 
 if __name__ == "__main__":
