@@ -87,9 +87,9 @@ VB-CABLE(VB-Audio Virtual Cable, `VBCABLE_Driver_Pack45`)은 **사용자가 2026
 
 **가상 케이블 설치됨(2026-09-18).** 사용자가 VB-CABLE을 설치한 뒤 `--list-devices`는 `CABLE Input`
 / `CABLE In 16ch` ↔ `CABLE Output`을 한 장치로 묶어 보고합니다. 케이블을 지나는 **핵심 경로는
-실행 검증됐습니다**(3절의 케이블 경로 행). 케이블 경로의 **30분 연속 검증은 첫 실행이 고정 기준을
-통과하지 못했고**(사유·기전·후속 표본은 4절 FAILED), GUI의 케이블 표시와 재개방 가드 항목은 아직
-관찰 전이라 SKIPPED 표에 남아 있습니다.
+실행 검증됐습니다**(3절의 케이블 경로 행). 케이블 경로의 **30분 연속 검증은 2회 실행되어 1차 실패·
+2차 통과**했고(사유·기전·두 표본은 4절 FAILED), **GUI의 케이블 라벨과 시작 안내 분기도 실제 창에서
+관측**했습니다(3절). 재개방 가드의 실기기 충돌 상황 등 남은 항목은 SKIPPED 표에 있습니다.
 
 ## 3. 검증 결과
 
@@ -133,7 +133,11 @@ VB-CABLE(VB-Audio Virtual Cable, `VBCABLE_Driver_Pack45`)은 **사용자가 2026
 | GUI 시작 안내 결함 (자체 발견·수정) | 실행 중인 창의 상태 컨트롤을 직접 읽음 | 창을 열면 상태줄이 `Idle. Choose an output endpoint, then Start.`만 보였습니다. 케이블 안내와 "LowEnd는 Windows 기본 출력을 바꾸지 않는다 + 되돌리는 경로"는 `updateStatusText()`가 만들지만, 시작 시에는 그 함수를 부르지 않고 짧은 리터럴을 설정하고 있었습니다. 이제 `create()`가 장치 목록을 채운 뒤 `updateStatusText()`를 호출하고, GUI end-to-end 검사가 시작 시점에 그 안내(`virtual cable`, `Settings > System > Sound > Output`)가 화면에 있는지 확인합니다. **옛 시작 줄을 주입하면 검사가 실패**하는 것을 확인했습니다 |
 | GUI end-to-end (재확인) | `python scripts\check-windows-gui.py build\win-cli\Release\lowend_gui.exe` | 같은 endpoint 시작 거부 → 입력 장치로 시작 → 통계 진행(20,928 → 165,504) → 실행 중 모델 변경이 오디오 스레드에 반영 → Stop → 재시작 시 통계 초기화(→ 21,792) → 두 번째 Stop → 정상 종료. 상태 텍스트가 박스에 맞음(192/276 px) |
 | **GUI 5종 재실행 (현재 바이너리)** | `check-windows-gui-controls.py` · `-sliders` · `-refresh` · `-persistence` · `check-windows-gui.py`, 전부 `build\win-cli\Release\lowend_gui.exe` | 다섯 검사 모두 **exit 0**. 컨트롤 33개(combo 4·trackbar 7·button 3·static 19)가 760×760 클라이언트 안에 들어가고 겹침 없음 · 실제 드래그 21회에서 모든 readout이 썸을 따라감 · 새로 고침 후 캡처 선택(`Input: 마이크(WO Mic Device)`, index 2)과 라이브 라우트 유지 · 저장된 endpoint 복원, 사라진 endpoint는 콤보를 비우고 Start를 그 사유로 거부, 변경은 사용자 설정 파일에 기록, 한쪽 변경이 반대편의 저장된-없는 id를 지우지 않음(검사가 사용자 파일을 원복) · end-to-end: 통계 **21,792 → 165,984** 프레임, 실행 중 모델 변경이 오디오 스레드에 반영(`HighExciter`), Stop 후 재시작 시 통계 초기화(**165,984 → 22,752 → 167,424**), 두 번째 Stop 정상, 정상 종료. 위 GUI 행들의 수치(20,928 → 165,504 등)는 그때 빌드의 실행값이고, 이 재실행은 **현재 바이너리**에서 같은 동작을 다시 확인한 것입니다 |
+| **GUI의 케이블 표시 (실기기 관측)** | `python scripts\check-windows-gui-controls.py` 로 창을 열고 Win32 `CB_GETLBTEXT`로 콤보 항목을 읽음 | 캡처 콤보: `Input: CABLE Output(VB-Audio Virtual Cable)  [virtual cable: recording side]`(녹음측 표시), `System audio: CABLE Input(…)/CABLE In 16ch(…)  [virtual cable: play into it]`(재생측 표시). 출력 콤보: `CABLE Input(…)`, `CABLE In 16ch(…)`에 재생측 표시. 즉 라벨 분기가 케이블이 있는 머신에서 실제로 켜집니다 |
+| **GUI Idle 안내의 "케이블 감지" 분기 (실기기 관측)** | 같은 창에서 Static 텍스트를 읽음 | `Virtual cable detected: choose Capture "Input: CABLE Output(VB-Audio Virtual Cable)" and Output "스피커(Fosi Audio ZH3)", then set Windows' default output to the cable's playback side. …` + 복구 경로(`Settings > System > Sound > Output`) 문단이 시작 시점에 표시됩니다. 출력 예시가 **물리 장치**를 가리키는 것은 아래 결함 수정의 결과입니다 |
+| **GUI end-to-end (케이블 설치 후 재실행)** | `python scripts\check-windows-gui.py build\win-cli\Release\lowend_gui.exe` | exit 0: 같은 endpoint 시작 거부 → 입력 장치로 시작 → 통계 진행(21,792 → 165,984) → 실행 중 모델 변경 반영 → Stop → 재시작 시 통계 초기화(22,080) → 두 번째 Stop 정상 종료. 시작 안내에 케이블 감지 문구와 복구 경로가 있는지도 검사합니다(신규 단언 포함) |
 | **케이블 짝 판정: 컨테이너가 아니라 장치 인스턴스 (실기기 검증에서 발견·수정)** | VB-CABLE 설치 후 `--list-devices` · `--route-check` | 짝 판정이 `PKEY_Device_ContainerId`를 비교했는데, Windows는 **root 열거(소프트웨어) 장치 전부에 같은 zero 컨테이너** `{00000000-0000-0000-FFFF-FFFFFFFFFFFF}`를 줍니다(VB-Audio 3개 endpoint·WO Mic·Realtek·NVIDIA가 모두 같은 값). 그 결과 ① 목록이 `CABLE Input → 마이크(WO Mic Device)` 같은 **실제로는 없는 짝**을 인쇄했고 ② 순환 가드가 **안전한 조합**(예: WO Mic 캡처 + CABLE Input 렌더)을 순환으로 오판할 수 있었습니다. 실제 구분자는 엔드포인트 속성 `{b3f8fa53-…},2`의 **PnP 인스턴스**(`ROOT\MEDIA\0001` vs `ROOT\MEDIA\0000`, ZH3는 `USB\VID_152A&…`)입니다. 이제 판정·키·거부 메시지가 모두 장치 인스턴스를 쓰고, 컨테이너는 **실제 값일 때만** fallback으로 씁니다. 수정 후 목록은 VB-CABLE 내부 조합 2줄만 남고 WO Mic는 "식별 불가" 절로 분리됩니다. `--self-test`에 회귀 3건 추가, **주입 시험에서 컨테이너 전용 판정으로 되돌리면 그 3건이 각각 다른 메시지로 실패**함을 확인 |
+| **GUI 시작 안내가 출력으로 케이블 재생측을 가리킴 (실기기 검증에서 발견·수정)** | 창을 열어 Static 텍스트를 읽음 | 케이블이 있으면 `virtualCableNote_`가 Output 예시로 케이블의 **재생측** 이름(`CABLE In 16ch`)을 넣어 `Output "CABLE In 16ch(…)…-style physical device"`라고 표시했습니다. 이정표 경로의 출력은 **물리 장치**이고, 안내가 시키는 대로 케이블 재생측을 고르면 가드가 정당하게 거부합니다(사용자에게 모순된 지시). 이제 목록에서 **케이블이 아닌 출력**(기본 출력 우선)을 골라 이름을 넣고, 그런 장치가 없으면 "your physical output device"로 남깁니다. `check-windows-gui.py`에 **출력 예시가 케이블 재생측 이름을 포함하면 실패**하는 단언을 추가했고, **주입 시험(안내가 다시 케이블을 가리키게 되돌림)에서 그 검사가 exit 1로 실패**함을 확인했습니다 |
 | 스크립트 인자 오류 (자체 발견·수정) | 각 검사 스크립트에 존재하지 않는 실행 파일 경로를 주고 실행 | 12개 검사 스크립트 전부 `pathlib`의 `FileNotFoundError` **트레이스백**을 내고 있었습니다 — 사용자가 안내서의 명령을 잘못된 빌드 경로로 실행하면 스크립트가 깨진 것처럼 보입니다. 이제 각 스크립트가 **자기 이름과 찾지 못한 경로**를 밝히고 빌드 명령을 안내한 뒤 **exit 1**로 끝냅니다(`check-native-cli.py`는 앱 경로를 받으므로 빌드 안내 없이 경로만). 12개 전부 트레이스백 없음·exit 1·자기 이름 표기 확인, 실제 실행은 그대로 통과(`check-windows-cli.py` 33 거부 케이스) |
 | **안정성 검사기: 긴 실행의 통계를 중간부터 잃음 (자체 발견·수정)** | `check-windows-route-stability.py`로 30분 + 10회 실행 | 검사기가 자식의 파이프를 **읽지 않고** 잠든 뒤 마지막에 한 번만 수집했습니다. 엔진이 2초마다 찍는 통계가 64 KiB 파이프 버퍼를 약 97초에 채우고 그 뒤 출력은 버려져, **30분 실행이 첫 ~98초 샘플(프레임 4,643,904 ≈ 96.75초)만으로 "통과"**했습니다 — 판정 대상 구간은 건강했지만 **주장한 구간을 덮지 않았습니다**(검증 범위 ≠ 주장 범위). 이제 `start()`가 드레인 스레드를 띄워 실행 중 계속 읽고, `judge_run`이 **샘플이 요청 구간을 덮지 않으면 실패**로 판정합니다(커버리지 기준 신설). **검증**: 고정 버전은 2분 실행에서 샘플 118초·exit 0, old capture 동작으로 되돌린 mutant는 `only 98.0 s of statistics were captured for a 120 s run`으로 **exit 1** |
 | **안정성 검사기: 순간적인 `buffer 0`을 고갈로 판정 (자체 발견·수정)** | 같은 30분 실행에서 | 기준이 프라이밍 후 `buffered == 0` **한 번**만으로 실패를 냈습니다. 그러나 이 브랜치의 기존 실측이 "렌더 버퍼 잔량이 0~3192 프레임에서 정상 진동(고갈이 아니라 평형)"이라고 기록하고 있고, 그 실행에서 **underrun은 증가하지 않았습니다**(4992 고정) — 렌더가 제때 공급받았다는 뜻입니다. 이제 **프라이밍 이후 샘플의 10% 초과가 0일 때만** 고갈로 판정하고, 순간 0은 보고 숫자(`buffer a..b`)로 남깁니다. **검증**: 같은 2분 실행이 `buffer 0..3840`·exit 0으로 통과 |
@@ -158,16 +162,23 @@ VB-CABLE(VB-Audio Virtual Cable, `VBCABLE_Driver_Pack45`)은 **사용자가 2026
 | 위 실패의 기전 | 엔진 코드: `runCapture()`가 `isDiscontinuity()`를 보면 `lc_ring_buffer_request_discard()`를 걸고, `runRender()`가 그 요청을 소비해 **백로그를 버리고 DSP 상태를 리셋**합니다(문서화된 정책: 끊긴 뒤의 오래된 오디오를 이어 붙이지 않음). 버린 백로그만큼 렌더가 무음을 쓰고, 그 무음은 링이 정직하게 underrun으로 셉니다. 같은 정책이 캡처 스트림 재개방에도 적용됩니다 | 이 실행의 +6,528 샘플은 그 재프라이밍 구간이며, **무음을 숨기거나 이전 샘플을 재생해서 없애지 않습니다**(이정표가 금지). 장치 오류·드롭·정체는 없었습니다 |
 
 **정리**: 이 실패는 환경 부재가 아니라 실제로 관찰된 결과이며, 회피하지 않고 위에 그대로 기록합니다.
-같은 고정 기준으로 추가 표본을 실행해 재현 여부를 확인합니다(아래 3절 표에 결과를 함께 기록).
+같은 고정 기준으로 **두 번째 표본**을 실행했고, 그 결과는 다음과 같습니다.
+
+| 항목 | 명령 | 관찰 |
+|---|---|---|
+| **케이블 경로 30분 연속 (2차 실행, 통과)** | 같은 명령을 같은 endpoint로 재실행 | **exit 0 · `route stability checks passed`**, 벽시계 1,882.60초. 사이클 10/10 정상(각 8.0초, dropped 0·장치 오류 0/0·Resyncs 1). 연속 구간 30.0분: frames **86,353,536**, dropped **0**, 장치 오류 **0/0**, **Resyncs 1**(실행 중 재개방·불연속 없음), **underrun 5,952 고정**(프라이밍 이후 증가 **0**), buffer 0..5,568(1/4분위 평균 2,286 → 4/4분위 3,365, 기울기 +0.83/s) |
+
+**두 표본의 판정**: 1차는 실행 중 캡처 스트림 불연속 1회로 기준을 넘겼고(기전은 위에 기록), 2차는 같은
+경로·같은 기준에서 30분 내내 증가 없이 통과했습니다. 즉 이 기준은 **재현되지 않는 간헐적 이벤트**에
+반응한 것이며, **두 실행을 모두 기록**합니다 — 2차 통과로 1차 실패를 지우지 않습니다. 케이블 경로의
+안정성은 "2회 중 1회 실패, 실패 기전은 문서화됨"으로 남기고, "항상 안정"이라고 주장하지 않습니다.
+3차 실행은 하지 않았습니다(같은 실패에 대한 근거 없는 반복을 피하기 위해).
 
 ### SKIPPED (관찰하지 못했으므로 성공의 근거가 아님)
 
 | 항목 | 이유 | 필요한 것 |
 |---|---|---|
-| **케이블 경로에서의 30분 안정성 · 정지/재시작 10회** | 케이블 설치 후 실행 중이며, 판정이 나오면 3절로 옮깁니다. 그 전까지는 검증된 것으로 세지 않습니다 | (실행 중) |
-| **GUI의 케이블 표시**(`[virtual cable: play into it]` / `[virtual cable: recording side]`) | 목록은 엔진의 `findVirtualCables` 결과로 라벨을 붙이므로 케이블이 있어야 그 분기가 실행됩니다. 순수 판정 규칙과 `--list-devices`의 짝 표시는 오프라인 검사·실제 출력으로 확인했지만, **GUI 라벨 자체는 아직 관찰하지 않았습니다** | 케이블 + GUI |
-| **케이블 쌍에 대한 재개방 시점 가드(실기기)** | 규칙은 `--self-test`(합성 endpoint)로, 재개방 경로는 정책 단위로 검증했고 케이블 경로의 정지/재시작 10회가 그 재개방을 지나갑니다. **두 케이블 endpoint가 한 실행에서 충돌하는 상황 자체는 아직 관찰하지 않았습니다** | 케이블 + ZH3 |
-| **GUI Idle 안내의 "케이블 감지" 분기** | 케이블이 없을 때의 `No virtual cable endpoint detected…` 분기만 화면에서 확인했습니다. 케이블이 있을 때의 `Virtual cable detected: …` 분기는 아직 미관찰 | 케이블 + GUI |
+| **케이블 쌍에 대한 재개방 시점 가드(실기기)** | 규칙은 `--self-test`(합성 endpoint)로, 재개방 경로는 정책 단위로 검증했고 케이블 경로의 정지/재시작 10회가 그 재개방을 지나갑니다(2회 실행, 20사이클 전부 정상). **두 케이블 endpoint가 한 실행에서 충돌하는 상황 자체는 아직 관찰하지 않았습니다** | 케이블 + ZH3 |
 | 물리 USB 탈착·Bluetooth 실행 검증 | 관리자 권한/장치 없음 | 별도 환경 |
 | 사람의 청취 평가 | 이 문서가 주장하지 않는 영역 | 사람 |
 
